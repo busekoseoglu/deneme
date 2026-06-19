@@ -1,10 +1,10 @@
 from ortools.sat.python import cp_model
 import pandas as pd
-from itertools import combinations
+import re
 
 
 # ============================================================
-# MODEL V4
+# MODEL V5
 #
 # Hard constraints:
 # 1. Shift + skill demand karşılanır
@@ -19,15 +19,24 @@ from itertools import combinations
 # 10. Max 6 gün üst üste çalışma
 #
 # Soft objective:
-# 11. Aynı ekipteki kişileri mümkün olduğunca aynı vardiyada tut
-#     - Normal-normal birlikte kalırsa yüksek reward
-#     - Normal-özel birlikte kalırsa düşük reward
-#     - Özel-özel birlikte kalırsa çok düşük reward
+# 11. Her team + gün için bir ana vardiya seçilir.
+# 12. Normal çalışan ana vardiyadan ayrılırsa yüksek ceza.
+# 13. Özel durumlu çalışan ayrılırsa düşük ceza.
+# 14. Team birden fazla vardiyaya bölünürse ayrıca ceza.
 # ============================================================
 
 
 # ============================================================
-# 1. Display helper
+# 1. Parameters
+# ============================================================
+
+NORMAL_SPLIT_PENALTY = 100
+SPECIAL_SPLIT_PENALTY = 20
+EXTRA_TEAM_SHIFT_PENALTY = 30
+
+
+# ============================================================
+# 2. Display helper
 # ============================================================
 
 def safe_display(df, name=None, n=30):
@@ -40,8 +49,14 @@ def safe_display(df, name=None, n=30):
         print(df.head(n))
 
 
+def safe_var_name(value):
+    value = str(value)
+    value = re.sub(r"[^a-zA-Z0-9_]", "_", value)
+    return value[:80]
+
+
 # ============================================================
-# 2. Helper functions
+# 3. Helper functions
 # ============================================================
 
 def get_weekday(date_str):
@@ -49,13 +64,6 @@ def get_weekday(date_str):
 
 
 def is_special_employee(e, model_inputs):
-    """
-    Özel durumlu çalışan:
-    - hamile
-    - süt izni
-    - sadece sabah çalışabilir
-    """
-
     return (
         model_inputs["employee_hamile"].get(e, 0) == 1
         or model_inputs["employee_sut_izni"].get(e, 0) == 1
@@ -63,33 +71,13 @@ def is_special_employee(e, model_inputs):
     )
 
 
-def get_team_pair_reward_weight(e1, e2, model_inputs):
-    """
-    Aynı ekipte iki kişi aynı vardiyada kalırsa verilecek reward.
-
-    Normal-normal: yüksek reward
-    Normal-özel: düşük reward
-    Özel-özel: çok düşük reward
-    """
-
-    e1_special = is_special_employee(e1, model_inputs)
-    e2_special = is_special_employee(e2, model_inputs)
-
-    if not e1_special and not e2_special:
-        return 10
-
-    if e1_special and e2_special:
-        return 1
-
-    return 2
+def get_employee_split_penalty(e, model_inputs):
+    if is_special_employee(e, model_inputs):
+        return SPECIAL_SPLIT_PENALTY
+    return NORMAL_SPLIT_PENALTY
 
 
 def is_employee_allowed_for_shift(e, sh, model_inputs, config):
-    """
-    Employee e, shift sh'ye atanabilir mi?
-    False dönerse o employee-shift için değişken oluşturulmaz.
-    """
-
     shift_date = model_inputs["shift_date"]
     shift_end_dt = model_inputs["shift_end_dt"]
     shift_duration = model_inputs["shift_duration"]
@@ -103,21 +91,17 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
     date_str = str(shift_date[sh])
     weekday = get_weekday(date_str)
 
-    # Pazartesi izinli olan pazartesi çalışamaz
     if employee_pazartesi_izinli.get(e, 0) == 1 and weekday == "monday":
         return False
 
-    # Cuma izinli olan cuma çalışamaz
     if employee_cuma_izinli.get(e, 0) == 1 and weekday == "friday":
         return False
 
-    # Günlük çalışma süresi max 9 saat
     max_daily_minutes = config["shift_rules"]["max_daily_work_minutes"]
 
     if shift_duration[sh] > max_daily_minutes:
         return False
 
-    # Sabah çalışan / hamile / süt izni olanlar 20:00 sonrası biten shifte atanamaz
     day_only = (
         employee_sabah_calisir.get(e, 0) == 1
         or employee_hamile.get(e, 0) == 1
@@ -131,7 +115,6 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
         if shift_end_dt[sh] > latest_allowed_end_dt:
             return False
 
-    # Hamileler hafta sonu ve resmi tatilde çalışamaz
     if employee_hamile.get(e, 0) == 1:
         if weekday in ["saturday", "sunday"]:
             return False
@@ -145,10 +128,10 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
 
 
 # ============================================================
-# 3. Build OR-Tools model
+# 4. Build OR-Tools model
 # ============================================================
 
-def build_assignment_model_v4(model_inputs, config):
+def build_assignment_model_v5(model_inputs, config):
     model = cp_model.CpModel()
 
     employees = model_inputs["employees"]
@@ -166,8 +149,7 @@ def build_assignment_model_v4(model_inputs, config):
     assign = {}
 
     # ------------------------------------------------------------
-    # 3.1 Karar değişkenleri
-    # assign[e, sh] = 1 ise employee e, shift sh'ye atanır
+    # 4.1 Employee-shift assignment variables
     # ------------------------------------------------------------
 
     for e in employees:
@@ -187,10 +169,12 @@ def build_assignment_model_v4(model_inputs, config):
             ):
                 continue
 
-            assign[e, sh] = model.NewBoolVar(f"assign_{e}_{sh}")
+            assign[e, sh] = model.NewBoolVar(
+                f"assign_{safe_var_name(e)}_{safe_var_name(sh)}"
+            )
 
     # ------------------------------------------------------------
-    # 3.2 Her shift + skill_group için required_count kadar agent atanmalı
+    # 4.2 Demand coverage
     # ------------------------------------------------------------
 
     for (sh, skill), required in required_count.items():
@@ -209,7 +193,7 @@ def build_assignment_model_v4(model_inputs, config):
         model.Add(sum(assign[e, sh] for e in eligible_agents) == required)
 
     # ------------------------------------------------------------
-    # 3.3 Bir agent aynı gün en fazla 1 vardiya alabilir
+    # 4.3 One shift per employee per day
     # ------------------------------------------------------------
 
     dates = sorted(set(str(d) for d in shift_date.values()))
@@ -226,7 +210,7 @@ def build_assignment_model_v4(model_inputs, config):
                 model.Add(sum(employee_shift_vars_on_day) <= 1)
 
     # ------------------------------------------------------------
-    # 3.4 İki vardiya arası minimum 11 saat dinlenme
+    # 4.4 Minimum 11 hours rest between shifts
     # ------------------------------------------------------------
 
     min_rest_hours = config["constraints"]["min_rest_between_shifts"]["min_rest_hours"]
@@ -259,8 +243,7 @@ def build_assignment_model_v4(model_inputs, config):
                     break
 
     # ------------------------------------------------------------
-    # 3.5 Max 6 gün üst üste çalışma
-    # Her 7 günlük pencerede en fazla 6 çalışma günü olabilir.
+    # 4.5 Max 6 consecutive working days
     # ------------------------------------------------------------
 
     max_days = config["constraints"]["max_consecutive_work_days"]["max_days"]
@@ -288,15 +271,7 @@ def build_assignment_model_v4(model_inputs, config):
                 model.Add(sum(vars_in_window) <= max_days)
 
     # ------------------------------------------------------------
-    # 3.6 Soft team same shift objective
-    #
-    # Mantık:
-    # Aynı ekipteki iki kişi aynı gün aynı vardiyaya atanırsa reward veriyoruz.
-    #
-    # Normal-normal aynı kalırsa reward yüksek.
-    # Normal-özel aynı kalırsa reward düşük.
-    # Böylece ekip mümkünse birlikte kalıyor,
-    # ama özel durumlu kişi ayrışmak zorunda kalırsa model bunu tolere ediyor.
+    # 4.6 Team main shift objective
     # ------------------------------------------------------------
 
     objective_terms = []
@@ -321,46 +296,126 @@ def build_assignment_model_v4(model_inputs, config):
 
         shifts_by_date[d].append(sh)
 
-    same_team_same_shift_var_count = 0
+    team_work_day = {}
+    team_shift_used = {}
+    team_main_shift = {}
+    employee_split = {}
+    extra_team_shift = {}
 
     for team_id, members in team_members.items():
-        if len(members) < 2:
-            continue
-
-        member_pairs = list(combinations(members, 2))
+        team_name = safe_var_name(team_id)
 
         for d, day_shifts in shifts_by_date.items():
-            for e1, e2 in member_pairs:
-                weight = get_team_pair_reward_weight(e1, e2, model_inputs)
+            date_name = safe_var_name(d)
+
+            team_day_assignment_vars = [
+                assign[e, sh]
+                for e in members
+                for sh in day_shifts
+                if (e, sh) in assign
+            ]
+
+            if not team_day_assignment_vars:
+                continue
+
+            work_day_var = model.NewBoolVar(
+                f"team_work_day_{team_name}_{date_name}"
+            )
+
+            team_work_day[team_id, d] = work_day_var
+
+            for var in team_day_assignment_vars:
+                model.Add(work_day_var >= var)
+
+            model.Add(work_day_var <= sum(team_day_assignment_vars))
+
+            main_shift_vars_for_day = []
+
+            for sh in day_shifts:
+                shift_name = safe_var_name(sh)
+
+                member_shift_vars = [
+                    assign[e, sh]
+                    for e in members
+                    if (e, sh) in assign
+                ]
+
+                used_var = model.NewBoolVar(
+                    f"team_shift_used_{team_name}_{date_name}_{shift_name}"
+                )
+
+                main_var = model.NewBoolVar(
+                    f"team_main_shift_{team_name}_{date_name}_{shift_name}"
+                )
+
+                team_shift_used[team_id, d, sh] = used_var
+                team_main_shift[team_id, d, sh] = main_var
+
+                if member_shift_vars:
+                    for var in member_shift_vars:
+                        model.Add(used_var >= var)
+
+                    model.Add(used_var <= sum(member_shift_vars))
+                else:
+                    model.Add(used_var == 0)
+
+                model.Add(main_var <= used_var)
+
+                main_shift_vars_for_day.append(main_var)
+
+            model.Add(sum(main_shift_vars_for_day) == work_day_var)
+
+            for sh in day_shifts:
+                used_var = team_shift_used[team_id, d, sh]
+                main_var = team_main_shift[team_id, d, sh]
+
+                extra_var = model.NewBoolVar(
+                    f"extra_team_shift_{team_name}_{date_name}_{safe_var_name(sh)}"
+                )
+
+                extra_team_shift[team_id, d, sh] = extra_var
+
+                model.Add(extra_var <= used_var)
+                model.Add(extra_var <= 1 - main_var)
+                model.Add(extra_var >= used_var - main_var)
+
+                objective_terms.append(EXTRA_TEAM_SHIFT_PENALTY * extra_var)
+
+            for e in members:
+                employee_penalty = get_employee_split_penalty(e, model_inputs)
 
                 for sh in day_shifts:
-                    if (e1, sh) not in assign:
+                    if (e, sh) not in assign:
                         continue
 
-                    if (e2, sh) not in assign:
-                        continue
+                    main_var = team_main_shift[team_id, d, sh]
 
-                    same_shift_var = model.NewBoolVar(
-                        f"same_team_shift_{team_id}_{d}_{e1}_{e2}_{sh}"
+                    split_var = model.NewBoolVar(
+                        f"employee_split_{safe_var_name(e)}_{team_name}_{date_name}_{safe_var_name(sh)}"
                     )
 
-                    model.Add(same_shift_var <= assign[e1, sh])
-                    model.Add(same_shift_var <= assign[e2, sh])
-                    model.Add(same_shift_var >= assign[e1, sh] + assign[e2, sh] - 1)
+                    employee_split[e, d, sh] = split_var
 
-                    objective_terms.append(weight * same_shift_var)
-                    same_team_same_shift_var_count += 1
+                    model.Add(split_var <= assign[e, sh])
+                    model.Add(split_var <= 1 - main_var)
+                    model.Add(split_var >= assign[e, sh] - main_var)
 
-    print(f"Soft team same shift objective var sayısı: {same_team_same_shift_var_count}")
+                    objective_terms.append(employee_penalty * split_var)
+
+    print(f"Team work day var sayısı: {len(team_work_day)}")
+    print(f"Team shift used var sayısı: {len(team_shift_used)}")
+    print(f"Team main shift var sayısı: {len(team_main_shift)}")
+    print(f"Employee split var sayısı: {len(employee_split)}")
+    print(f"Extra team shift var sayısı: {len(extra_team_shift)}")
 
     if objective_terms:
-        model.Maximize(sum(objective_terms))
+        model.Minimize(sum(objective_terms))
 
     return model, assign
 
 
 # ============================================================
-# 4. Solve model
+# 5. Solve model
 # ============================================================
 
 def solve_model(model, time_limit_seconds=600):
@@ -377,7 +432,7 @@ def solve_model(model, time_limit_seconds=600):
 
 
 # ============================================================
-# 5. Extract roster
+# 6. Extract roster
 # ============================================================
 
 def extract_roster(solver, status, assign, model_inputs):
@@ -420,14 +475,14 @@ def extract_roster(solver, status, assign, model_inputs):
 
     if not roster_df.empty:
         roster_df = roster_df.sort_values(
-            ["date", "team_id", "shift_start", "skill_group", "employee_name"]
+            ["date", "team_id", "shift_start", "employee_name"]
         ).reset_index(drop=True)
 
     return roster_df
 
 
 # ============================================================
-# 6. Hard constraint checks
+# 7. Hard constraint checks
 # ============================================================
 
 def check_demand_coverage(roster_df, shift_demand_long_df):
@@ -663,14 +718,14 @@ def check_max_consecutive_work_days(roster_df, max_days=6, window_days=7):
 
 
 # ============================================================
-# 7. Team consistency analysis
+# 8. Team consistency analysis
 # ============================================================
 
 def analyze_team_consistency(roster_df):
     df = roster_df.copy()
 
     if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     rows = []
 
@@ -782,11 +837,11 @@ def get_split_team_members(roster_df, team_id, date):
 
 
 # ============================================================
-# 8. Run everything
+# 9. Run everything
 # ============================================================
 
-def run_model_v4(model_inputs, constraints_config, shift_demand_long_df, time_limit_seconds=600):
-    model, assign = build_assignment_model_v4(
+def run_model_v5(model_inputs, constraints_config, shift_demand_long_df, time_limit_seconds=600):
+    model, assign = build_assignment_model_v5(
         model_inputs=model_inputs,
         config=constraints_config
     )
@@ -802,9 +857,6 @@ def run_model_v4(model_inputs, constraints_config, shift_demand_long_df, time_li
         assign=assign,
         model_inputs=model_inputs
     )
-
-    print("\nRoster sample:")
-    safe_display(roster_df.head(20))
 
     comparison_df = check_demand_coverage(
         roster_df=roster_df,
@@ -834,27 +886,6 @@ def run_model_v4(model_inputs, constraints_config, shift_demand_long_df, time_li
         roster_df=roster_df
     )
 
-    print("\nDemand coverage farkı olan satırlar:")
-    safe_display(comparison_df[comparison_df["diff"] != 0] if not comparison_df.empty else comparison_df)
-
-    print("\nAynı gün birden fazla vardiya alan agentlar:")
-    safe_display(daily_assignment_problem_df)
-
-    print("\nEmployee kısıt violation summary:")
-    safe_display(employee_constraint_summary_df)
-
-    print("\n11 saat dinlenme violation:")
-    safe_display(min_rest_violation_df)
-
-    print("\nMax 6 gün üst üste çalışma violation:")
-    safe_display(consecutive_violation_df)
-
-    print("\nTeam consistency summary:")
-    safe_display(team_consistency_summary_df)
-
-    print("\nBölünen team-day örnekleri:")
-    safe_display(split_team_days_df.head(50))
-
     objective_value = None
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -871,6 +902,32 @@ def run_model_v4(model_inputs, constraints_config, shift_demand_long_df, time_li
     print(f"Max 6 gün üst üste violation sayısı: {len(consecutive_violation_df)}")
     print(f"Bölünen team-day sayısı: {len(split_team_days_df)}")
 
+    print("\nTeam consistency summary:")
+    safe_display(team_consistency_summary_df)
+
+    team_check_simple_df = split_team_days_df[
+        [
+            "date",
+            "team_id",
+            "working_count",
+            "shift_count",
+            "majority_shift_start",
+            "majority_shift_end",
+            "majority_count",
+            "split_count",
+            "normal_split_count",
+            "special_split_count"
+        ]
+    ].copy()
+
+    team_check_simple_df = team_check_simple_df.sort_values(
+        ["normal_split_count", "split_count"],
+        ascending=False
+    ).reset_index(drop=True)
+
+    print("\nEn problemli bölünen team-day örnekleri:")
+    safe_display(team_check_simple_df.head(50))
+
     return {
         "model": model,
         "assign": assign,
@@ -885,21 +942,23 @@ def run_model_v4(model_inputs, constraints_config, shift_demand_long_df, time_li
         "consecutive_violation_df": consecutive_violation_df,
         "team_consistency_df": team_consistency_df,
         "split_team_days_df": split_team_days_df,
-        "team_consistency_summary_df": team_consistency_summary_df
+        "team_consistency_summary_df": team_consistency_summary_df,
+        "team_check_simple_df": team_check_simple_df
     }
 
 
 # ============================================================
-# 9. Execute
+# 10. Execute
 # ============================================================
 
-results_v4 = run_model_v4(
+results_v5 = run_model_v5(
     model_inputs=model_inputs,
     constraints_config=constraints_config,
     shift_demand_long_df=shift_demand_long_df,
     time_limit_seconds=600
 )
 
-roster_df = results_v4["roster_df"]
-split_team_days_df = results_v4["split_team_days_df"]
-team_consistency_summary_df = results_v4["team_consistency_summary_df"]
+roster_df = results_v5["roster_df"]
+split_team_days_df = results_v5["split_team_days_df"]
+team_check_simple_df = results_v5["team_check_simple_df"]
+team_consistency_summary_df = results_v5["team_consistency_summary_df"]

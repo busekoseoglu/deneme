@@ -1,42 +1,74 @@
+"""
+model_v6_team_week_main_shift.py
+
+Bu dosya vardiya atama modelinin V6 versiyonudur.
+
+Girdi olarak notebook içinde şu değişkenlerin hazır olduğunu varsayar:
+- model_inputs
+- constraints_config
+- shift_demand_long_df
+
+Kullanım:
+
+    exec(open("model_v6_team_week_main_shift.py", encoding="utf-8").read())
+
+    results_v6 = run_model_v6(
+        model_inputs=model_inputs,
+        constraints_config=constraints_config,
+        shift_demand_long_df=shift_demand_long_df,
+        time_limit_seconds=600
+    )
+
+    roster_df = results_v6["roster_df"]
+    team_check_simple_df = results_v6["team_check_simple_df"]
+    team_week_check_df = results_v6["team_week_check_df"]
+
+Model mantığı:
+
+Hard constraints:
+1. Shift + skill demand karşılanır
+2. Agent sadece kendi skill_group’una atanır
+3. Agent aynı gün max 1 vardiya alır
+4. Pazartesi izinli pazartesi çalışmaz
+5. Cuma izinli cuma çalışmaz
+6. Sabah çalışan / hamile / süt izni 20:00 sonrası çalışmaz
+7. Hamileler hafta sonu ve resmi tatilde çalışmaz
+8. Günlük çalışma süresi max 9 saat
+9. İki vardiya arası minimum 11 saat dinlenme
+10. Max 6 gün üst üste çalışma
+
+Soft objective:
+11. Her team + week için bir ana shift pattern seçilir.
+12. Normal çalışan haftalık ana pattern dışına çıkarsa yüksek ceza alır.
+13. Özel durumlu çalışan haftalık ana pattern dışına çıkarsa düşük ceza alır.
+14. Team aynı hafta içinde çok fazla farklı shift pattern’e yayılırsa ek ceza alır.
+
+Not:
+- Haftalık ana vardiya soft objective’tir.
+- Pazartesi/cuma izinleri, hamile/süt izni/sabah çalışan kuralları hard constraint olarak kalır.
+"""
+
 from ortools.sat.python import cp_model
 import pandas as pd
 import re
 
 
 # ============================================================
-# MODEL V5
-#
-# Hard constraints:
-# 1. Shift + skill demand karşılanır
-# 2. Agent sadece kendi skill_group’una atanır
-# 3. Agent aynı gün max 1 vardiya alır
-# 4. Pazartesi izinli pazartesi çalışmaz
-# 5. Cuma izinli cuma çalışmaz
-# 6. Sabah çalışan / hamile / süt izni 20:00 sonrası çalışmaz
-# 7. Hamileler hafta sonu ve resmi tatilde çalışmaz
-# 8. Günlük çalışma süresi max 9 saat
-# 9. İki vardiya arası minimum 11 saat dinlenme
-# 10. Max 6 gün üst üste çalışma
-#
-# Soft objective:
-# 11. Her team + gün için bir ana vardiya seçilir.
-# 12. Normal çalışan ana vardiyadan ayrılırsa yüksek ceza.
-# 13. Özel durumlu çalışan ayrılırsa düşük ceza.
-# 14. Team birden fazla vardiyaya bölünürse ayrıca ceza.
-# ============================================================
-
-
-# ============================================================
 # 1. Parameters
 # ============================================================
 
-NORMAL_SPLIT_PENALTY = 100
-SPECIAL_SPLIT_PENALTY = 20
-EXTRA_TEAM_SHIFT_PENALTY = 30
+# Normal çalışan ana haftalık vardiya pattern'inden ayrılırsa ceza
+NORMAL_SPLIT_PENALTY = 500
+
+# Hamile / süt izni / sabah çalışır gibi özel durumlu çalışan ayrılırsa ceza
+SPECIAL_SPLIT_PENALTY = 50
+
+# Bir ekip aynı hafta ana pattern dışında ekstra pattern kullanırsa ceza
+EXTRA_TEAM_SHIFT_PATTERN_PENALTY = 200
 
 
 # ============================================================
-# 2. Display helper
+# 2. Utility helpers
 # ============================================================
 
 def safe_display(df, name=None, n=30):
@@ -46,7 +78,10 @@ def safe_display(df, name=None, n=30):
     try:
         display(df)
     except NameError:
-        print(df.head(n))
+        if isinstance(df, pd.DataFrame):
+            print(df.head(n))
+        else:
+            print(df)
 
 
 def safe_var_name(value):
@@ -55,15 +90,35 @@ def safe_var_name(value):
     return value[:80]
 
 
-# ============================================================
-# 3. Helper functions
-# ============================================================
-
 def get_weekday(date_str):
     return pd.to_datetime(date_str).day_name().lower()
 
 
+def get_week_key(date_str):
+    """
+    ISO hafta bilgisini döndürür.
+    Örnek: 2026-W23
+    """
+    dt = pd.to_datetime(date_str)
+    iso = dt.isocalendar()
+    return f"{iso.year}-W{str(iso.week).zfill(2)}"
+
+
+def get_shift_pattern(sh, model_inputs):
+    """
+    Aynı saat aralığına sahip shiftleri aynı pattern olarak görür.
+    Örnek: 09:00-18:00
+    """
+    return f"{model_inputs['shift_start'][sh]}-{model_inputs['shift_end'][sh]}"
+
+
 def is_special_employee(e, model_inputs):
+    """
+    Özel durumlu çalışan:
+    - hamile
+    - süt izni
+    - sadece sabah çalışabilir
+    """
     return (
         model_inputs["employee_hamile"].get(e, 0) == 1
         or model_inputs["employee_sut_izni"].get(e, 0) == 1
@@ -78,6 +133,13 @@ def get_employee_split_penalty(e, model_inputs):
 
 
 def is_employee_allowed_for_shift(e, sh, model_inputs, config):
+    """
+    Employee e, shift sh'ye atanabilir mi?
+
+    False dönerse bu employee-shift için karar değişkeni oluşturulmaz.
+    Yani kişi o shifte atanamaz.
+    """
+
     shift_date = model_inputs["shift_date"]
     shift_end_dt = model_inputs["shift_end_dt"]
     shift_duration = model_inputs["shift_duration"]
@@ -91,17 +153,20 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
     date_str = str(shift_date[sh])
     weekday = get_weekday(date_str)
 
+    # Pazartesi izinli olan pazartesi çalışamaz
     if employee_pazartesi_izinli.get(e, 0) == 1 and weekday == "monday":
         return False
 
+    # Cuma izinli olan cuma çalışamaz
     if employee_cuma_izinli.get(e, 0) == 1 and weekday == "friday":
         return False
 
+    # Günlük çalışma süresi max 9 saat
     max_daily_minutes = config["shift_rules"]["max_daily_work_minutes"]
-
     if shift_duration[sh] > max_daily_minutes:
         return False
 
+    # Sabah çalışan / hamile / süt izni olanlar 20:00 sonrası biten shifte atanamaz
     day_only = (
         employee_sabah_calisir.get(e, 0) == 1
         or employee_hamile.get(e, 0) == 1
@@ -115,6 +180,7 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
         if shift_end_dt[sh] > latest_allowed_end_dt:
             return False
 
+    # Hamileler hafta sonu ve resmi tatilde çalışamaz
     if employee_hamile.get(e, 0) == 1:
         if weekday in ["saturday", "sunday"]:
             return False
@@ -128,10 +194,10 @@ def is_employee_allowed_for_shift(e, sh, model_inputs, config):
 
 
 # ============================================================
-# 4. Build OR-Tools model
+# 3. Build OR-Tools model
 # ============================================================
 
-def build_assignment_model_v5(model_inputs, config):
+def build_assignment_model_v6(model_inputs, config):
     model = cp_model.CpModel()
 
     employees = model_inputs["employees"]
@@ -149,7 +215,7 @@ def build_assignment_model_v5(model_inputs, config):
     assign = {}
 
     # ------------------------------------------------------------
-    # 4.1 Employee-shift assignment variables
+    # 3.1 Employee-shift assignment variables
     # ------------------------------------------------------------
 
     for e in employees:
@@ -174,7 +240,7 @@ def build_assignment_model_v5(model_inputs, config):
             )
 
     # ------------------------------------------------------------
-    # 4.2 Demand coverage
+    # 3.2 Demand coverage
     # ------------------------------------------------------------
 
     for (sh, skill), required in required_count.items():
@@ -193,7 +259,7 @@ def build_assignment_model_v5(model_inputs, config):
         model.Add(sum(assign[e, sh] for e in eligible_agents) == required)
 
     # ------------------------------------------------------------
-    # 4.3 One shift per employee per day
+    # 3.3 One shift per employee per day
     # ------------------------------------------------------------
 
     dates = sorted(set(str(d) for d in shift_date.values()))
@@ -210,7 +276,7 @@ def build_assignment_model_v5(model_inputs, config):
                 model.Add(sum(employee_shift_vars_on_day) <= 1)
 
     # ------------------------------------------------------------
-    # 4.4 Minimum 11 hours rest between shifts
+    # 3.4 Minimum 11 hours rest between shifts
     # ------------------------------------------------------------
 
     min_rest_hours = config["constraints"]["min_rest_between_shifts"]["min_rest_hours"]
@@ -243,7 +309,7 @@ def build_assignment_model_v5(model_inputs, config):
                     break
 
     # ------------------------------------------------------------
-    # 4.5 Max 6 consecutive working days
+    # 3.5 Max 6 consecutive working days
     # ------------------------------------------------------------
 
     max_days = config["constraints"]["max_consecutive_work_days"]["max_days"]
@@ -271,142 +337,164 @@ def build_assignment_model_v5(model_inputs, config):
                 model.Add(sum(vars_in_window) <= max_days)
 
     # ------------------------------------------------------------
-    # 4.6 Team main shift objective
+    # 3.6 Team-week main shift pattern objective
+    #
+    # Her team + week için bir ana shift pattern seçilir.
+    # Employee çalıştığı günlerde bu pattern dışına çıkarsa ceza alır.
+    # Normal çalışan cezası yüksek, özel durumlu çalışan cezası düşük.
     # ------------------------------------------------------------
 
     objective_terms = []
 
+    # team -> members
     team_members = {}
-
     for e in employees:
         team_id = employee_team[e]
+        team_members.setdefault(team_id, []).append(e)
 
-        if team_id not in team_members:
-            team_members[team_id] = []
-
-        team_members[team_id].append(e)
-
-    shifts_by_date = {}
+    # week -> shifts
+    shifts_by_week = {}
 
     for sh in shifts:
         d = str(shift_date[sh])
+        week_key = get_week_key(d)
+        shifts_by_week.setdefault(week_key, []).append(sh)
 
-        if d not in shifts_by_date:
-            shifts_by_date[d] = []
-
-        shifts_by_date[d].append(sh)
-
-    team_work_day = {}
-    team_shift_used = {}
-    team_main_shift = {}
-    employee_split = {}
-    extra_team_shift = {}
+    team_work_week = {}
+    team_pattern_used = {}
+    team_main_pattern = {}
+    employee_week_pattern_split = {}
+    extra_team_pattern = {}
 
     for team_id, members in team_members.items():
         team_name = safe_var_name(team_id)
 
-        for d, day_shifts in shifts_by_date.items():
-            date_name = safe_var_name(d)
+        for week_key, week_shifts in shifts_by_week.items():
+            week_name = safe_var_name(week_key)
 
-            team_day_assignment_vars = [
+            # Bu ekipten bu hafta atanabilecek tüm assignment değişkenleri
+            team_week_assignment_vars = [
                 assign[e, sh]
                 for e in members
-                for sh in day_shifts
+                for sh in week_shifts
                 if (e, sh) in assign
             ]
 
-            if not team_day_assignment_vars:
+            if not team_week_assignment_vars:
                 continue
 
-            work_day_var = model.NewBoolVar(
-                f"team_work_day_{team_name}_{date_name}"
+            # Team bu hafta çalışıyor mu?
+            work_week_var = model.NewBoolVar(
+                f"team_work_week_{team_name}_{week_name}"
             )
 
-            team_work_day[team_id, d] = work_day_var
+            team_work_week[team_id, week_key] = work_week_var
 
-            for var in team_day_assignment_vars:
-                model.Add(work_day_var >= var)
+            for var in team_week_assignment_vars:
+                model.Add(work_week_var >= var)
 
-            model.Add(work_day_var <= sum(team_day_assignment_vars))
+            model.Add(work_week_var <= sum(team_week_assignment_vars))
 
-            main_shift_vars_for_day = []
+            # Bu hafta var olan shift pattern'ler
+            week_patterns = sorted({
+                get_shift_pattern(sh, model_inputs)
+                for sh in week_shifts
+            })
 
-            for sh in day_shifts:
-                shift_name = safe_var_name(sh)
+            main_pattern_vars_for_week = []
 
-                member_shift_vars = [
+            for pattern in week_patterns:
+                pattern_name = safe_var_name(pattern)
+
+                pattern_shifts = [
+                    sh for sh in week_shifts
+                    if get_shift_pattern(sh, model_inputs) == pattern
+                ]
+
+                member_pattern_vars = [
                     assign[e, sh]
                     for e in members
+                    for sh in pattern_shifts
                     if (e, sh) in assign
                 ]
 
-                used_var = model.NewBoolVar(
-                    f"team_shift_used_{team_name}_{date_name}_{shift_name}"
+                pattern_used_var = model.NewBoolVar(
+                    f"team_pattern_used_{team_name}_{week_name}_{pattern_name}"
                 )
 
-                main_var = model.NewBoolVar(
-                    f"team_main_shift_{team_name}_{date_name}_{shift_name}"
+                main_pattern_var = model.NewBoolVar(
+                    f"team_main_pattern_{team_name}_{week_name}_{pattern_name}"
                 )
 
-                team_shift_used[team_id, d, sh] = used_var
-                team_main_shift[team_id, d, sh] = main_var
+                team_pattern_used[team_id, week_key, pattern] = pattern_used_var
+                team_main_pattern[team_id, week_key, pattern] = main_pattern_var
 
-                if member_shift_vars:
-                    for var in member_shift_vars:
-                        model.Add(used_var >= var)
+                if member_pattern_vars:
+                    for var in member_pattern_vars:
+                        model.Add(pattern_used_var >= var)
 
-                    model.Add(used_var <= sum(member_shift_vars))
+                    model.Add(pattern_used_var <= sum(member_pattern_vars))
                 else:
-                    model.Add(used_var == 0)
+                    model.Add(pattern_used_var == 0)
 
-                model.Add(main_var <= used_var)
+                # Ana pattern ancak o pattern gerçekten kullanıldıysa seçilebilir
+                model.Add(main_pattern_var <= pattern_used_var)
 
-                main_shift_vars_for_day.append(main_var)
+                main_pattern_vars_for_week.append(main_pattern_var)
 
-            model.Add(sum(main_shift_vars_for_day) == work_day_var)
+            # Team o hafta çalışıyorsa tam 1 ana pattern seçsin.
+            # Çalışmıyorsa 0 ana pattern.
+            model.Add(sum(main_pattern_vars_for_week) == work_week_var)
 
-            for sh in day_shifts:
-                used_var = team_shift_used[team_id, d, sh]
-                main_var = team_main_shift[team_id, d, sh]
+            # Ana pattern dışındaki kullanılan her pattern için ekstra ceza
+            for pattern in week_patterns:
+                pattern_name = safe_var_name(pattern)
+
+                pattern_used_var = team_pattern_used[team_id, week_key, pattern]
+                main_pattern_var = team_main_pattern[team_id, week_key, pattern]
 
                 extra_var = model.NewBoolVar(
-                    f"extra_team_shift_{team_name}_{date_name}_{safe_var_name(sh)}"
+                    f"extra_team_pattern_{team_name}_{week_name}_{pattern_name}"
                 )
 
-                extra_team_shift[team_id, d, sh] = extra_var
+                extra_team_pattern[team_id, week_key, pattern] = extra_var
 
-                model.Add(extra_var <= used_var)
-                model.Add(extra_var <= 1 - main_var)
-                model.Add(extra_var >= used_var - main_var)
+                model.Add(extra_var <= pattern_used_var)
+                model.Add(extra_var <= 1 - main_pattern_var)
+                model.Add(extra_var >= pattern_used_var - main_pattern_var)
 
-                objective_terms.append(EXTRA_TEAM_SHIFT_PENALTY * extra_var)
+                objective_terms.append(
+                    EXTRA_TEAM_SHIFT_PATTERN_PENALTY * extra_var
+                )
 
+            # Employee haftalık ana pattern dışına çıkarsa ceza
             for e in members:
                 employee_penalty = get_employee_split_penalty(e, model_inputs)
 
-                for sh in day_shifts:
+                for sh in week_shifts:
                     if (e, sh) not in assign:
                         continue
 
-                    main_var = team_main_shift[team_id, d, sh]
+                    pattern = get_shift_pattern(sh, model_inputs)
+                    main_pattern_var = team_main_pattern[team_id, week_key, pattern]
 
                     split_var = model.NewBoolVar(
-                        f"employee_split_{safe_var_name(e)}_{team_name}_{date_name}_{safe_var_name(sh)}"
+                        f"employee_week_pattern_split_{safe_var_name(e)}_{team_name}_{week_name}_{safe_var_name(pattern)}_{safe_var_name(sh)}"
                     )
 
-                    employee_split[e, d, sh] = split_var
+                    employee_week_pattern_split[e, week_key, sh] = split_var
 
                     model.Add(split_var <= assign[e, sh])
-                    model.Add(split_var <= 1 - main_var)
-                    model.Add(split_var >= assign[e, sh] - main_var)
+                    model.Add(split_var <= 1 - main_pattern_var)
+                    model.Add(split_var >= assign[e, sh] - main_pattern_var)
 
                     objective_terms.append(employee_penalty * split_var)
 
-    print(f"Team work day var sayısı: {len(team_work_day)}")
-    print(f"Team shift used var sayısı: {len(team_shift_used)}")
-    print(f"Team main shift var sayısı: {len(team_main_shift)}")
-    print(f"Employee split var sayısı: {len(employee_split)}")
-    print(f"Extra team shift var sayısı: {len(extra_team_shift)}")
+    print(f"Team work week var sayısı: {len(team_work_week)}")
+    print(f"Team pattern used var sayısı: {len(team_pattern_used)}")
+    print(f"Team main pattern var sayısı: {len(team_main_pattern)}")
+    print(f"Employee week pattern split var sayısı: {len(employee_week_pattern_split)}")
+    print(f"Extra team pattern var sayısı: {len(extra_team_pattern)}")
 
     if objective_terms:
         model.Minimize(sum(objective_terms))
@@ -415,7 +503,7 @@ def build_assignment_model_v5(model_inputs, config):
 
 
 # ============================================================
-# 5. Solve model
+# 4. Solve model
 # ============================================================
 
 def solve_model(model, time_limit_seconds=600):
@@ -432,7 +520,7 @@ def solve_model(model, time_limit_seconds=600):
 
 
 # ============================================================
-# 6. Extract roster
+# 5. Extract roster
 # ============================================================
 
 def extract_roster(solver, status, assign, model_inputs):
@@ -462,9 +550,11 @@ def extract_roster(solver, status, assign, model_inputs):
                 "location": employee_location[e],
                 "skill_group": employee_skill[e],
                 "date": str(shift_date[sh]),
+                "week_key": get_week_key(str(shift_date[sh])),
                 "shift_id": sh,
                 "shift_start": shift_start[sh],
                 "shift_end": shift_end[sh],
+                "shift_pattern": get_shift_pattern(sh, model_inputs),
                 "shift_start_dt": shift_start_dt[sh],
                 "shift_end_dt": shift_end_dt[sh],
                 "duration_minutes": shift_duration[sh],
@@ -475,14 +565,14 @@ def extract_roster(solver, status, assign, model_inputs):
 
     if not roster_df.empty:
         roster_df = roster_df.sort_values(
-            ["date", "team_id", "shift_start", "employee_name"]
+            ["week_key", "date", "team_id", "shift_start", "employee_name"]
         ).reset_index(drop=True)
 
     return roster_df
 
 
 # ============================================================
-# 7. Hard constraint checks
+# 6. Hard constraint checks
 # ============================================================
 
 def check_demand_coverage(roster_df, shift_demand_long_df):
@@ -718,10 +808,13 @@ def check_max_consecutive_work_days(roster_df, max_days=6, window_days=7):
 
 
 # ============================================================
-# 8. Team consistency analysis
+# 7. Team consistency analysis
 # ============================================================
 
-def analyze_team_consistency(roster_df):
+def analyze_team_day_consistency(roster_df):
+    """
+    Gün bazında ekip bölünmelerini gösterir.
+    """
     df = roster_df.copy()
 
     if df.empty:
@@ -734,7 +827,7 @@ def analyze_team_consistency(roster_df):
 
         shift_counts = (
             group_df
-            .groupby(["shift_id", "shift_start", "shift_end"])
+            .groupby(["shift_id", "shift_start", "shift_end", "shift_pattern"])
             .size()
             .reset_index(name="assigned_count")
             .sort_values("assigned_count", ascending=False)
@@ -745,6 +838,7 @@ def analyze_team_consistency(roster_df):
         majority_shift_id = shift_counts.iloc[0]["shift_id"]
         majority_shift_start = shift_counts.iloc[0]["shift_start"]
         majority_shift_end = shift_counts.iloc[0]["shift_end"]
+        majority_shift_pattern = shift_counts.iloc[0]["shift_pattern"]
         majority_count = int(shift_counts.iloc[0]["assigned_count"])
 
         split_count = working_count - majority_count
@@ -769,6 +863,7 @@ def analyze_team_consistency(roster_df):
             "majority_shift_id": majority_shift_id,
             "majority_shift_start": majority_shift_start,
             "majority_shift_end": majority_shift_end,
+            "majority_shift_pattern": majority_shift_pattern,
             "majority_count": majority_count,
             "split_count": split_count,
             "normal_split_count": normal_split_count,
@@ -776,10 +871,10 @@ def analyze_team_consistency(roster_df):
             "is_split": int(shift_count > 1)
         })
 
-    team_consistency_df = pd.DataFrame(rows)
+    team_day_consistency_df = pd.DataFrame(rows)
 
-    split_team_days_df = team_consistency_df[
-        team_consistency_df["is_split"] == 1
+    split_team_days_df = team_day_consistency_df[
+        team_day_consistency_df["is_split"] == 1
     ].sort_values(
         ["normal_split_count", "split_count"],
         ascending=False
@@ -794,15 +889,91 @@ def analyze_team_consistency(roster_df):
             "special_split_members"
         ],
         "value": [
-            len(team_consistency_df),
+            len(team_day_consistency_df),
             len(split_team_days_df),
-            int(team_consistency_df["split_count"].sum()),
-            int(team_consistency_df["normal_split_count"].sum()),
-            int(team_consistency_df["special_split_count"].sum())
+            int(team_day_consistency_df["split_count"].sum()),
+            int(team_day_consistency_df["normal_split_count"].sum()),
+            int(team_day_consistency_df["special_split_count"].sum())
         ]
     })
 
-    return team_consistency_df, split_team_days_df, summary_df
+    return team_day_consistency_df, split_team_days_df, summary_df
+
+
+def analyze_team_week_pattern_consistency(roster_df):
+    """
+    Hafta bazında ekiplerin kaç shift pattern kullandığını gösterir.
+    """
+    df = roster_df.copy()
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    rows = []
+
+    for (week_key, team_id), group_df in df.groupby(["week_key", "team_id"]):
+        working_count = len(group_df)
+
+        pattern_counts = (
+            group_df
+            .groupby("shift_pattern")
+            .size()
+            .reset_index(name="assigned_count")
+            .sort_values("assigned_count", ascending=False)
+        )
+
+        pattern_count = len(pattern_counts)
+
+        main_pattern = pattern_counts.iloc[0]["shift_pattern"]
+        main_pattern_count = int(pattern_counts.iloc[0]["assigned_count"])
+
+        outside_main_df = group_df[
+            group_df["shift_pattern"] != main_pattern
+        ].copy()
+
+        outside_main_count = len(outside_main_df)
+        normal_outside_main_count = int(
+            (outside_main_df["special_employee_flg"] == 0).sum()
+        )
+        special_outside_main_count = int(
+            (outside_main_df["special_employee_flg"] == 1).sum()
+        )
+
+        rows.append({
+            "week_key": week_key,
+            "team_id": team_id,
+            "working_count": working_count,
+            "pattern_count": pattern_count,
+            "main_pattern": main_pattern,
+            "main_pattern_count": main_pattern_count,
+            "outside_main_count": outside_main_count,
+            "normal_outside_main_count": normal_outside_main_count,
+            "special_outside_main_count": special_outside_main_count
+        })
+
+    team_week_check_df = pd.DataFrame(rows).sort_values(
+        ["normal_outside_main_count", "outside_main_count", "pattern_count"],
+        ascending=False
+    ).reset_index(drop=True)
+
+    team_week_summary_df = pd.DataFrame({
+        "metric": [
+            "team_week_count",
+            "split_team_week_count",
+            "total_outside_main_members",
+            "normal_outside_main_members",
+            "special_outside_main_members"
+        ],
+        "value": [
+            len(team_week_check_df),
+            int((team_week_check_df["pattern_count"] > 1).sum()),
+            int(team_week_check_df["outside_main_count"].sum()),
+            int(team_week_check_df["normal_outside_main_count"].sum()),
+            int(team_week_check_df["special_outside_main_count"].sum())
+        ]
+    })
+
+    return team_week_check_df, team_week_summary_df
 
 
 def get_split_team_members(roster_df, team_id, date):
@@ -837,11 +1008,11 @@ def get_split_team_members(roster_df, team_id, date):
 
 
 # ============================================================
-# 9. Run everything
+# 8. Run everything
 # ============================================================
 
-def run_model_v5(model_inputs, constraints_config, shift_demand_long_df, time_limit_seconds=600):
-    model, assign = build_assignment_model_v5(
+def run_model_v6(model_inputs, constraints_config, shift_demand_long_df, time_limit_seconds=600):
+    model, assign = build_assignment_model_v6(
         model_inputs=model_inputs,
         config=constraints_config
     )
@@ -882,14 +1053,40 @@ def run_model_v5(model_inputs, constraints_config, shift_demand_long_df, time_li
         window_days=constraints_config["constraints"]["max_consecutive_work_days"]["window_days"]
     )
 
-    team_consistency_df, split_team_days_df, team_consistency_summary_df = analyze_team_consistency(
+    team_day_consistency_df, split_team_days_df, team_day_summary_df = analyze_team_day_consistency(
+        roster_df=roster_df
+    )
+
+    team_week_check_df, team_week_summary_df = analyze_team_week_pattern_consistency(
         roster_df=roster_df
     )
 
     objective_value = None
-
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         objective_value = solver.ObjectiveValue()
+
+    team_check_simple_df = pd.DataFrame()
+
+    if not split_team_days_df.empty:
+        team_check_simple_df = split_team_days_df[
+            [
+                "date",
+                "team_id",
+                "working_count",
+                "shift_count",
+                "majority_shift_start",
+                "majority_shift_end",
+                "majority_count",
+                "split_count",
+                "normal_split_count",
+                "special_split_count"
+            ]
+        ].copy()
+
+        team_check_simple_df = team_check_simple_df.sort_values(
+            ["normal_split_count", "split_count"],
+            ascending=False
+        ).reset_index(drop=True)
 
     print("\nÖzet:")
     print(f"Status: {solver.StatusName(status)}")
@@ -901,32 +1098,19 @@ def run_model_v5(model_inputs, constraints_config, shift_demand_long_df, time_li
     print(f"11 saat dinlenme violation sayısı: {len(min_rest_violation_df)}")
     print(f"Max 6 gün üst üste violation sayısı: {len(consecutive_violation_df)}")
     print(f"Bölünen team-day sayısı: {len(split_team_days_df)}")
+    print(f"Bölünen team-week sayısı: {int((team_week_check_df['pattern_count'] > 1).sum()) if not team_week_check_df.empty else 0}")
 
-    print("\nTeam consistency summary:")
-    safe_display(team_consistency_summary_df)
+    print("\nTeam day consistency summary:")
+    safe_display(team_day_summary_df)
 
-    team_check_simple_df = split_team_days_df[
-        [
-            "date",
-            "team_id",
-            "working_count",
-            "shift_count",
-            "majority_shift_start",
-            "majority_shift_end",
-            "majority_count",
-            "split_count",
-            "normal_split_count",
-            "special_split_count"
-        ]
-    ].copy()
-
-    team_check_simple_df = team_check_simple_df.sort_values(
-        ["normal_split_count", "split_count"],
-        ascending=False
-    ).reset_index(drop=True)
+    print("\nTeam week consistency summary:")
+    safe_display(team_week_summary_df)
 
     print("\nEn problemli bölünen team-day örnekleri:")
     safe_display(team_check_simple_df.head(50))
+
+    print("\nEn problemli team-week pattern örnekleri:")
+    safe_display(team_week_check_df.head(50))
 
     return {
         "model": model,
@@ -940,25 +1124,16 @@ def run_model_v5(model_inputs, constraints_config, shift_demand_long_df, time_li
         "employee_constraint_violations": employee_constraint_violations,
         "min_rest_violation_df": min_rest_violation_df,
         "consecutive_violation_df": consecutive_violation_df,
-        "team_consistency_df": team_consistency_df,
+        "team_day_consistency_df": team_day_consistency_df,
         "split_team_days_df": split_team_days_df,
-        "team_consistency_summary_df": team_consistency_summary_df,
+        "team_day_summary_df": team_day_summary_df,
+        "team_week_check_df": team_week_check_df,
+        "team_week_summary_df": team_week_summary_df,
         "team_check_simple_df": team_check_simple_df
     }
 
 
-# ============================================================
-# 10. Execute
-# ============================================================
-
-results_v5 = run_model_v5(
-    model_inputs=model_inputs,
-    constraints_config=constraints_config,
-    shift_demand_long_df=shift_demand_long_df,
-    time_limit_seconds=600
-)
-
-roster_df = results_v5["roster_df"]
-split_team_days_df = results_v5["split_team_days_df"]
-team_check_simple_df = results_v5["team_check_simple_df"]
-team_consistency_summary_df = results_v5["team_consistency_summary_df"]
+if __name__ == "__main__":
+    print("Bu dosya doğrudan çalıştırıldığında sadece fonksiyonları içerir.")
+    print("Notebook içinde kullanım:")
+    print("results_v6 = run_model_v6(model_inputs, constraints_config, shift_demand_long_df, time_limit_seconds=600)")

@@ -322,6 +322,135 @@ daily_assignment_problem_df = check_one_shift_per_day(roster_df)
 print("\nAynı gün birden fazla vardiya alan agentlar:")
 display(daily_assignment_problem_df)
 
+import pandas as pd
+
+
+def check_current_constraints(roster_df, model_inputs, config):
+    check_df = roster_df.copy()
+
+    # Tarih / datetime formatları
+    check_df["date"] = check_df["date"].astype(str)
+    check_df["shift_end_dt"] = pd.to_datetime(check_df["shift_end_dt"])
+    check_df["weekday"] = pd.to_datetime(check_df["date"]).dt.day_name().str.lower()
+
+    # Employee flaglerini roster'a ekle
+    check_df["pazartesi_izinli_flg"] = check_df["employee_id"].map(
+        model_inputs["employee_pazartesi_izinli"]
+    )
+
+    check_df["cuma_izinli_flg"] = check_df["employee_id"].map(
+        model_inputs["employee_cuma_izinli"]
+    )
+
+    check_df["sabah_calisir_flg"] = check_df["employee_id"].map(
+        model_inputs["employee_sabah_calisir"]
+    )
+
+    check_df["sut_izni_flg"] = check_df["employee_id"].map(
+        model_inputs["employee_sut_izni"]
+    )
+
+    check_df["hamile_flg"] = check_df["employee_id"].map(
+        model_inputs["employee_hamile"]
+    )
+
+    # ------------------------------------------------------------
+    # 1. Pazartesi izinli kontrolü
+    # ------------------------------------------------------------
+    pazartesi_violation = check_df[
+        (check_df["pazartesi_izinli_flg"] == 1) &
+        (check_df["weekday"] == "monday")
+    ].copy()
+
+    # ------------------------------------------------------------
+    # 2. Cuma izinli kontrolü
+    # ------------------------------------------------------------
+    cuma_violation = check_df[
+        (check_df["cuma_izinli_flg"] == 1) &
+        (check_df["weekday"] == "friday")
+    ].copy()
+
+    # ------------------------------------------------------------
+    # 3. Sabah çalışan / hamile / süt izni 20:00 sonrası çalışmış mı?
+    # ------------------------------------------------------------
+    latest_end_time = config["shift_rules"]["latest_end_time_for_day_only_agents"]
+
+    check_df["latest_allowed_end_dt"] = pd.to_datetime(
+        check_df["date"] + " " + latest_end_time
+    )
+
+    check_df["day_only_flg"] = (
+        (check_df["sabah_calisir_flg"] == 1) |
+        (check_df["hamile_flg"] == 1) |
+        (check_df["sut_izni_flg"] == 1)
+    ).astype(int)
+
+    day_only_violation = check_df[
+        (check_df["day_only_flg"] == 1) &
+        (check_df["shift_end_dt"] > check_df["latest_allowed_end_dt"])
+    ].copy()
+
+    # ------------------------------------------------------------
+    # 4. Hamile hafta sonu / resmi tatil çalışmış mı?
+    # ------------------------------------------------------------
+    official_holidays = config.get("holiday_rules", {}).get("official_holidays", [])
+
+    pregnant_weekend_holiday_violation = check_df[
+        (check_df["hamile_flg"] == 1) &
+        (
+            check_df["weekday"].isin(["saturday", "sunday"]) |
+            check_df["date"].isin(official_holidays)
+        )
+    ].copy()
+
+    # ------------------------------------------------------------
+    # 5. Günlük max çalışma süresi kontrolü
+    # ------------------------------------------------------------
+    max_daily_minutes = config["shift_rules"]["max_daily_work_minutes"]
+
+    max_daily_work_violation = check_df[
+        check_df["duration_minutes"] > max_daily_minutes
+    ].copy()
+
+    # ------------------------------------------------------------
+    # Özet
+    # ------------------------------------------------------------
+    summary = pd.DataFrame({
+        "constraint": [
+            "pazartesi_izinli",
+            "cuma_izinli",
+            "day_only_20_sonrasi",
+            "hamile_weekend_holiday",
+            "max_daily_work_minutes"
+        ],
+        "violation_count": [
+            len(pazartesi_violation),
+            len(cuma_violation),
+            len(day_only_violation),
+            len(pregnant_weekend_holiday_violation),
+            len(max_daily_work_violation)
+        ]
+    })
+
+    violations = {
+        "pazartesi_izinli": pazartesi_violation,
+        "cuma_izinli": cuma_violation,
+        "day_only_20_sonrasi": day_only_violation,
+        "hamile_weekend_holiday": pregnant_weekend_holiday_violation,
+        "max_daily_work_minutes": max_daily_work_violation
+    }
+
+    return summary, violations
+
+
+constraint_summary_df, constraint_violations = check_current_constraints(
+    roster_df=roster_df,
+    model_inputs=model_inputs,
+    config=constraints_config
+)
+
+display(constraint_summary_df)
+
 print("\nÖzet:")
 print(f"Roster satır sayısı: {len(roster_df)}")
 print(f"Demand diff problemi sayısı: {len(comparison_df[comparison_df['diff'] != 0])}")

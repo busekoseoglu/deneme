@@ -1,0 +1,189 @@
+{
+  "time_unit_minutes": 15,
+
+  "planning_settings": {
+    "plan_outsource": false,
+    "skill_groups": ["kitle", "gold", "kurumsal"],
+    "inhouse_demand_columns": ["kitle_inhouse", "gold", "kurumsal"]
+  },
+
+  "shift_rules": {
+    "default_shift_duration_minutes": 480,
+    "sut_izni_shift_duration_minutes": 360,
+    "max_daily_work_minutes": 540,
+    "latest_end_time_for_day_only_agents": "20:00"
+  },
+
+  "holiday_rules": {
+    "official_holidays": []
+  },
+
+  "night_shift_rules": {
+    "night_shift_names": ["18:00-02:00", "17:00-01:00", "00:00-08:00"],
+    "max_night_work_weeks_per_month": 2
+  },
+
+  "team_rules": {
+    "team_same_shift": {
+      "enabled": true,
+      "type": "hard",
+      "team_key": "team_id",
+      "apply_team_as_block": true,
+      "allow_demand_buffer": true,
+      "buffer_strategy": "round_up_to_full_team",
+      "max_extra_agents_per_shift_skill": 5
+    }
+  },
+
+  "break_rules": {
+    "normal": {
+      "breaks": [
+        {
+          "name": "break_1",
+          "duration_minutes": 15
+        },
+        {
+          "name": "lunch",
+          "duration_minutes": 45
+        },
+        {
+          "name": "break_2",
+          "duration_minutes": 15
+        }
+      ]
+    },
+    "sut_izni": {
+      "breaks": [
+        {
+          "name": "break_1",
+          "duration_minutes": 15
+        },
+        {
+          "name": "lunch",
+          "duration_minutes": 45
+        }
+      ]
+    }
+  },
+
+  "constraints": {
+    "cover_shift_demand": {
+      "enabled": true,
+      "type": "hard",
+      "level": "shift_skill_group",
+      "allow_overstaffing": true,
+      "overstaffing_reason": "team_buffer_only"
+    },
+
+    "match_skill_group": {
+      "enabled": true,
+      "type": "hard",
+      "description": "Agent sadece kendi line_base_main_group alanına uygun çağrı grubuna atanır."
+    },
+
+    "one_shift_per_day": {
+      "enabled": true,
+      "type": "hard",
+      "max_shifts_per_day": 1
+    },
+
+    "min_rest_between_shifts": {
+      "enabled": true,
+      "type": "hard",
+      "min_rest_hours": 11
+    },
+
+    "max_consecutive_work_days": {
+      "enabled": true,
+      "type": "hard",
+      "max_days": 6,
+      "window_days": 7
+    },
+
+    "weekly_fixed_day_off": {
+      "enabled": true,
+      "type": "hard",
+      "rules": [
+        {
+          "flag_column": "pazartesi_izinli_flg",
+          "weekday": "monday"
+        },
+        {
+          "flag_column": "cuma_izinli_flg",
+          "weekday": "friday"
+        }
+      ]
+    },
+
+    "day_only_agents": {
+      "enabled": true,
+      "type": "hard",
+      "flag_columns": ["sabah_calisir_flg", "hamile_flg", "sut_izni_flg"],
+      "latest_shift_end_time": "20:00"
+    },
+
+    "pregnant_weekend_and_holiday_off": {
+      "enabled": true,
+      "type": "hard",
+      "flag_column": "hamile_flg",
+      "weekend_days": ["saturday", "sunday"],
+      "use_official_holidays": true
+    },
+
+    "max_daily_work_minutes": {
+      "enabled": true,
+      "type": "hard",
+      "max_minutes": 540
+    },
+
+    "sut_izni_extra_day_off": {
+      "enabled": true,
+      "type": "hard",
+      "flag_column": "sut_izni_flg",
+      "condition": {
+        "if_any_flag_is_1": ["pazartesi_izinli_flg", "cuma_izinli_flg"]
+      },
+      "extra_weekday_off_required": true,
+      "extra_off_days": 1
+    },
+
+    "monthly_weekend_double_off": {
+      "enabled": true,
+      "type": "hard",
+      "min_double_weekend_off_per_month": 1,
+      "double_off_days": ["saturday", "sunday"]
+    },
+
+    "night_shift_limit": {
+      "enabled": true,
+      "type": "hard",
+      "night_shift_names": ["18:00-02:00", "17:00-01:00", "00:00-08:00"],
+      "max_night_work_weeks_per_month": 2
+    },
+
+    "birthday_leave": {
+      "enabled": false,
+      "type": "hard",
+      "description": "Doğum günü verisi gelirse ilgili güne izin yazılır."
+    },
+
+    "overtime_limit": {
+      "enabled": false,
+      "type": "hard",
+      "max_overtime_hours_per_month": 22.5,
+      "description": "Mesai bilgisi modelde kullanılmaya başladığında açılacak."
+    },
+
+    "break_planning": {
+      "enabled": false,
+      "type": "hard",
+      "description": "İkinci aşamada break task modeliyle açılacak."
+    },
+
+    "max_time_between_breaks": {
+      "enabled": false,
+      "type": "hard",
+      "max_minutes": 180
+    }
+  }
+}

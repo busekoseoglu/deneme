@@ -1,32 +1,28 @@
-# 1. Model sonucundan gerçekleşen kişi sayısını hesapla
-assigned_count_df = (
-    roster_df
-    .groupby(["date", "shift_start", "shift_end", "skill_group"])
-    .size()
-    .reset_index(name="assigned_count")
-)
+# %% [HÜCRE 13] - HAMİLE VE SÜT İZNİ HAFTA SONU ÇALIŞAMAZ
 
-# 2. Demand tarafındaki beklenen kişi sayısını al
-demand_check_df = (
-    shift_demand_long_df[
-        ["date", "shift_start", "shift_end", "skill_group", "required_count"]
-    ]
-    .copy()
-)
+special_weekend_constraints = 0
 
-# 3. Karşılaştır
-comparison_df = demand_check_df.merge(
-    assigned_count_df,
-    on=["date", "shift_start", "shift_end", "skill_group"],
-    how="left"
-)
+for _, row in df_tam.iterrows():
+    a = str(row["agent_user_code"]).strip()
 
-# Eğer hiç atama yoksa NaN gelir, 0 yapalım
-comparison_df["assigned_count"] = comparison_df["assigned_count"].fillna(0).astype(int)
+    weekend_off = (
+        int(row.get("hamile_flg", 0)) == 1
+        or int(row.get("sut_izni_flg", 0)) == 1
+    )
 
-# 4. Fark hesapla
-comparison_df["diff"] = (
-    comparison_df["assigned_count"] - comparison_df["required_count"]
-)
+    if not weekend_off:
+        continue
 
-comparison_df.head(20)
+    for ds in PLAN_GUNLER:
+        d = pd.to_datetime(ds).date()
+
+        # Cumartesi = 5, Pazar = 6
+        if d.weekday() not in [5, 6]:
+            continue
+
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) in x:
+                model.Add(x[a, ds, v] == 0)
+                special_weekend_constraints += 1
+
+print(f"hamile/süt izni hafta sonu çalışamaz kısıtı: {special_weekend_constraints} adet")

@@ -1,176 +1,271 @@
-# %% [KONTROL] - GÜNLÜK TAKIM BÖLÜNMESİ
-# Amaç:
-# Her takım aynı gün mümkün olduğunca tek vardiyada olmalı.
-# Özel durumlu kişiler ayrılabilir:
-# sabah_calisir_flg / hamile_flg / sut_izni_flg = 1 olanlar.
+# %% [HÜCRE] - TAKIM GÜNLÜK + HAFTALIK AYNI VARDİYA OBJECTIVE
 
-team_col = "takim"   # sende takım kolonu bu isimde
+import re
 
-check_df = work_roster.copy()
-
-# Gerekli flag kolonları yoksa 0 kabul et
-special_flag_cols = [
-    "sabah_calisir_flg",
-    "hamile_flg",
-    "sut_izni_flg"
-]
-
-for col in special_flag_cols:
-    if col not in check_df.columns:
-        check_df[col] = 0
-
-for col in special_flag_cols:
-    check_df[col] = check_df[col].fillna(0).astype(int)
-
-# Özel durumlu kişi flag'i
-check_df["special_flg"] = (
-    (check_df["sabah_calisir_flg"] == 1) |
-    (check_df["hamile_flg"] == 1) |
-    (check_df["sut_izni_flg"] == 1)
-).astype(int)
-
-# Her takım-gün-vardiya kaç kişi var?
-team_day_shift = (
-    check_df
-    .groupby([team_col, "tarih", "vardiya"])
-    .agg(
-        total_agents=("agent", "nunique"),
-        normal_agents=("special_flg", lambda x: (x == 0).sum()),
-        special_agents=("special_flg", lambda x: (x == 1).sum()),
-        agent_list=("agent", lambda x: list(x))
-    )
-    .reset_index()
-)
-
-# Her takım-gün için ana vardiya = en çok kişinin olduğu vardiya
-main_shift = (
-    team_day_shift
-    .sort_values(
-        [team_col, "tarih", "total_agents"],
-        ascending=[True, True, False]
-    )
-    .groupby([team_col, "tarih"])
-    .head(1)
-    [[team_col, "tarih", "vardiya", "total_agents"]]
-    .rename(columns={
-        "vardiya": "main_vardiya",
-        "total_agents": "main_vardiya_agent_count"
-    })
-)
-
-team_day_detail = team_day_shift.merge(
-    main_shift,
-    on=[team_col, "tarih"],
-    how="left"
-)
-
-team_day_detail["is_main_vardiya"] = (
-    team_day_detail["vardiya"] == team_day_detail["main_vardiya"]
-).astype(int)
-
-# Takım-gün özet
-team_day_split_summary = (
-    team_day_detail
-    .groupby([team_col, "tarih", "main_vardiya", "main_vardiya_agent_count"])
-    .agg(
-        total_agents=("total_agents", "sum"),
-        distinct_shift_count=("vardiya", "nunique"),
-        normal_split_agents=(
-            "normal_agents",
-            lambda x: x[team_day_detail.loc[x.index, "is_main_vardiya"] == 0].sum()
-        ),
-        special_split_agents=(
-            "special_agents",
-            lambda x: x[team_day_detail.loc[x.index, "is_main_vardiya"] == 0].sum()
-        ),
-        shifts_used=("vardiya", lambda x: sorted(x.unique()))
-    )
-    .reset_index()
-)
-
-# Normal ekip bölünmüş mü?
-# Ana vardiya dışına çıkan normal agent varsa asıl problem bu.
-team_day_split_summary["normal_team_split_problem"] = (
-    team_day_split_summary["normal_split_agents"] > 0
-).astype(int)
-
-# Özel durum nedeniyle ayrılma var mı?
-team_day_split_summary["only_special_split"] = (
-    (team_day_split_summary["normal_split_agents"] == 0) &
-    (team_day_split_summary["special_split_agents"] > 0)
-).astype(int)
-
-# Problemli olanları üste al
-team_day_split_summary = team_day_split_summary.sort_values(
-    [
-        "normal_team_split_problem",
-        "normal_split_agents",
-        "distinct_shift_count",
-        "total_agents"
-    ],
-    ascending=[False, False, False, False]
-)
-
-display(team_day_split_summary)
-
-print("Toplam takım-gün sayısı:", len(team_day_split_summary))
-print(
-    "Normal ekip bölünmesi olan takım-gün sayısı:",
-    team_day_split_summary["normal_team_split_problem"].sum()
-)
-print(
-    "Sadece özel durum nedeniyle ayrılan takım-gün sayısı:",
-    team_day_split_summary["only_special_split"].sum()
-)
-
-# %% [KONTROL] - BİR TAKIMIN GÜNLÜK ÇALIŞAN / OFF / İZİN DURUMU
+# Eski objective kalmasın diye sıfırdan başlatıyoruz
+objective_terms = []
 
 team_col = "takim"
 
-secili_takim = "X TAKIM ADINI BURAYA YAZ"
-secili_tarih = "2026-06-17"   # bakmak istediğin günü yaz
+# Ceza ağırlıkları
+# Gün içinde normal ekip bölünmesin diye en yüksek ceza burada
+DAY_NORMAL_SPLIT_PENALTY = 10000
 
-# Takımdaki tüm agentlar
-team_agents = (
-    df_tam[df_tam[team_col] == secili_takim]["agent_user_code"]
-    .astype(str)
-    .str.strip()
-    .tolist()
+# Özel durumlu kişi ayrılırsa daha düşük ceza
+DAY_SPECIAL_SPLIT_PENALTY = 300
+
+# Aynı takım hafta içinde ana vardiya değiştirirse ceza
+WEEK_SHIFT_CHANGE_PENALTY = 5000
+
+# Bir team-day içinde ekstra vardiya pattern'i kullanılırsa ceza
+EXTRA_DAY_PATTERN_PENALTY = 3000
+
+# Eğer normal ekip üyeleri kesinlikle aynı gün aynı vardiyada olsun istersen True yap.
+# İlk denemede False bırakmak daha güvenli. Infeasible riskini azaltır.
+FORCE_NORMAL_TEAM_SAME_SHIFT_PER_DAY = False
+
+
+def safe_name(x):
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(x))
+
+
+def get_week_key(ds):
+    d = pd.to_datetime(ds)
+    iso = d.isocalendar()
+    return f"{iso.year}_W{str(iso.week).zfill(2)}"
+
+
+def get_shift_pattern(ds, v):
+    bas, bit = saat[(ds, v)]
+    return f"{bas}-{bit}"
+
+
+def is_special_agent(row):
+    return (
+        int(row.get("sabah_calisir_flg", 0)) == 1
+        or int(row.get("hamile_flg", 0)) == 1
+        or int(row.get("sut_izni_flg", 0)) == 1
+    )
+
+
+# Agent bilgileri
+df_agent_team = df_tam.copy()
+df_agent_team["agent_user_code"] = df_agent_team["agent_user_code"].astype(str).str.strip()
+
+agent_special = {
+    str(row["agent_user_code"]).strip(): is_special_agent(row)
+    for _, row in df_agent_team.iterrows()
+}
+
+team_members = (
+    df_agent_team
+    .groupby(team_col)["agent_user_code"]
+    .apply(lambda x: [str(a).strip() for a in x])
+    .to_dict()
 )
 
-print("df_tam takım kişi sayısı:", len(team_agents))
+# Haftalar
+week_days = {}
+for ds in PLAN_GUNLER:
+    wk = get_week_key(ds)
+    week_days.setdefault(wk, []).append(ds)
 
-# Roster index'i stringe çevir
-roster_check = roster.copy()
-roster_check.index = roster_check.index.astype(str).str.strip()
 
-# Tarih kolonunu güvenli bul
-target_date = pd.to_datetime(secili_tarih).date()
+# Yardımcı değişkenler
+team_day_main_pattern = {}
+team_day_work = {}
+team_day_pattern_used = {}
 
-date_col = None
+team_week_main_pattern = {}
+team_week_work = {}
 
-for c in roster_check.columns:
-    if pd.to_datetime(c).date() == target_date:
-        date_col = c
-        break
+daily_split_var_count = 0
+weekly_change_var_count = 0
+team_day_count = 0
+team_week_count = 0
 
-if date_col is None:
-    print("Bu tarih roster kolonlarında bulunamadı.")
-    print("Roster kolon örnekleri:")
-    print(roster_check.columns[:10].tolist())
-else:
-    team_day_status = (
-        roster_check
-        .loc[roster_check.index.isin(team_agents), [date_col]]
-        .reset_index()
-    )
 
-    team_day_status.columns = ["agent", "vardiya"]
+# 1) TEAM + GÜN: O gün için ana vardiya seç
+for team, members in team_members.items():
+    team_name = safe_name(team)
 
-    team_day_status["status"] = team_day_status["vardiya"].apply(
-        lambda x: "calisiyor" if x not in ["off", "izin"] else x
-    )
+    for ds in PLAN_GUNLER:
+        ds_name = safe_name(ds)
 
-    display(team_day_status)
+        day_vars = [
+            x[(a, ds, v)]
+            for a in members
+            for v in gun_vardiyalari.get(ds, [])
+            if (a, ds, v) in x
+        ]
 
-    print(team_day_status["status"].value_counts())
+        if not day_vars:
+            continue
+
+        # Team o gün çalışıyor mu?
+        work_day = model.NewBoolVar(f"work_day_{team_name}_{ds_name}")
+        team_day_work[(team, ds)] = work_day
+
+        for var in day_vars:
+            model.Add(work_day >= var)
+
+        model.Add(work_day <= sum(day_vars))
+
+        patterns = sorted({
+            get_shift_pattern(ds, v)
+            for v in gun_vardiyalari.get(ds, [])
+        })
+
+        main_vars_for_day = []
+
+        for p in patterns:
+            p_name = safe_name(p)
+
+            pattern_assignments = [
+                x[(a, ds, v)]
+                for a in members
+                for v in gun_vardiyalari.get(ds, [])
+                if (a, ds, v) in x and get_shift_pattern(ds, v) == p
+            ]
+
+            pattern_used = model.NewBoolVar(
+                f"pattern_used_day_{team_name}_{ds_name}_{p_name}"
+            )
+
+            main_pattern = model.NewBoolVar(
+                f"main_pattern_day_{team_name}_{ds_name}_{p_name}"
+            )
+
+            team_day_pattern_used[(team, ds, p)] = pattern_used
+            team_day_main_pattern[(team, ds, p)] = main_pattern
+            main_vars_for_day.append(main_pattern)
+
+            if pattern_assignments:
+                for var in pattern_assignments:
+                    model.Add(pattern_used >= var)
+
+                model.Add(pattern_used <= sum(pattern_assignments))
+            else:
+                model.Add(pattern_used == 0)
+
+            # Ana vardiya, gerçekten kullanılan vardiyalardan biri olsun
+            model.Add(main_pattern <= pattern_used)
+
+            # Ana vardiya dışındaki ekstra pattern kullanımı ceza alsın
+            extra_pattern = model.NewBoolVar(
+                f"extra_pattern_day_{team_name}_{ds_name}_{p_name}"
+            )
+
+            model.Add(extra_pattern <= pattern_used)
+            model.Add(extra_pattern <= 1 - main_pattern)
+            model.Add(extra_pattern >= pattern_used - main_pattern)
+
+            objective_terms.append(EXTRA_DAY_PATTERN_PENALTY * extra_pattern)
+
+        # Team o gün çalışıyorsa 1 ana vardiya seçsin
+        model.Add(sum(main_vars_for_day) == work_day)
+        team_day_count += 1
+
+        # Agent ana vardiya dışına çıkarsa ceza yaz
+        for a in members:
+            penalty = (
+                DAY_SPECIAL_SPLIT_PENALTY
+                if agent_special.get(a, False)
+                else DAY_NORMAL_SPLIT_PENALTY
+            )
+
+            for v in gun_vardiyalari.get(ds, []):
+                if (a, ds, v) not in x:
+                    continue
+
+                p = get_shift_pattern(ds, v)
+                p_name = safe_name(p)
+
+                split_var = model.NewBoolVar(
+                    f"split_day_{a}_{team_name}_{ds_name}_{p_name}"
+                )
+
+                model.Add(split_var <= x[(a, ds, v)])
+                model.Add(split_var <= 1 - team_day_main_pattern[(team, ds, p)])
+                model.Add(split_var >= x[(a, ds, v)] - team_day_main_pattern[(team, ds, p)])
+
+                # Normal kişiler için istersen hard yapabiliriz
+                if FORCE_NORMAL_TEAM_SAME_SHIFT_PER_DAY and not agent_special.get(a, False):
+                    model.Add(split_var == 0)
+
+                objective_terms.append(penalty * split_var)
+                daily_split_var_count += 1
+
+
+# 2) TEAM + HAFTA: Haftanın ana vardiyası seçilsin
+for team, members in team_members.items():
+    team_name = safe_name(team)
+
+    for wk, days in week_days.items():
+        wk_name = safe_name(wk)
+
+        week_day_work_vars = [
+            team_day_work[(team, ds)]
+            for ds in days
+            if (team, ds) in team_day_work
+        ]
+
+        if not week_day_work_vars:
+            continue
+
+        work_week = model.NewBoolVar(f"work_week_{team_name}_{wk_name}")
+        team_week_work[(team, wk)] = work_week
+
+        for var in week_day_work_vars:
+            model.Add(work_week >= var)
+
+        model.Add(work_week <= sum(week_day_work_vars))
+
+        patterns = sorted({
+            get_shift_pattern(ds, v)
+            for ds in days
+            for v in gun_vardiyalari.get(ds, [])
+        })
+
+        week_main_vars = []
+
+        for p in patterns:
+            p_name = safe_name(p)
+
+            week_main = model.NewBoolVar(
+                f"main_pattern_week_{team_name}_{wk_name}_{p_name}"
+            )
+
+            team_week_main_pattern[(team, wk, p)] = week_main
+            week_main_vars.append(week_main)
+
+        # Team o hafta çalışıyorsa 1 haftalık ana vardiya seçsin
+        model.Add(sum(week_main_vars) == work_week)
+        team_week_count += 1
+
+        # Günlük ana vardiya, haftalık ana vardiyadan farklıysa ceza
+        for ds in days:
+            if (team, ds) not in team_day_work:
+                continue
+
+            for p in patterns:
+                if (team, ds, p) not in team_day_main_pattern:
+                    continue
+
+                change_var = model.NewBoolVar(
+                    f"week_change_{team_name}_{wk_name}_{safe_name(ds)}_{safe_name(p)}"
+                )
+
+                model.Add(change_var <= team_day_main_pattern[(team, ds, p)])
+                model.Add(change_var <= 1 - team_week_main_pattern[(team, wk, p)])
+                model.Add(change_var >= team_day_main_pattern[(team, ds, p)] - team_week_main_pattern[(team, wk, p)])
+
+                objective_terms.append(WEEK_SHIFT_CHANGE_PENALTY * change_var)
+                weekly_change_var_count += 1
+
+
+print("team-day sayısı:", team_day_count)
+print("team-week sayısı:", team_week_count)
+print("daily split değişkeni:", daily_split_var_count)
+print("weekly shift change değişkeni:", weekly_change_var_count)
+print("toplam objective term:", len(objective_terms))

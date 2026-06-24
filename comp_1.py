@@ -122,3 +122,35 @@ print(
     "Sadece özel durum nedeniyle ayrılan takım-gün sayısı:",
     team_day_split_summary["only_special_split"].sum()
 )
+
+
+# %% [KONTROL] - BİR TAKIMIN GÜNLÜK ÇALIŞAN / OFF / İZİN DURUMU
+
+team_col = "takim"
+
+secili_takim = "X TAKIM ADINI BURAYA YAZ"
+secili_tarih = "2026-06-17"   # bakmak istediğin günü yaz
+
+team_agents = (
+    df_tam[df_tam[team_col] == secili_takim]["agent_user_code"]
+    .astype(str)
+    .str.strip()
+    .tolist()
+)
+
+print("df_tam takım kişi sayısı:", len(team_agents))
+
+team_day_status = (
+    roster
+    .loc[roster.index.astype(str).isin(team_agents), [secili_tarih]]
+    .reset_index()
+    .rename(columns={"index": "agent", secili_tarih: "vardiya"})
+)
+
+team_day_status["status"] = team_day_status["vardiya"].apply(
+    lambda x: "calisiyor" if x not in ["off", "izin"] else x
+)
+
+display(team_day_status)
+
+print(team_day_status["status"].value_counts())

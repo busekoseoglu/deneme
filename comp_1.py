@@ -123,7 +123,6 @@ print(
     team_day_split_summary["only_special_split"].sum()
 )
 
-
 # %% [KONTROL] - BİR TAKIMIN GÜNLÜK ÇALIŞAN / OFF / İZİN DURUMU
 
 team_col = "takim"
@@ -131,6 +130,7 @@ team_col = "takim"
 secili_takim = "X TAKIM ADINI BURAYA YAZ"
 secili_tarih = "2026-06-17"   # bakmak istediğin günü yaz
 
+# Takımdaki tüm agentlar
 team_agents = (
     df_tam[df_tam[team_col] == secili_takim]["agent_user_code"]
     .astype(str)
@@ -140,17 +140,37 @@ team_agents = (
 
 print("df_tam takım kişi sayısı:", len(team_agents))
 
-team_day_status = (
-    roster
-    .loc[roster.index.astype(str).isin(team_agents), [secili_tarih]]
-    .reset_index()
-    .rename(columns={"index": "agent", secili_tarih: "vardiya"})
-)
+# Roster index'i stringe çevir
+roster_check = roster.copy()
+roster_check.index = roster_check.index.astype(str).str.strip()
 
-team_day_status["status"] = team_day_status["vardiya"].apply(
-    lambda x: "calisiyor" if x not in ["off", "izin"] else x
-)
+# Tarih kolonunu güvenli bul
+target_date = pd.to_datetime(secili_tarih).date()
 
-display(team_day_status)
+date_col = None
 
-print(team_day_status["status"].value_counts())
+for c in roster_check.columns:
+    if pd.to_datetime(c).date() == target_date:
+        date_col = c
+        break
+
+if date_col is None:
+    print("Bu tarih roster kolonlarında bulunamadı.")
+    print("Roster kolon örnekleri:")
+    print(roster_check.columns[:10].tolist())
+else:
+    team_day_status = (
+        roster_check
+        .loc[roster_check.index.isin(team_agents), [date_col]]
+        .reset_index()
+    )
+
+    team_day_status.columns = ["agent", "vardiya"]
+
+    team_day_status["status"] = team_day_status["vardiya"].apply(
+        lambda x: "calisiyor" if x not in ["off", "izin"] else x
+    )
+
+    display(team_day_status)
+
+    print(team_day_status["status"].value_counts())

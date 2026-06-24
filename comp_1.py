@@ -1,64 +1,82 @@
-# %% [KONTROL] - TAKIM HAFTA BOYUNCA AYNI VARDİYADA MI?
+# %% [HÜCRE] - TALEP KARŞILAMA KISITI
+# Talep minimum karşılanır. Fazla atama olabilir.
 
-team_col = "takim"
+coverage_constraints = 0
 
-week_df = work_roster.copy()
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        vars_shift = [
+            x[(a, ds, v)]
+            for a in AGENTS
+            if (a, ds, v) in x
+        ]
 
-week_df["tarih_dt"] = pd.to_datetime(week_df["tarih"])
-week_df["iso_year"] = week_df["tarih_dt"].dt.isocalendar().year
-week_df["iso_week"] = week_df["tarih_dt"].dt.isocalendar().week
+        required = int(talep[(ds, v)])
 
-week_df["week_key"] = (
-    week_df["iso_year"].astype(str)
-    + "-W"
-    + week_df["iso_week"].astype(str).str.zfill(2)
-)
+        model.Add(sum(vars_shift) >= required)
+        coverage_constraints += 1
 
-# Takım-gün ana vardiyasını bul
-team_day_shift_count = (
-    week_df
-    .groupby([team_col, "week_key", "tarih", "vardiya"])
-    .agg(agent_count=("agent", "nunique"))
-    .reset_index()
-)
+print(f"coverage kısıtı: {coverage_constraints} gün-vardiya")
 
-team_day_main_shift = (
-    team_day_shift_count
-    .sort_values(
-        [team_col, "week_key", "tarih", "agent_count"],
-        ascending=[True, True, True, False]
-    )
-    .groupby([team_col, "week_key", "tarih"])
-    .head(1)
-    .rename(columns={"vardiya": "day_main_vardiya"})
-)
 
-# Takım-hafta içinde günlük ana vardiyalar kaç farklı?
-team_week_stability = (
-    team_day_main_shift
-    .groupby([team_col, "week_key"])
-    .agg(
-        distinct_weekly_main_shift_count=("day_main_vardiya", "nunique"),
-        working_day_count=("tarih", "nunique"),
-        weekly_main_shifts=("day_main_vardiya", lambda x: sorted(x.unique()))
-    )
-    .reset_index()
-)
+# %% [HÜCRE] - HER AGENT HAFTADA 5 GÜN ÇALIŞSIN
 
-team_week_stability_problem_df = (
-    team_week_stability[
-        team_week_stability["distinct_weekly_main_shift_count"] > 1
-    ]
-    .sort_values(
-        ["distinct_weekly_main_shift_count", "working_day_count"],
-        ascending=False
-    )
-)
+weekly_work_constraints = 0
 
-display(team_week_stability_problem_df)
+WEEKLY_WORK_DAYS = 5
 
-print("Toplam takım-hafta sayısı:", len(team_week_stability))
-print(
-    "Hafta içinde ana vardiyası değişen takım-hafta sayısı:",
-    len(team_week_stability_problem_df)
-)
+def get_week_key(ds):
+    d = pd.to_datetime(ds)
+    iso = d.isocalendar()
+    return f"{iso.year}-W{str(iso.week).zfill(2)}"
+
+
+# haftalara göre günleri grupla
+week_days = {}
+
+for ds in PLAN_GUNLER:
+    wk = get_week_key(ds)
+    week_days.setdefault(wk, []).append(ds)
+
+
+for a in AGENTS:
+    for wk, days in week_days.items():
+
+        # Bu agent için o hafta çalışabileceği x değişkenleri
+        vars_week = [
+            x[(a, ds, v)]
+            for ds in days
+            for v in gun_vardiyalari.get(ds, [])
+            if (a, ds, v) in x
+        ]
+
+        if not vars_week:
+            continue
+
+        # O hafta agent'ın kaç farklı günü çalışabileceğini bul
+        available_days = []
+
+        for ds in days:
+            day_vars = [
+                x[(a, ds, v)]
+                for v in gun_vardiyalari.get(ds, [])
+                if (a, ds, v) in x
+            ]
+
+            if day_vars:
+                available_days.append(ds)
+
+        available_day_count = len(available_days)
+
+        # Normalde 5 gün çalışsın.
+        # Ama izinlerden dolayı o hafta 5 günden az müsaitse,
+        # maksimum müsait olduğu kadar çalışsın.
+        required_work_days = min(WEEKLY_WORK_DAYS, available_day_count)
+
+        if required_work_days == 0:
+            continue
+
+        model.Add(sum(vars_week) == required_work_days)
+        weekly_work_constraints += 1
+
+print("haftalık 5 gün çalışma kısıtı:", weekly_work_constraints)

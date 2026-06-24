@@ -1,46 +1,25 @@
-# %% [KONTROL 1] - ROSTER LONG FORMAT
+# %% [KONTROL 2] - COVERAGE / TALEP KONTROLÜ
 
-roster_long = (
-    roster
-    .reset_index()
-    .melt(
-        id_vars="agent",
-        var_name="tarih",
-        value_name="vardiya"
-    )
+assigned_df = (
+    work_roster
+    .groupby(["tarih", "vardiya"])
+    .size()
+    .reset_index(name="assigned_count")
 )
 
-roster_long["tarih"] = roster_long["tarih"].astype(str)
+demand_df = df_talep[["tarih", "vardiya", "talep"]].copy()
+demand_df["tarih"] = demand_df["tarih"].astype(str)
 
-# sadece gerçek vardiya alanlar
-work_roster = roster_long[
-    ~roster_long["vardiya"].isin(["off", "izin"])
-].copy()
-
-# vardiya saatlerini ayır
-work_roster[["baslangic", "bitis"]] = work_roster["vardiya"].str.split("-", expand=True)
-
-# agent bilgilerini ekle
-agent_info_cols = [
-    "agent_user_code",
-    "agent_name",
-    "team",
-    "sabah_calisir_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "pazartesi_izinli_flg",
-    "cuma_izinli_flg"
-]
-
-agent_info = df_tam[agent_info_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-work_roster = work_roster.merge(
-    agent_info,
-    left_on="agent",
-    right_on="agent_user_code",
+coverage_check = demand_df.merge(
+    assigned_df,
+    on=["tarih", "vardiya"],
     how="left"
 )
 
-display(work_roster.head())
-print("Toplam çalışma satırı:", len(work_roster))
+coverage_check["assigned_count"] = coverage_check["assigned_count"].fillna(0).astype(int)
+coverage_check["diff"] = coverage_check["assigned_count"] - coverage_check["talep"]
+
+coverage_problem_df = coverage_check[coverage_check["diff"] != 0]
+
+display(coverage_problem_df)
+print("Coverage problem sayısı:", len(coverage_problem_df))

@@ -1,145 +1,105 @@
-# %% [FINAL OUTPUT] - AGENT GÜNLÜK SHIFT TABLOSU
+# %% [HÜCRE] - TAKIM HAFTA BOYUNCA AYNI VARDİYADA KALSIN OBJECTIVE
 
-final_roster = (
-    roster
-    .reset_index()
-    .melt(
-        id_vars="agent",
-        var_name="tarih",
-        value_name="vardiya"
-    )
-)
+# Bu hücre, günlük takım bölünmesin objective'inden SONRA çalışmalı.
+# objective_terms sıfırlanmıyor, üstüne ekleniyor.
 
-final_roster["agent"] = final_roster["agent"].astype(str).str.strip()
-final_roster["tarih"] = final_roster["tarih"].astype(str)
+import re
 
-# Çalışma / off / izin statüsü
-final_roster["status"] = final_roster["vardiya"].apply(
-    lambda x: "calisiyor" if x not in ["off", "izin"] else x
-)
+WEEK_SHIFT_CHANGE_PENALTY = 5000
 
-# Başlangıç / bitiş saatlerini ayır
-final_roster["baslangic"] = None
-final_roster["bitis"] = None
+team_col = "takim"
 
-mask_work = final_roster["status"] == "calisiyor"
+def safe_name(x):
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(x))
 
-final_roster.loc[mask_work, ["baslangic", "bitis"]] = (
-    final_roster.loc[mask_work, "vardiya"]
-    .str.split("-", expand=True)
-    .values
-)
 
-# Agent bilgilerini ekle
-agent_info_cols = [
-    "agent_user_code",
-    "agent_name",
-    "takim",
-    "working_main_group",
-    "line_based_main_group",
-    "sabah_calisir_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "pazartesi_izinli_flg",
-    "cuma_izinli_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg",
-    "mesaiye_kalamaz_flg"
-]
+def get_week_key(ds):
+    d = pd.to_datetime(ds)
+    iso = d.isocalendar()
+    return f"{iso.year}-W{str(iso.week).zfill(2)}"
 
-existing_cols = [c for c in agent_info_cols if c in df_tam.columns]
 
-agent_info = df_tam[existing_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
+def get_shift_pattern(ds, v):
+    bas, bit = saat[(ds, v)]
+    return f"{bas}-{bit}"
 
-final_roster = final_roster.merge(
-    agent_info,
-    left_on="agent",
-    right_on="agent_user_code",
-    how="left"
-)
 
-# Eksik flag kolonları varsa 0 yap
-flag_cols = [
-    "sabah_calisir_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "pazartesi_izinli_flg",
-    "cuma_izinli_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg",
-    "mesaiye_kalamaz_flg"
-]
+# Haftalık gün listesi
+week_days = {}
 
-for col in flag_cols:
-    if col not in final_roster.columns:
-        final_roster[col] = 0
+for ds in PLAN_GUNLER:
+    wk = get_week_key(ds)
+    week_days.setdefault(wk, []).append(ds)
 
-    final_roster[col] = final_roster[col].fillna(0).astype(int)
 
-# Özel durum özeti
-final_roster["ozel_durum"] = ""
+weekly_objective_terms = []
 
-final_roster.loc[
-    final_roster["sabah_calisir_flg"] == 1,
-    "ozel_durum"
-] += "sabah_calisir;"
+team_week_main = {}
+weekly_change_var_count = 0
+team_week_count = 0
 
-final_roster.loc[
-    final_roster["hamile_flg"] == 1,
-    "ozel_durum"
-] += "hamile;"
 
-final_roster.loc[
-    final_roster["sut_izni_flg"] == 1,
-    "ozel_durum"
-] += "sut_izni;"
+for team, members in team_members.items():
+    team_name = safe_name(team)
 
-final_roster.loc[
-    final_roster["mesaiye_kalamaz_flg"] == 1,
-    "ozel_durum"
-] += "mesaiye_kalamaz;"
+    for wk, days in week_days.items():
+        wk_name = safe_name(wk)
 
-final_roster["ozel_durum"] = final_roster["ozel_durum"].replace("", "yok")
+        # Bu team-week için günlük main pattern var mı?
+        active_day_patterns = [
+            (ds, p)
+            for ds in days
+            for p in all_patterns
+            if (team, ds, p) in team_day_main
+        ]
 
-# Gün bilgileri
-final_roster["tarih_dt"] = pd.to_datetime(final_roster["tarih"])
-final_roster["gun_adi"] = final_roster["tarih_dt"].dt.day_name()
-final_roster["hafta"] = final_roster["tarih_dt"].dt.isocalendar().week
-final_roster["hafta_sonu_flg"] = final_roster["tarih_dt"].dt.weekday.isin([5, 6]).astype(int)
+        if not active_day_patterns:
+            continue
 
-# Kolon sırası
-final_cols = [
-    "agent",
-    "agent_name",
-    "takim",
-    "working_main_group",
-    "line_based_main_group",
-    "tarih",
-    "gun_adi",
-    "hafta",
-    "hafta_sonu_flg",
-    "vardiya",
-    "baslangic",
-    "bitis",
-    "status",
-    "ozel_durum",
-    "sabah_calisir_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "mesaiye_kalamaz_flg",
-    "pazartesi_izinli_flg",
-    "cuma_izinli_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg"
-]
+        # Haftalık ana vardiya seç
+        week_main_vars = []
 
-final_cols = [c for c in final_cols if c in final_roster.columns]
+        for p in all_patterns:
+            p_name = safe_name(p)
 
-final_roster = final_roster[final_cols].sort_values(
-    ["takim", "agent_name", "tarih"]
-).reset_index(drop=True)
+            week_main = model.NewBoolVar(
+                f"week_main_{team_name}_{wk_name}_{p_name}"
+            )
 
-display(final_roster.head(50))
+            team_week_main[(team, wk, p)] = week_main
+            week_main_vars.append(week_main)
 
-print("Final roster satır sayısı:", len(final_roster))
+        # Her team-week için 1 haftalık ana vardiya seçilsin
+        model.Add(sum(week_main_vars) == 1)
+        team_week_count += 1
+
+        # O haftadaki günlük ana vardiya haftalık ana vardiyadan farklıysa ceza
+        for ds in days:
+            ds_name = safe_name(ds)
+
+            for p in all_patterns:
+                if (team, ds, p) not in team_day_main:
+                    continue
+
+                p_name = safe_name(p)
+
+                week_change = model.NewBoolVar(
+                    f"week_change_{team_name}_{wk_name}_{ds_name}_{p_name}"
+                )
+
+                # week_change = 1 olması için:
+                # günlük main vardiya p seçilmiş ama haftalık main p değil
+                model.Add(week_change >= team_day_main[(team, ds, p)] - team_week_main[(team, wk, p)])
+                model.Add(week_change <= team_day_main[(team, ds, p)])
+                model.Add(week_change <= 1 - team_week_main[(team, wk, p)])
+
+                weekly_objective_terms.append(WEEK_SHIFT_CHANGE_PENALTY * week_change)
+                weekly_change_var_count += 1
+
+
+objective_terms.extend(weekly_objective_terms)
+
+print("team-week sayısı:", team_week_count)
+print("weekly change değişkeni:", weekly_change_var_count)
+print("weekly objective term:", len(weekly_objective_terms))
+print("toplam objective term:", len(objective_terms))

@@ -1,73 +1,97 @@
-# %% [HÜCRE] - İKİ VARDİYA ARASI MİNİMUM 11 SAAT DİNLENME
+# %% [HÜCRE] - TAKIM HAFTA BOYUNCA AYNI VARDİYADA KALSIN OBJECTIVE
 
-MIN_REST_HOURS = 11
-MIN_REST_MINUTES = MIN_REST_HOURS * 60
+import re
 
-def make_shift_datetime(tarih, baslangic, bitis):
-    start_dt = pd.to_datetime(f"{tarih} {baslangic}")
-    end_dt = pd.to_datetime(f"{tarih} {bitis}")
+WEEK_SHIFT_CHANGE_PENALTY = 5000
 
-    # Geceye dönen vardiya: 18:00-02:00 gibi
-    if end_dt <= start_dt:
-        end_dt = end_dt + pd.Timedelta(days=1)
-
-    return start_dt, end_dt
+def safe_name(x):
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(x))
 
 
-# Tüm vardiya zamanlarını hazırla
-shift_time_map = {}
+def get_week_key(ds):
+    d = pd.to_datetime(ds)
+    iso = d.isocalendar()
+    return f"{iso.year}-W{str(iso.week).zfill(2)}"
+
+
+# PLAN_GUNLER'i haftalara ayır
+week_days = {}
 
 for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        bas, bit = saat[(ds, v)]
-        start_dt, end_dt = make_shift_datetime(ds, bas, bit)
-
-        shift_time_map[(ds, v)] = {
-            "start_dt": start_dt,
-            "end_dt": end_dt,
-            "vardiya": f"{bas}-{bit}"
-        }
+    wk = get_week_key(ds)
+    week_days.setdefault(wk, []).append(ds)
 
 
-min_rest_constraints = 0
+weekly_terms = []
+team_week_main = {}
 
-for a in AGENTS:
-    agent_options = []
+weekly_change_count = 0
+team_week_count = 0
 
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) in x:
-                agent_options.append({
-                    "ds": ds,
-                    "v": v,
-                    "start_dt": shift_time_map[(ds, v)]["start_dt"],
-                    "end_dt": shift_time_map[(ds, v)]["end_dt"],
-                    "vardiya": shift_time_map[(ds, v)]["vardiya"]
-                })
+for team in team_members.keys():
+    team_name = safe_name(team)
 
-    agent_options = sorted(agent_options, key=lambda r: r["start_dt"])
+    for wk, days in week_days.items():
+        wk_name = safe_name(wk)
 
-    for i in range(len(agent_options)):
-        sh1 = agent_options[i]
+        # Bu team-week için günlük ana vardiya değişkenleri var mı?
+        has_team_day = False
 
-        for j in range(i + 1, len(agent_options)):
-            sh2 = agent_options[j]
-
-            rest_minutes = (
-                sh2["start_dt"] - sh1["end_dt"]
-            ).total_seconds() / 60
-
-            # Eğer vardiyalar çakışıyorsa veya dinlenme 11 saatten azsa birlikte seçilemez
-            if rest_minutes < MIN_REST_MINUTES:
-                model.Add(
-                    x[(a, sh1["ds"], sh1["v"])] +
-                    x[(a, sh2["ds"], sh2["v"])]
-                    <= 1
-                )
-                min_rest_constraints += 1
-
-            # sh2 artık yeterince uzaksa sonraki vardiyalar daha da uzak olacak
-            if rest_minutes >= MIN_REST_MINUTES:
+        for ds in days:
+            for p in all_patterns:
+                if (team, ds, p) in team_day_main:
+                    has_team_day = True
+                    break
+            if has_team_day:
                 break
 
-print("minimum 11 saat dinlenme kısıtı:", min_rest_constraints)
+        if not has_team_day:
+            continue
+
+        # Haftalık ana vardiya seç
+        week_main_vars = []
+
+        for p in all_patterns:
+            p_name = safe_name(p)
+
+            week_main = model.NewBoolVar(
+                f"week_main_{team_name}_{wk_name}_{p_name}"
+            )
+
+            team_week_main[(team, wk, p)] = week_main
+            week_main_vars.append(week_main)
+
+        # Her team-week için 1 haftalık ana vardiya seçilsin
+        model.Add(sum(week_main_vars) == 1)
+        team_week_count += 1
+
+        # Günlük ana vardiya haftalık ana vardiyadan farklıysa ceza
+        for ds in days:
+            ds_name = safe_name(ds)
+
+            for p in all_patterns:
+                if (team, ds, p) not in team_day_main:
+                    continue
+
+                p_name = safe_name(p)
+
+                week_change = model.NewBoolVar(
+                    f"week_change_{team_name}_{wk_name}_{ds_name}_{p_name}"
+                )
+
+                model.Add(
+                    week_change >= team_day_main[(team, ds, p)] - team_week_main[(team, wk, p)]
+                )
+                model.Add(week_change <= team_day_main[(team, ds, p)])
+                model.Add(week_change <= 1 - team_week_main[(team, wk, p)])
+
+                weekly_terms.append(WEEK_SHIFT_CHANGE_PENALTY * week_change)
+                weekly_change_count += 1
+
+
+objective_terms.extend(weekly_terms)
+
+print("team-week sayısı:", team_week_count)
+print("weekly change değişkeni:", weekly_change_count)
+print("weekly objective term:", len(weekly_terms))
+print("toplam objective term:", len(objective_terms))

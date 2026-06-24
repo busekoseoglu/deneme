@@ -1,7 +1,14 @@
-# %% [DEBUG] - TAKIM HAFTA TEK VARDİYA MÜMKÜN MÜ? OKUNUR ÖZET
+# %% [HÜCRE] - AGENT HAFTADA 5 GÜN AYNI VARDİYADA ÇALIŞSIN
+# Bu hücre eski "haftada 5 gün" ve eski "hafta boyunca aynı vardiya" hücrelerinin yerine geçer.
 
-team_col = "takim"
+from collections import defaultdict
+
 WEEKLY_WORK_DAYS = 5
+
+weekly_same_shift_constraints = 0
+weekly_pattern_choice_constraints = 0
+no_candidate_rows = []
+
 
 def get_week_key(ds):
     d = pd.to_datetime(ds)
@@ -14,101 +21,155 @@ def get_shift_pattern(ds, v):
     return f"{bas}-{bit}"
 
 
+def time_to_minutes(t):
+    h, m = map(int, str(t).split(":"))
+    return h * 60 + m
+
+
+def is_day_only_shift_allowed(baslangic, bitis):
+    start_min = time_to_minutes(baslangic)
+    end_min = time_to_minutes(bitis)
+
+    if end_min <= start_min:
+        return False
+
+    if start_min < time_to_minutes("07:00"):
+        return False
+
+    if end_min > time_to_minutes("20:00"):
+        return False
+
+    return True
+
+
 # Haftaları oluştur
 week_days = {}
+
 for ds in PLAN_GUNLER:
     wk = get_week_key(ds)
     week_days.setdefault(wk, []).append(ds)
 
 
-team_members = (
-    df_tam
-    .assign(agent_user_code=df_tam["agent_user_code"].astype(str).str.strip())
-    .groupby(team_col)["agent_user_code"]
-    .apply(lambda x: [str(a).strip() for a in x])
-    .to_dict()
-)
+# Agent flag map
+agent_flags = {}
+
+for _, row in df_tam.iterrows():
+    a = str(row["agent_user_code"]).strip()
+
+    agent_flags[a] = {
+        "sabah": int(row.get("sabah_calisir_flg", 0)),
+        "hamile": int(row.get("hamile_flg", 0)),
+        "sut": int(row.get("sut_izni_flg", 0))
+    }
 
 
-debug_rows = []
+def is_shift_feasible_for_agent(a, ds, v):
+    if (a, ds, v) not in x:
+        return False
 
-for team, members in team_members.items():
+    flags = agent_flags.get(str(a).strip(), {"sabah": 0, "hamile": 0, "sut": 0})
+
+    is_day_only = (
+        flags["sabah"] == 1
+        or flags["hamile"] == 1
+        or flags["sut"] == 1
+    )
+
+    weekend_off = (
+        flags["hamile"] == 1
+        or flags["sut"] == 1
+    )
+
+    d = pd.to_datetime(ds).date()
+
+    # Hamile / süt izni hafta sonu çalışamaz
+    if weekend_off and d.weekday() in [5, 6]:
+        return False
+
+    bas, bit = saat[(ds, v)]
+
+    # Sabah/hamile/süt izni gece veya 20 sonrası çalışamaz
+    if is_day_only and not is_day_only_shift_allowed(bas, bit):
+        return False
+
+    return True
+
+
+for a in AGENTS:
+    a = str(a).strip()
+
     for wk, days in week_days.items():
 
-        # O hafta kaç gün var?
-        week_day_count = len(days)
+        pattern_to_vars = defaultdict(list)
+        pattern_to_days = defaultdict(set)
+        available_days = set()
 
-        # Herkes 5 gün çalışacak ama hafta eksikse hafta gün sayısı kadar
-        required_days_per_agent = min(WEEKLY_WORK_DAYS, week_day_count)
-        required_agent_days = len(members) * required_days_per_agent
+        for ds in days:
+            for v in gun_vardiyalari.get(ds, []):
 
-        pattern_capacity_rows = []
+                if not is_shift_feasible_for_agent(a, ds, v):
+                    continue
 
-        patterns = sorted({
-            get_shift_pattern(ds, v)
-            for ds in days
-            for v in gun_vardiyalari.get(ds, [])
-        })
+                p = get_shift_pattern(ds, v)
 
-        for p in patterns:
-            possible_agent_days = set()
+                pattern_to_vars[p].append(x[(a, ds, v)])
+                pattern_to_days[p].add(ds)
+                available_days.add(ds)
 
-            for a in members:
-                for ds in days:
-                    can_work_pattern_that_day = False
-
-                    for v in gun_vardiyalari.get(ds, []):
-                        if (a, ds, v) not in x:
-                            continue
-
-                        if get_shift_pattern(ds, v) == p:
-                            can_work_pattern_that_day = True
-
-                    if can_work_pattern_that_day:
-                        possible_agent_days.add((a, ds))
-
-            pattern_capacity_rows.append({
-                "pattern": p,
-                "possible_agent_days": len(possible_agent_days)
-            })
-
-        if not pattern_capacity_rows:
+        if not available_days:
             continue
 
-        pattern_capacity_df = pd.DataFrame(pattern_capacity_rows)
+        # O hafta kaç gün çalışması gerekiyorsa
+        required_work_days = min(WEEKLY_WORK_DAYS, len(available_days))
 
-        best_row = pattern_capacity_df.sort_values(
-            "possible_agent_days",
-            ascending=False
-        ).iloc[0]
+        # Bu agent-week için aynı vardiyada required_work_days kadar gün sağlayabilen pattern'ler
+        candidate_patterns = [
+            p
+            for p, p_days in pattern_to_days.items()
+            if len(p_days) >= required_work_days
+        ]
 
-        best_pattern = best_row["pattern"]
-        best_capacity = int(best_row["possible_agent_days"])
+        if not candidate_patterns:
+            no_candidate_rows.append({
+                "agent": a,
+                "week_key": wk,
+                "available_day_count": len(available_days),
+                "required_work_days": required_work_days,
+                "best_pattern_day_count": max([len(v) for v in pattern_to_days.values()]) if pattern_to_days else 0
+            })
+            continue
 
-        debug_rows.append({
-            "takim": team,
-            "week_key": wk,
-            "team_size": len(members),
-            "week_day_count": week_day_count,
-            "required_days_per_agent": required_days_per_agent,
-            "required_agent_days": required_agent_days,
-            "best_pattern": best_pattern,
-            "best_pattern_possible_agent_days": best_capacity,
-            "gap": best_capacity - required_agent_days,
-            "feasible_team_week_same_shift": best_capacity >= required_agent_days
-        })
+        pattern_vars = {}
+
+        for p in candidate_patterns:
+            p_name = p.replace(":", "").replace("-", "_")
+            wk_name = wk.replace("-", "_")
+
+            pattern_vars[p] = model.NewBoolVar(
+                f"weekly_pattern_{a}_{wk_name}_{p_name}"
+            )
+
+        # Agent-week için tek pattern seç
+        model.Add(sum(pattern_vars.values()) == 1)
+        weekly_pattern_choice_constraints += 1
+
+        # Seçilen pattern'de tam required_work_days çalışsın,
+        # seçilmeyen pattern'lerde hiç çalışmasın.
+        for p, vars_p in pattern_to_vars.items():
+
+            if p in candidate_patterns:
+                model.Add(sum(vars_p) == required_work_days).OnlyEnforceIf(pattern_vars[p])
+                model.Add(sum(vars_p) == 0).OnlyEnforceIf(pattern_vars[p].Not())
+            else:
+                model.Add(sum(vars_p) == 0)
+
+            weekly_same_shift_constraints += 1
 
 
-team_week_feasibility_summary = pd.DataFrame(debug_rows)
+no_candidate_df = pd.DataFrame(no_candidate_rows)
 
-problem_team_weeks = team_week_feasibility_summary[
-    team_week_feasibility_summary["feasible_team_week_same_shift"] == False
-].sort_values(
-    ["gap", "required_agent_days"],
-    ascending=[True, False]
-)
+display(no_candidate_df)
 
-display(problem_team_weeks)
-
-print("Toplam takım-hafta:", len(team_week_feasibility_summary))
-print("Tek vardiya hard kuralı kapasite olarak mümkün olmayan takım-hafta:", len(problem_team_weeks))
+print("agent-week pattern seçim kısıtı:", weekly_pattern_choice_constraints)
+print("haftalık aynı vardiya kısıtı:", weekly_same_shift_constraints)
+print("candidate pattern bulunamayan agent-week:", len(no_candidate_df))

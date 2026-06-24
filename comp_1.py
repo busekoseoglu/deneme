@@ -1,27 +1,14 @@
-# %% [DEBUG] - WEEK_KEY HANGİ TARİHLERE DENK GELİYOR?
+# %% [DEBUG] - 2026-W23 HANGİ VARDİYALARDA SIKIŞIYOR?
 
-week_map = []
+problem_wk = "2026-W23"
 
-for ds in PLAN_GUNLER:
-    d = pd.to_datetime(ds)
-    iso = d.isocalendar()
-    
-    week_map.append({
-        "tarih": ds,
-        "gun_adi": d.day_name(),
-        "week_key": f"{iso.year}-W{str(iso.week).zfill(2)}"
-    })
-
-week_map_df = pd.DataFrame(week_map)
-
-display(
-    week_map_df
-    .groupby("week_key")
-    .agg(
-        start_date=("tarih", "min"),
-        end_date=("tarih", "max"),
-        gun_sayisi=("tarih", "count"),
-        tarihler=("tarih", lambda x: list(x))
-    )
-    .reset_index()
+w23_pattern_need = (
+    pattern_need_df[pattern_need_df["week_key"] == problem_wk]
+    .sort_values("min_agents_needed", ascending=False)
 )
+
+display(w23_pattern_need)
+
+print("W23 toplam minimum agent ihtiyacı:", w23_pattern_need["min_agents_needed"].sum())
+print("Mevcut agent sayısı:", len(AGENTS))
+print("Gap:", len(AGENTS) - w23_pattern_need["min_agents_needed"].sum())

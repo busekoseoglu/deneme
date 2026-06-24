@@ -1,9 +1,9 @@
 # %% [HÜCRE] - AGENT HAFTA BOYUNCA AYNI VARDİYADA KALSIN
-# HARD CONSTRAINT
-# Bir agent aynı hafta içinde çalıştığı tüm günlerde aynı vardiya pattern'inde kalır.
-# Off / izin günleri bu kısıta dahil değildir.
+# HARD CONSTRAINT - daha güvenli versiyon
 
 agent_week_same_shift_constraints = 0
+agent_week_pattern_choice_constraints = 0
+skipped_agent_weeks = 0
 
 def get_week_key(ds):
     d = pd.to_datetime(ds)
@@ -16,7 +16,6 @@ def get_shift_pattern(ds, v):
     return f"{bas}-{bit}"
 
 
-# PLAN_GUNLER'i haftalara ayır
 week_days = {}
 
 for ds in PLAN_GUNLER:
@@ -24,47 +23,45 @@ for ds in PLAN_GUNLER:
     week_days.setdefault(wk, []).append(ds)
 
 
-# Tüm vardiya pattern'leri
-all_patterns = sorted({
-    get_shift_pattern(ds, v)
-    for ds in PLAN_GUNLER
-    for v in gun_vardiyalari.get(ds, [])
-})
-
-
 for a in AGENTS:
     for wk, days in week_days.items():
 
-        # Bu agent'ın o hafta çalışabileceği tüm x değişkenleri
-        week_vars = [
-            (ds, v)
-            for ds in days
-            for v in gun_vardiyalari.get(ds, [])
-            if (a, ds, v) in x
-        ]
+        pattern_to_vars = {}
+        all_week_vars = []
 
-        if not week_vars:
+        for ds in days:
+            for v in gun_vardiyalari.get(ds, []):
+                if (a, ds, v) not in x:
+                    continue
+
+                p = get_shift_pattern(ds, v)
+
+                pattern_to_vars.setdefault(p, []).append(x[(a, ds, v)])
+                all_week_vars.append(x[(a, ds, v)])
+
+        if not all_week_vars:
             continue
 
-        # Agent-week için 1 tane haftalık vardiya pattern'i seç
+        # Bu agent-week için pattern değişkenleri
         pattern_vars = {}
 
-        for p in all_patterns:
+        for p in pattern_to_vars.keys():
+            p_name = p.replace(":", "").replace("-", "_")
+
             pattern_vars[p] = model.NewBoolVar(
-                f"agent_week_pattern_{a}_{wk}_{p.replace(':', '').replace('-', '_')}"
+                f"agent_week_pattern_{a}_{wk}_{p_name}"
             )
 
+        # Agent o hafta çalışıyorsa sadece 1 pattern seçsin
+        # Haftalık 5 gün kısıtı zaten çalışmayı zorladığı için burada 1 pattern seçiyoruz.
         model.Add(sum(pattern_vars.values()) == 1)
+        agent_week_pattern_choice_constraints += 1
 
-        # Agent o hafta hangi gün çalışırsa, sadece seçilen pattern'de çalışabilir
-        for ds, v in week_vars:
-            p = get_shift_pattern(ds, v)
+        # Seçilmeyen pattern'deki vardiyalar alınamaz
+        for p, vars_p in pattern_to_vars.items():
+            for var in vars_p:
+                model.Add(var <= pattern_vars[p])
+                agent_week_same_shift_constraints += 1
 
-            model.Add(
-                x[(a, ds, v)] <= pattern_vars[p]
-            )
-
-            agent_week_same_shift_constraints += 1
-
-
+print("agent-week pattern seçim kısıtı:", agent_week_pattern_choice_constraints)
 print("agent hafta boyunca aynı vardiya hard kısıtı:", agent_week_same_shift_constraints)

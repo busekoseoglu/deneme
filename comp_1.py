@@ -1,111 +1,124 @@
-# %% [KONTROL 10] - TEAM + HAFTA ANA VARDİYA VE SAPMALAR
+# %% [KONTROL] - GÜNLÜK TAKIM BÖLÜNMESİ
+# Amaç:
+# Her takım aynı gün mümkün olduğunca tek vardiyada olmalı.
+# Özel durumlu kişiler ayrılabilir:
+# sabah_calisir_flg / hamile_flg / sut_izni_flg = 1 olanlar.
 
-pattern_counts = (
-    team_week_check
-    .groupby(["team", "week_key", "vardiya"])
-    .size()
-    .reset_index(name="assignment_count")
+team_col = "takim"   # sende takım kolonu bu isimde
+
+check_df = work_roster.copy()
+
+# Gerekli flag kolonları yoksa 0 kabul et
+special_flag_cols = [
+    "sabah_calisir_flg",
+    "hamile_flg",
+    "sut_izni_flg"
+]
+
+for col in special_flag_cols:
+    if col not in check_df.columns:
+        check_df[col] = 0
+
+for col in special_flag_cols:
+    check_df[col] = check_df[col].fillna(0).astype(int)
+
+# Özel durumlu kişi flag'i
+check_df["special_flg"] = (
+    (check_df["sabah_calisir_flg"] == 1) |
+    (check_df["hamile_flg"] == 1) |
+    (check_df["sut_izni_flg"] == 1)
+).astype(int)
+
+# Her takım-gün-vardiya kaç kişi var?
+team_day_shift = (
+    check_df
+    .groupby([team_col, "tarih", "vardiya"])
+    .agg(
+        total_agents=("agent", "nunique"),
+        normal_agents=("special_flg", lambda x: (x == 0).sum()),
+        special_agents=("special_flg", lambda x: (x == 1).sum()),
+        agent_list=("agent", lambda x: list(x))
+    )
+    .reset_index()
 )
 
-# Her team-week için en çok kullanılan vardiya = main pattern
-main_patterns = (
-    pattern_counts
-    .sort_values(["team", "week_key", "assignment_count"], ascending=[True, True, False])
-    .groupby(["team", "week_key"])
+# Her takım-gün için ana vardiya = en çok kişinin olduğu vardiya
+main_shift = (
+    team_day_shift
+    .sort_values(
+        [team_col, "tarih", "total_agents"],
+        ascending=[True, True, False]
+    )
+    .groupby([team_col, "tarih"])
     .head(1)
+    [[team_col, "tarih", "vardiya", "total_agents"]]
     .rename(columns={
         "vardiya": "main_vardiya",
-        "assignment_count": "main_assignment_count"
+        "total_agents": "main_vardiya_agent_count"
     })
 )
 
-team_week_detail = team_week_check.merge(
-    main_patterns[["team", "week_key", "main_vardiya"]],
-    on=["team", "week_key"],
+team_day_detail = team_day_shift.merge(
+    main_shift,
+    on=[team_col, "tarih"],
     how="left"
 )
 
-team_week_detail["is_main_vardiya"] = (
-    team_week_detail["vardiya"] == team_week_detail["main_vardiya"]
+team_day_detail["is_main_vardiya"] = (
+    team_day_detail["vardiya"] == team_day_detail["main_vardiya"]
 ).astype(int)
 
-team_week_split_summary = (
-    team_week_detail
-    .groupby(["team", "week_key", "main_vardiya"])
+# Takım-gün özet
+team_day_split_summary = (
+    team_day_detail
+    .groupby([team_col, "tarih", "main_vardiya", "main_vardiya_agent_count"])
     .agg(
-        total_assignment=("vardiya", "count"),
-        main_assignment=("is_main_vardiya", "sum"),
-        split_assignment=("is_main_vardiya", lambda x: (x == 0).sum()),
-        agent_count=("agent", "nunique"),
-        distinct_shift_count=("vardiya", "nunique")
-    )
-    .reset_index()
-)
-
-team_week_split_summary["split_rate"] = (
-    team_week_split_summary["split_assignment"]
-    / team_week_split_summary["total_assignment"]
-)
-
-team_week_split_summary = team_week_split_summary.sort_values(
-    ["split_assignment", "split_rate"],
-    ascending=False
-)
-
-display(team_week_split_summary.head(30))
-
-print("Toplam team-week sayısı:", len(team_week_split_summary))
-print("Split olan team-week sayısı:", len(team_week_split_summary[team_week_split_summary["split_assignment"] > 0]))
-
-
-# %% [KONTROL 11] - TEAM HAFTALIK ANA VARDİYA DIŞINA ÇIKAN AGENT DETAYI
-
-team_split_detail_df = team_week_detail[
-    team_week_detail["is_main_vardiya"] == 0
-].copy()
-
-team_split_detail_df = team_split_detail_df[
-    [
-        "team",
-        "week_key",
-        "agent",
-        "agent_name",
-        "tarih",
-        "vardiya",
-        "main_vardiya",
-        "sabah_calisir_flg",
-        "hamile_flg",
-        "sut_izni_flg"
-    ]
-].sort_values(
-    ["team", "week_key", "tarih", "agent"]
-)
-
-display(team_split_detail_df.head(100))
-
-print("Ana vardiya dışına çıkan toplam atama:", len(team_split_detail_df))
-
-
-# %% [KONTROL 12] - TEAM + GÜN BAZINDA KAÇ FARKLI VARDİYA VAR?
-
-team_day_summary = (
-    work_roster
-    .groupby(["team", "tarih"])
-    .agg(
+        total_agents=("total_agents", "sum"),
         distinct_shift_count=("vardiya", "nunique"),
-        total_assignment=("vardiya", "count"),
-        agent_count=("agent", "nunique")
+        normal_split_agents=(
+            "normal_agents",
+            lambda x: x[team_day_detail.loc[x.index, "is_main_vardiya"] == 0].sum()
+        ),
+        special_split_agents=(
+            "special_agents",
+            lambda x: x[team_day_detail.loc[x.index, "is_main_vardiya"] == 0].sum()
+        ),
+        shifts_used=("vardiya", lambda x: sorted(x.unique()))
     )
     .reset_index()
 )
 
-team_day_problem_df = team_day_summary[
-    team_day_summary["distinct_shift_count"] > 1
-].sort_values(
-    ["distinct_shift_count", "total_assignment"],
-    ascending=False
+# Normal ekip bölünmüş mü?
+# Ana vardiya dışına çıkan normal agent varsa asıl problem bu.
+team_day_split_summary["normal_team_split_problem"] = (
+    team_day_split_summary["normal_split_agents"] > 0
+).astype(int)
+
+# Özel durum nedeniyle ayrılma var mı?
+team_day_split_summary["only_special_split"] = (
+    (team_day_split_summary["normal_split_agents"] == 0) &
+    (team_day_split_summary["special_split_agents"] > 0)
+).astype(int)
+
+# Problemli olanları üste al
+team_day_split_summary = team_day_split_summary.sort_values(
+    [
+        "normal_team_split_problem",
+        "normal_split_agents",
+        "distinct_shift_count",
+        "total_agents"
+    ],
+    ascending=[False, False, False, False]
 )
 
-display(team_day_problem_df.head(50))
+display(team_day_split_summary)
 
-print("Aynı gün birden fazla vardiyaya bölünen team-day sayısı:", len(team_day_problem_df))
+print("Toplam takım-gün sayısı:", len(team_day_split_summary))
+print(
+    "Normal ekip bölünmesi olan takım-gün sayısı:",
+    team_day_split_summary["normal_team_split_problem"].sum()
+)
+print(
+    "Sadece özel durum nedeniyle ayrılan takım-gün sayısı:",
+    team_day_split_summary["only_special_split"].sum()
+)

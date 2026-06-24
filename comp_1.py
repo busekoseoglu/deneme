@@ -1,21 +1,36 @@
-# %% [KONTROL] - ÖZEL DURUM FLAGLERİ DOĞRU GELMİŞ Mİ?
+# %% [KONTROL] - TAKIM GÜN VARDİYA DAĞILIMI HAM TABLO
 
-special_cols = ["sabah_calisir_flg", "hamile_flg", "sut_izni_flg"]
+tmp = work_roster.copy()
 
-print("work_roster satır sayısı:", len(work_roster))
+tmp["special_flg"] = (
+    (tmp["sabah_calisir_flg"].fillna(0).astype(int) == 1) |
+    (tmp["hamile_flg"].fillna(0).astype(int) == 1) |
+    (tmp["sut_izni_flg"].fillna(0).astype(int) == 1)
+).astype(int)
 
-for col in special_cols:
-    print(col, "kolon var mı:", col in work_roster.columns)
-    if col in work_roster.columns:
-        print(col, "toplam:", work_roster[col].fillna(0).astype(int).sum())
-
-display(
-    work_roster[
-        (work_roster["sabah_calisir_flg"].fillna(0).astype(int) == 1) |
-        (work_roster["hamile_flg"].fillna(0).astype(int) == 1) |
-        (work_roster["sut_izni_flg"].fillna(0).astype(int) == 1)
-    ][
-        ["agent", "agent_name", "takim", "tarih", "vardiya",
-         "sabah_calisir_flg", "hamile_flg", "sut_izni_flg"]
-    ].head(50)
+team_day_shift_raw = (
+    tmp
+    .groupby(["takim", "tarih", "vardiya"])
+    .agg(
+        total_agents=("agent", "nunique"),
+        normal_agents=("special_flg", lambda x: (x == 0).sum()),
+        special_agents=("special_flg", lambda x: (x == 1).sum()),
+        agent_list=("agent", lambda x: list(x))
+    )
+    .reset_index()
+    .sort_values(["takim", "tarih", "vardiya"])
 )
+
+display(team_day_shift_raw.head(100))
+
+# Aynı takım-günde kaç vardiya var?
+split_count_check = (
+    team_day_shift_raw
+    .groupby(["takim", "tarih"])
+    .size()
+    .reset_index(name="shift_count")
+)
+
+display(split_count_check[split_count_check["shift_count"] > 1])
+
+print("Bölünen takım-gün sayısı:", len(split_count_check[split_count_check["shift_count"] > 1]))

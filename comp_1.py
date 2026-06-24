@@ -1,6 +1,13 @@
-# %% [DEBUG] - WEEK + VARDİYA PATTERN TALEP / KAPASİTE KONTROLÜ
+# %% [HÜCRE] - AGENT HAFTADA 5 GÜN TEK VARDİYA PATTERN'İNDE ÇALIŞSIN
+
+from collections import defaultdict
+import re
 
 WEEKLY_WORK_DAYS = 5
+
+def safe_name(x):
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(x))
+
 
 def get_week_key(ds):
     d = pd.to_datetime(ds)
@@ -13,86 +20,62 @@ def get_shift_pattern(ds, v):
     return f"{bas}-{bit}"
 
 
-# Talep tarafı: hafta + vardiya pattern bazında toplam required
-demand_rows = []
-
+week_days = {}
 for ds in PLAN_GUNLER:
     wk = get_week_key(ds)
-
-    for v in gun_vardiyalari.get(ds, []):
-        p = get_shift_pattern(ds, v)
-
-        demand_rows.append({
-            "week_key": wk,
-            "pattern": p,
-            "tarih": ds,
-            "required": int(talep[(ds, v)])
-        })
-
-demand_week_pattern = (
-    pd.DataFrame(demand_rows)
-    .groupby(["week_key", "pattern"])
-    .agg(
-        total_required=("required", "sum"),
-        max_daily_required=("required", "max"),
-        day_count=("tarih", "nunique")
-    )
-    .reset_index()
-)
+    week_days.setdefault(wk, []).append(ds)
 
 
-# Kapasite tarafı:
-# Bir agent bir pattern'i seçerse o hafta max 5 gün o pattern'de çalışabilir.
-capacity_rows = []
+agent_week_pattern = {}
+agent_week_pattern_constraints = 0
+agent_week_assignment_constraints = 0
 
-for wk in demand_week_pattern["week_key"].unique():
-    days = [ds for ds in PLAN_GUNLER if get_week_key(ds) == wk]
+for a in AGENTS:
+    a = str(a).strip()
 
-    for p in demand_week_pattern[demand_week_pattern["week_key"] == wk]["pattern"].unique():
-        candidate_agents = []
+    for wk, days in week_days.items():
 
-        for a in AGENTS:
-            feasible_days = set()
+        pattern_to_day_vars = defaultdict(list)
+        all_week_vars = []
 
-            for ds in days:
-                for v in gun_vardiyalari.get(ds, []):
-                    if (a, ds, v) not in x:
-                        continue
+        for ds in days:
+            for v in gun_vardiyalari.get(ds, []):
 
-                    if get_shift_pattern(ds, v) == p:
-                        feasible_days.add(ds)
+                if (a, ds, v) not in x:
+                    continue
 
-            # Bu agent bu pattern'de haftalık çalışma kuralını sağlayabilir mi?
-            required_days = min(WEEKLY_WORK_DAYS, len(days))
+                p = get_shift_pattern(ds, v)
 
-            if len(feasible_days) >= required_days:
-                candidate_agents.append(a)
+                pattern_to_day_vars[p].append(x[(a, ds, v)])
+                all_week_vars.append(x[(a, ds, v)])
 
-        capacity_rows.append({
-            "week_key": wk,
-            "pattern": p,
-            "candidate_agent_count": len(candidate_agents),
-            "max_weekly_capacity": len(candidate_agents) * min(WEEKLY_WORK_DAYS, len(days))
-        })
+        if not all_week_vars:
+            continue
 
-capacity_week_pattern = pd.DataFrame(capacity_rows)
+        required_work_days = min(WEEKLY_WORK_DAYS, len(days))
 
-week_pattern_check = demand_week_pattern.merge(
-    capacity_week_pattern,
-    on=["week_key", "pattern"],
-    how="left"
-)
+        pattern_vars = {}
 
-week_pattern_check["capacity_gap"] = (
-    week_pattern_check["max_weekly_capacity"]
-    - week_pattern_check["total_required"]
-)
+        for p in pattern_to_day_vars.keys():
+            pv = model.NewBoolVar(
+                f"agent_week_pattern_{safe_name(a)}_{safe_name(wk)}_{safe_name(p)}"
+            )
 
-problem_week_pattern = week_pattern_check[
-    week_pattern_check["capacity_gap"] < 0
-].sort_values("capacity_gap")
+            pattern_vars[p] = pv
+            agent_week_pattern[(a, wk, p)] = pv
 
-display(problem_week_pattern)
+        # Agent o hafta sadece 1 ana vardiya pattern'i seçsin
+        model.Add(sum(pattern_vars.values()) == 1)
+        agent_week_pattern_constraints += 1
 
-print("Problemli week-pattern sayısı:", len(problem_week_pattern))
-display(week_pattern_check.sort_values("capacity_gap").head(30))
+        # Agent o hafta 5 gün çalışsın
+        model.Add(sum(all_week_vars) == required_work_days)
+
+        # Seçilmeyen pattern'de çalışamaz
+        for p, vars_p in pattern_to_day_vars.items():
+            for var in vars_p:
+                model.Add(var <= pattern_vars[p])
+                agent_week_assignment_constraints += 1
+
+print("agent-week pattern seçim:", agent_week_pattern_constraints)
+print("agent-week pattern assignment kısıtı:", agent_week_assignment_constraints)

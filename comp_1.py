@@ -1,28 +1,58 @@
-# %% [HÜCRE 13] - HAMİLE VE SÜT İZNİ HAFTA SONU ÇALIŞAMAZ
+# %% [KONTROL] - GÜNDÜZ DIŞI ÇALIŞAMAYACAK KİŞİLER
 
-special_weekend_constraints = 0
+def time_to_minutes(t):
+    h, m = map(int, str(t).split(":"))
+    return h * 60 + m
 
-for _, row in df_tam.iterrows():
-    a = str(row["agent_user_code"]).strip()
 
-    weekend_off = (
-        int(row.get("hamile_flg", 0)) == 1
-        or int(row.get("sut_izni_flg", 0)) == 1
-    )
+def is_day_only_shift_allowed_text(vardiya_text):
+    if vardiya_text in ["off", "izin"]:
+        return True
 
-    if not weekend_off:
+    bas, bit = str(vardiya_text).split("-")
+
+    start_min = time_to_minutes(bas)
+    end_min = time_to_minutes(bit)
+
+    # geceye dönen vardiya yasak: 15:00-00:00
+    if end_min <= start_min:
+        return False
+
+    # 00:00-08:00 gibi erken başlayan vardiya yasak
+    if start_min < time_to_minutes("07:00"):
+        return False
+
+    # 20:00 sonrası biten vardiya yasak
+    if end_min > time_to_minutes("20:00"):
+        return False
+
+    return True
+
+
+day_only_agents = df_tam[
+    (df_tam["sabah_calisir_flg"].astype(int) == 1) |
+    (df_tam["hamile_flg"].astype(int) == 1) |
+    (df_tam["sut_izni_flg"].astype(int) == 1)
+]["agent_user_code"].astype(str).str.strip().tolist()
+
+
+problems = []
+
+for a in day_only_agents:
+    if a not in roster.index:
         continue
 
-    for ds in PLAN_GUNLER:
-        d = pd.to_datetime(ds).date()
+    for ds in roster.columns:
+        vardiya_text = roster.loc[a, ds]
 
-        # Cumartesi = 5, Pazar = 6
-        if d.weekday() not in [5, 6]:
-            continue
+        if not is_day_only_shift_allowed_text(vardiya_text):
+            problems.append({
+                "agent": a,
+                "tarih": ds,
+                "vardiya": vardiya_text
+            })
 
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) in x:
-                model.Add(x[a, ds, v] == 0)
-                special_weekend_constraints += 1
+day_only_problem_df = pd.DataFrame(problems)
 
-print(f"hamile/süt izni hafta sonu çalışamaz kısıtı: {special_weekend_constraints} adet")
+display(day_only_problem_df)
+print("Gündüz dışı çalışma problemi:", len(day_only_problem_df))

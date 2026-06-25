@@ -1,52 +1,50 @@
-# %% [HÜCRE 16] - TAKIM HAFTALIK BASE VARDİYA
-# Her takım her hafta için bir tane ana vardiya seçer.
-# Agent çalıştığı gün takımının o haftaki base vardiyasında değilse exception açılır.
+# %% [HÜCRE 17] - OBJECTIVE
+# Öncelik:
+# 1. Eksik kişi bırakma
+# 2. Fazla kişi atama
+# 3. Takımın haftalık base vardiyasından ayrılma
+# 4. Özel durumlu kişilerin exception cezası daha düşük
 
-team_base_constraints = 0
-exception_link_constraints = 0
+objective_terms = []
 
-# Her takım-her hafta için tek base vardiya
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        vars_base = [
-            team_week_base[(t, wk, v)]
-            for v in week_vardiyalari[wk]
-            if (t, wk, v) in team_week_base
-        ]
+SHORTAGE_W = 100000
+EXCESS_W = 1000
+EXCEPTION_NORMAL_W = 1000
+EXCEPTION_SPECIAL_W = 100
 
-        if vars_base:
-            model.Add(sum(vars_base) == 1)
-            team_base_constraints += 1
+# shortage / excess cezaları
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        objective_terms.append(SHORTAGE_W * shortage[(ds, v)])
+        objective_terms.append(EXCESS_W * excess[(ds, v)])
 
 
-# Agent ataması takımın haftalık base vardiyasına bağlanır
+# özel durumlu agentlar
+special_agents = set()
+
+for _, row in df_tam.iterrows():
+    a = str(row["agent_user_code"]).strip()
+
+    is_special = (
+        int(row.get("hamile_flg", 0) or 0) == 1
+        or int(row.get("sut_izni_flg", 0) or 0) == 1
+        or int(row.get("sabah_calisir_flg", 0) or 0) == 1
+    )
+
+    if is_special:
+        special_agents.add(a)
+
+
+# exception cezaları
 for a in AGENTS:
-    t = agent_team.get(a)
-
-    if pd.isna(t) or t is None:
-        continue
-
-    t = str(t).strip()
-
     for ds in PLAN_GUNLER:
-        wk = day_week[ds]
+        if a in special_agents:
+            objective_terms.append(EXCEPTION_SPECIAL_W * exception[(a, ds)])
+        else:
+            objective_terms.append(EXCEPTION_NORMAL_W * exception[(a, ds)])
 
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) not in x:
-                continue
 
-            if (t, wk, v) in team_week_base:
-                model.Add(
-                    x[(a, ds, v)] <= team_week_base[(t, wk, v)] + exception[(a, ds)]
-                )
-                exception_link_constraints += 1
-            else:
-                # Eğer o vardiya o haftanın base seçeneklerinde yoksa,
-                # bu vardiyada çalışmak direkt exception sayılır.
-                model.Add(
-                    x[(a, ds, v)] <= exception[(a, ds)]
-                )
-                exception_link_constraints += 1
+model.Minimize(sum(objective_terms))
 
-print(f"takım-hafta tek base vardiya kısıtı: {team_base_constraints}")
-print(f"base vardiya/exception bağlantı kısıtı: {exception_link_constraints}")
+print(f"objective term sayısı: {len(objective_terms)}")
+print(f"special agent sayısı: {len(special_agents)}")

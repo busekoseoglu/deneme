@@ -1,541 +1,476 @@
-# %% EXCEL - KİŞİ BAZLI FULL KONTROL DOSYASI
-# Her agent x her tarih olacak şekilde kontrol dosyası üretir.
-# Çalışılan günlerde vardiya bilgisi gelir.
-# Çalışılmayan günlerde OFF / OFF_IZIN görünür.
-
-import pandas as pd
-import numpy as np
-
-# -------------------------------------------------
-# 1) Agent ana bilgileri
-# -------------------------------------------------
-
-agent_cols = [
-    "agent_user_code",
-    "agent_name",
-    "teamleader_name",
-    "working_main_group",
-    "line_based_main_group",
-    "takim",
-    "sabah_calisir_flg",
-    "mesaiye_kalamaz_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg"
-]
-
-agent_base = df_tam[agent_cols].copy()
-agent_base["agent_user_code"] = agent_base["agent_user_code"].astype(str).str.strip()
-
-flag_cols = [
-    "sabah_calisir_flg",
-    "mesaiye_kalamaz_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg"
-]
-
-for c in flag_cols:
-    agent_base[c] = pd.to_numeric(agent_base[c], errors="coerce").fillna(0).astype(int)
-
-
-# -------------------------------------------------
-# 2) Tarih ana tablosu
-# -------------------------------------------------
-
-date_base = pd.DataFrame({"tarih": PLAN_GUNLER})
-date_base["tarih"] = date_base["tarih"].astype(str)
-date_base["tarih_dt"] = pd.to_datetime(date_base["tarih"])
-date_base["gun"] = date_base["tarih_dt"].apply(lambda x: DAY_TR[x.weekday()])
-date_base["hafta"] = date_base["tarih"].map(day_week)
-date_base["hafta_sonu"] = date_base["tarih_dt"].dt.weekday.isin([5, 6])
-
-
-# -------------------------------------------------
-# 3) Agent x Tarih full grid
-# -------------------------------------------------
-
-agent_base["_key"] = 1
-date_base["_key"] = 1
-
-agent_roster_full = (
-    agent_base
-    .merge(date_base, on="_key", how="outer")
-    .drop(columns="_key")
-)
-
-agent_base = agent_base.drop(columns="_key")
-date_base = date_base.drop(columns="_key")
-
-
-# -------------------------------------------------
-# 4) Solve sonucundan atanan roster'ı oluştur
-# -------------------------------------------------
-
-roster_rows = []
-
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
-                roster_rows.append({
-                    "agent_user_code": str(a).strip(),
-                    "tarih": str(ds),
-                    "vardiya": v,
-                    "baslangic": saat[(ds, v)][0],
-                    "bitis": saat[(ds, v)][1]
-                })
-
-roster_assign = pd.DataFrame(roster_rows)
-
-if len(roster_assign) == 0:
-    roster_assign = pd.DataFrame(
-        columns=["agent_user_code", "tarih", "vardiya", "baslangic", "bitis"]
-    )
-
-
-# -------------------------------------------------
-# 5) Full grid'e vardiya atamalarını ekle
-# -------------------------------------------------
+# Vardiya Planlama Modeli — Önceki Çalışan Versiyon Notları
 
-agent_roster_full = agent_roster_full.merge(
-    roster_assign,
-    on=["agent_user_code", "tarih"],
-    how="left"
-)
+Bu notebook’ta call center vardiya planlama problemi için CP-SAT modeli kurulmuştur. Amaç, agent–gün–vardiya atamalarını oluştururken coverage ihtiyacını karşılamak, agent çalışma kurallarını korumak ve takımların birlikte hareket etmesini sağlamaktır.
 
-agent_roster_full["durum"] = np.where(
-    agent_roster_full["vardiya"].notna(),
-    "WORK",
-    "OFF"
-)
+Bu versiyon, yeni öğrenilen mesai ve hafta sonu takım esnekliği kuralları eklenmeden önceki çalışan versiyondur.
 
+---
 
-# -------------------------------------------------
-# 6) İzin bilgisi
-# -------------------------------------------------
+## 1. Kullanılan Ana Girdiler
 
-agent_roster_full["izinli_mi"] = agent_roster_full.apply(
-    lambda r: pd.to_datetime(r["tarih"]).date() in izin_map.get(r["agent_user_code"], set()),
-    axis=1
-)
+Modelde kullanılan temel girdiler:
 
-agent_roster_full["durum_detay"] = np.where(
-    agent_roster_full["durum"] == "WORK",
-    "WORK",
-    np.where(agent_roster_full["izinli_mi"], "OFF_IZIN", "OFF")
-)
+* `df_talep`: Gün–vardiya bazlı ihtiyaç tablosu
+* `df_tam`: Planlamaya dahil edilen tam zamanlı agent listesi
+* `AGENTS`: Planlanacak agent listesi
+* `PLAN_GUNLER`: Planlanacak tarih listesi
+* `gun_vardiyalari`: Her gün için açık vardiya listesi
+* `talep[(ds, v)]`: İlgili gün-vardiya için kişi ihtiyacı
+* `saat[(ds, v)]`: Vardiyanın başlangıç ve bitiş saati
+* `izin_map`: Agent bazında izinli günler
+* `TAKIMLAR`: Takım listesi
+* `agent_team`: Agent’ın bağlı olduğu takım
+* `WEEKS`: Plan dönemindeki ISO hafta bilgileri
+* `week_vardiyalari`: Her hafta kullanılabilecek vardiyalar
 
+---
 
-# -------------------------------------------------
-# 7) Team base vardiya bilgisini ekle
-# -------------------------------------------------
-
-team_base_rows = []
+## 2. Karar Değişkenleri
 
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        for v in week_vardiyalari[wk]:
-            if (t, wk, v) in team_week_base and solver.Value(team_week_base[(t, wk, v)]) == 1:
-                team_base_rows.append({
-                    "takim": t,
-                    "hafta": wk,
-                    "base_vardiya": v
-                })
-
-team_base_df = pd.DataFrame(team_base_rows)
-
-agent_roster_full = agent_roster_full.merge(
-    team_base_df,
-    on=["takim", "hafta"],
-    how="left"
-)
-
-agent_roster_full["base_vardiya_ok"] = np.where(
-    agent_roster_full["durum"] == "WORK",
-    agent_roster_full["vardiya"].eq(agent_roster_full["base_vardiya"]),
-    True
-)
-
-
-# -------------------------------------------------
-# 8) Saat bazlı kontroller
-# -------------------------------------------------
-
-def dk(t):
-    if pd.isna(t):
-        return np.nan
-    h, m = str(t).split(":")
-    return int(h) * 60 + int(m)
-
-
-def shift_start_end(tarih, baslangic, bitis):
-    if pd.isna(baslangic) or pd.isna(bitis):
-        return pd.NaT, pd.NaT
-
-    start_dt = pd.to_datetime(f"{tarih} {baslangic}")
-    end_dt = pd.to_datetime(f"{tarih} {bitis}")
-
-    if end_dt <= start_dt:
-        end_dt += pd.Timedelta(days=1)
-
-    return start_dt, end_dt
-
-
-agent_roster_full[["start_dt", "end_dt"]] = agent_roster_full.apply(
-    lambda r: pd.Series(shift_start_end(r["tarih"], r["baslangic"], r["bitis"])),
-    axis=1
-)
-
-agent_roster_full = agent_roster_full.sort_values(
-    ["agent_user_code", "tarih_dt"]
-)
-
-agent_roster_full["next_tarih"] = agent_roster_full.groupby("agent_user_code")["tarih"].shift(-1)
-agent_roster_full["next_durum"] = agent_roster_full.groupby("agent_user_code")["durum"].shift(-1)
-agent_roster_full["next_vardiya"] = agent_roster_full.groupby("agent_user_code")["vardiya"].shift(-1)
-agent_roster_full["next_start_dt"] = agent_roster_full.groupby("agent_user_code")["start_dt"].shift(-1)
-
-agent_roster_full["dinlenme_saat"] = (
-    (agent_roster_full["next_start_dt"] - agent_roster_full["end_dt"])
-    .dt.total_seconds() / 3600
-)
-
-agent_roster_full["dinlenme_11_saat_ok"] = np.where(
-    agent_roster_full["durum"] == "WORK",
-    agent_roster_full["dinlenme_saat"].isna() | (agent_roster_full["dinlenme_saat"] >= 11),
-    True
-)
-
-
-# -------------------------------------------------
-# 9) Özel kural kontrolleri
-# -------------------------------------------------
-
-agent_roster_full["bas_dk"] = agent_roster_full["baslangic"].apply(dk)
-agent_roster_full["bit_dk"] = agent_roster_full["bitis"].apply(dk)
-
-mask_gece = (
-    agent_roster_full["durum"].eq("WORK") &
-    agent_roster_full["bit_dk"].notna() &
-    agent_roster_full["bas_dk"].notna() &
-    (agent_roster_full["bit_dk"] <= agent_roster_full["bas_dk"])
-)
-
-agent_roster_full.loc[mask_gece, "bit_dk"] += 24 * 60
-
-# Sabah çalışır: 20:00 sonrası biten vardiyada çalışamaz
-agent_roster_full["sabah_calisir_ok"] = ~(
-    (agent_roster_full["durum"] == "WORK") &
-    (agent_roster_full["sabah_calisir_flg"] == 1) &
-    (agent_roster_full["bit_dk"] > dk("20:00"))
-)
-
-# Hamile / süt izni: hafta sonu çalışamaz
-agent_roster_full["hamile_sut_hafta_sonu_ok"] = ~(
-    (agent_roster_full["durum"] == "WORK") &
-    (
-        (agent_roster_full["hamile_flg"] == 1) |
-        (agent_roster_full["sut_izni_flg"] == 1)
-    ) &
-    (agent_roster_full["hafta_sonu"])
-)
-
-# İzinli günde çalışamaz
-agent_roster_full["izin_ok"] = ~(
-    (agent_roster_full["durum"] == "WORK") &
-    (agent_roster_full["izinli_mi"])
-)
-
-
-# -------------------------------------------------
-# 10) Agent-hafta çalışma günü kontrolü
-# -------------------------------------------------
-
-agent_week_check = (
-    agent_roster_full
-    .groupby(
-        [
-            "agent_user_code",
-            "agent_name",
-            "takim",
-            "teamleader_name",
-            "hafta"
-        ],
-        as_index=False
-    )
-    .agg(
-        calisilan_gun=("durum", lambda x: (x == "WORK").sum()),
-        off_gun=("durum", lambda x: (x == "OFF").sum()),
-        izinli_gun=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
-        haftadaki_gun=("tarih", "nunique")
-    )
-)
-
-agent_week_check["haftada_5_gun_ok"] = np.where(
-    agent_week_check["haftadaki_gun"] >= 5,
-    agent_week_check["calisilan_gun"].eq(5),
-    agent_week_check["calisilan_gun"].le(agent_week_check["haftadaki_gun"])
-)
-
-
-# -------------------------------------------------
-# 11) Max 6 gün üst üste çalışma kontrolü
-# -------------------------------------------------
-
-streak_rows = []
-
-for a, grp in agent_roster_full.groupby("agent_user_code"):
-    grp = grp.sort_values("tarih_dt")
-
-    max_streak = 0
-    current_streak = 0
-
-    for _, r in grp.iterrows():
-        if r["durum"] == "WORK":
-            current_streak += 1
-        else:
-            current_streak = 0
-
-        max_streak = max(max_streak, current_streak)
-
-    streak_rows.append({
-        "agent_user_code": a,
-        "max_ust_uste_gun": max_streak,
-        "max_6_gun_ok": max_streak <= 6
-    })
-
-streak_check = pd.DataFrame(streak_rows)
-
-
-# -------------------------------------------------
-# 12) Agent aylık özet
-# -------------------------------------------------
-
-agent_month_summary = (
-    agent_roster_full
-    .groupby(
-        [
-            "agent_user_code",
-            "agent_name",
-            "takim",
-            "teamleader_name",
-            "working_main_group",
-            "line_based_main_group",
-            "sabah_calisir_flg",
-            "mesaiye_kalamaz_flg",
-            "hamile_flg",
-            "sut_izni_flg"
-        ],
-        as_index=False
-    )
-    .agg(
-        toplam_calisilan_gun=("durum", lambda x: (x == "WORK").sum()),
-        toplam_off_gun=("durum", lambda x: (x == "OFF").sum()),
-        toplam_izinli_gun=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
-        base_vardiya_ihlali=("base_vardiya_ok", lambda x: (~x).sum()),
-        dinlenme_11_saat_ihlali=("dinlenme_11_saat_ok", lambda x: (~x).sum()),
-        sabah_calisir_ihlali=("sabah_calisir_ok", lambda x: (~x).sum()),
-        hamile_sut_hafta_sonu_ihlali=("hamile_sut_hafta_sonu_ok", lambda x: (~x).sum()),
-        izin_ihlali=("izin_ok", lambda x: (~x).sum())
-    )
-)
-
-agent_month_summary = agent_month_summary.merge(
-    streak_check,
-    on="agent_user_code",
-    how="left"
-)
-
-agent_month_summary["genel_ok"] = (
-    (agent_month_summary["base_vardiya_ihlali"] == 0) &
-    (agent_month_summary["dinlenme_11_saat_ihlali"] == 0) &
-    (agent_month_summary["sabah_calisir_ihlali"] == 0) &
-    (agent_month_summary["hamile_sut_hafta_sonu_ihlali"] == 0) &
-    (agent_month_summary["izin_ihlali"] == 0) &
-    (agent_month_summary["max_6_gun_ok"] == True)
-)
-
-
-# -------------------------------------------------
-# 13) Agent calendar görünümü
-# -------------------------------------------------
-
-agent_roster_full["vardiya_gosterim"] = np.where(
-    agent_roster_full["durum"] == "WORK",
-    agent_roster_full["vardiya"].astype(str)
-    + " | "
-    + agent_roster_full["baslangic"].astype(str)
-    + "-"
-    + agent_roster_full["bitis"].astype(str),
-    agent_roster_full["durum_detay"]
-)
-
-agent_calendar = (
-    agent_roster_full
-    .pivot_table(
-        index=[
-            "agent_user_code",
-            "agent_name",
-            "takim",
-            "teamleader_name"
-        ],
-        columns="tarih",
-        values="vardiya_gosterim",
-        aggfunc="first"
-    )
-    .reset_index()
-)
-
-agent_calendar.columns.name = None
-
-
-# -------------------------------------------------
-# 14) Coverage / buffer tablosu
-# -------------------------------------------------
-
-coverage_rows = []
+Modelde ana karar değişkenleri şunlardır:
+
+### Agent–gün–vardiya ataması
+
+```python
+x[(a, ds, v)]
+```
+
+Anlamı:
+
+```text
+Agent a, ds tarihinde v vardiyasında çalışıyorsa 1.
+Aksi halde 0.
+```
+
+İzinli günlerde ilgili agent için `x` değişkeni açılmamıştır.
+
+---
+
+### Agent–gün çalışma değişkeni
+
+```python
+work[(a, ds)]
+```
+
+Anlamı:
+
+```text
+Agent a, ds tarihinde çalışıyorsa 1.
+Çalışmıyorsa 0.
+```
+
+Bu değişken, aynı gün maksimum 1 vardiya kuralı ile `x` değişkenlerine bağlanmıştır.
+
+---
+
+### Takım–hafta base vardiya değişkeni
+
+```python
+team_week_base[(t, wk, v)]
+```
+
+Anlamı:
+
+```text
+Takım t için hafta wk içinde ana vardiya v ise 1.
+```
+
+Her takım-her hafta için yalnızca bir tane base vardiya seçilmiştir.
+
+---
+
+### Coverage buffer değişkenleri
+
+Coverage birebir talebe zorlanmamıştır. Bunun yerine %10 tolerans verilmiştir.
+
+```python
+under_buffer[(ds, v)]
+over_buffer[(ds, v)]
+```
+
+Anlamı:
+
+```text
+under_buffer: Atanan kişi sayısı, talebin %10 alt sınırının altına düşerse oluşan eksik kişi sayısı.
+over_buffer: Atanan kişi sayısı, talebin %10 üst sınırının üstüne çıkarsa oluşan fazla kişi sayısı.
+```
+
+Örnek:
+
+```text
+Talep = 50
+Alt sınır = 45
+Üst sınır = 55
+
+Atanan = 46 → OK
+Atanan = 55 → OK
+Atanan = 43 → under_buffer = 2
+Atanan = 58 → over_buffer = 3
+```
+
+---
+
+## 3. Coverage Kısıtı
+
+Eski yaklaşım:
+
+```python
+assigned >= required
+```
+
+Bu yapı modelin infeasible olmasına neden olabiliyordu.
+
+Bu yüzden coverage kısıtı %10 buffer ile yeniden kurulmuştur:
+
+```python
+assigned + under_buffer[(ds, v)] >= lower_req
+assigned - over_buffer[(ds, v)] <= upper_req
+```
+
+Burada:
+
+```python
+lower_req = floor(required * 0.90)
+upper_req = ceil(required * 1.10)
+```
+
+Bu sayede model talebi birebir karşılamak zorunda değildir. %10 bandın içinde kalan eksik/fazla atamalar kabul edilmektedir.
+
+---
+
+## 4. Günde Maksimum 1 Vardiya Kısıtı
+
+Her agent bir günde en fazla bir vardiyada çalışabilir.
+
+```python
+sum(x[(a, ds, v)] for v in gun_vardiyalari[ds]) == work[(a, ds)]
+```
+
+Eğer agent’ın o gün çalışabileceği hiçbir vardiya yoksa:
+
+```python
+work[(a, ds)] == 0
+```
+
+---
+
+## 5. Haftada 5 Gün Çalışma Kısıtı
+
+Bu versiyonda her agent için haftalık çalışma hedefi 5 gün olarak uygulanmıştır.
+
+Eksik hafta veya izin nedeniyle çalışılabilir gün sayısı 5’ten azsa hedef, çalışılabilir gün sayısına göre sınırlandırılmıştır.
+
+Bu versiyonda henüz şu yeni kural eklenmemiştir:
+
+```text
+Agent o hafta yıllık izin aldıysa haftalık çalışma hedefi 5 - izin günü olmalı.
+```
+
+Bu yeni kural sonraki versiyonda eklenecektir.
+
+---
+
+## 6. Maksimum 6 Gün Üst Üste Çalışma
+
+Agent’ın 7 gün üst üste çalışması engellenmiştir.
+
+Her 7 günlük pencerede maksimum 6 çalışma günü olabilir:
+
+```python
+sum(work[(a, ds)] for ds in 7_gunluk_pencere) <= 6
+```
+
+Bu kısıt hard constraint olarak uygulanmıştır.
+
+---
+
+## 7. Sabah Çalışır Kısıtı
+
+`sabah_calisir_flg = 1` olan agentlar, bitiş saati 20:00 sonrasına taşan vardiyalarda çalışamaz.
+
+Gece dönen vardiyalar için bitiş saati ertesi güne taşacak şekilde normalize edilmiştir.
+
+Örnek:
+
+```text
+18:00 - 02:00 vardiyası sabah çalışır agent için uygun değildir.
+```
+
+---
+
+## 8. Hamile / Süt İzni Hafta Sonu Çalışamaz
+
+Aşağıdaki flag’lerden biri 1 olan agentlar hafta sonu çalışamaz:
+
+```text
+hamile_flg = 1
+sut_izni_flg = 1
+```
+
+Cumartesi ve Pazar günleri bu agentlar için ilgili tüm vardiya değişkenleri 0’a sabitlenmiştir.
+
+---
+
+## 9. 11 Saat Dinlenme Kısıtı
+
+Bir agent’ın ardışık iki vardiyası arasında en az 11 saat dinlenme olması gerekmektedir.
+
+Vardiya başlangıç ve bitiş saatleri datetime formatına çevrilmiştir. Gece dönen vardiyalarda bitiş zamanı ertesi güne taşınmıştır.
+
+Eğer iki vardiya arasında 11 saatten az dinlenme varsa:
+
+```python
+x[(a, ds1, v1)] + x[(a, ds2, v2)] <= 1
+```
+
+kısıtı eklenmiştir.
+
+---
+
+## 10. Takım Haftalık Base Vardiya Kısıtı
+
+Başlangıçta takım base vardiya kuralı soft olarak kurulmuştu. Yani agent takımın base vardiyası dışına çıkarsa `exception` değişkeni açılıyordu.
+
+Ancak bu durumda bazı takımlar aynı gün 6 farklı vardiyaya bölünebildi.
+
+Bu yüzden son çalışan versiyonda takım kuralı hard hale getirildi:
+
+```python
+x[(a, ds, v)] <= team_week_base[(t, wk, v)]
+```
+
+Anlamı:
+
+```text
+Agent çalışıyorsa, sadece takımının o hafta seçilen base vardiyasında çalışabilir.
+```
+
+Bu kural sonucunda takımlar aynı gün farklı vardiyalara bölünmemiştir.
+
+Bu versiyonda takım bütünlüğü hafta içi ve hafta sonu birlikte uygulanmaktadır.
+
+Henüz şu yeni bilgi eklenmemiştir:
+
+```text
+Takım bütünlüğü sadece hafta içi zorunlu olacak.
+Hafta sonu agentlar ihtiyaca göre farklı vardiyalara dağıtılabilecek.
+```
+
+Bu yeni kural sonraki versiyonda eklenecektir.
+
+---
+
+## 11. Objective Fonksiyonu
+
+Bu versiyonda objective sade tutulmuştur.
+
+Öncelikler:
+
+1. %10 buffer altına düşmeyi minimize etmek
+2. %10 buffer üstüne çıkmayı minimize etmek
+
+Kullanılan ağırlıklar:
+
+```python
+UNDER_BUFFER_W = 100000
+OVER_BUFFER_W = 1000
+```
+
+Objective:
+
+```python
+objective_terms = []
 
 for ds in PLAN_GUNLER:
     for v in gun_vardiyalari.get(ds, []):
-        assigned = sum(
-            solver.Value(x[(a, ds, v)])
-            for a in AGENTS
-            if (a, ds, v) in x
-        )
+        objective_terms.append(UNDER_BUFFER_W * under_buffer[(ds, v)])
+        objective_terms.append(OVER_BUFFER_W * over_buffer[(ds, v)])
 
-        req = int(talep[(ds, v)])
+model.Minimize(sum(objective_terms))
+```
 
-        coverage_rows.append({
-            "tarih": str(ds),
-            "gun": DAY_TR[pd.to_datetime(ds).weekday()],
-            "hafta": day_week[ds],
-            "vardiya": v,
-            "baslangic": saat[(ds, v)][0],
-            "bitis": saat[(ds, v)][1],
-            "talep": req,
-            "lower_10pct": coverage_lower[(ds, v)],
-            "upper_10pct": coverage_upper[(ds, v)],
-            "atanan": assigned,
-            "gap": assigned - req,
-            "under_buffer": solver.Value(under_buffer[(ds, v)]),
-            "over_buffer": solver.Value(over_buffer[(ds, v)]),
-            "buffer_ici": coverage_lower[(ds, v)] <= assigned <= coverage_upper[(ds, v)]
-        })
+Takım bölünmesi objective içinde cezalandırılmamıştır; çünkü takım bütünlüğü hard constraint olarak sağlanmıştır.
 
-coverage_for_excel = pd.DataFrame(coverage_rows).sort_values(["tarih", "baslangic"])
+---
 
+## 12. Solve Sonrası Kontrol Dosyası
 
-# -------------------------------------------------
-# 15) Takım-tarih kontrol tablosu
-# -------------------------------------------------
+Çözümden sonra kişi bazlı Excel kontrol dosyası oluşturulmuştur.
 
-team_date_check = (
-    agent_roster_full
-    .groupby(["takim", "tarih", "gun", "hafta"], as_index=False)
-    .agg(
-        toplam_agent=("agent_user_code", "nunique"),
-        calisan_agent=("durum", lambda x: (x == "WORK").sum()),
-        off_agent=("durum", lambda x: (x == "OFF").sum()),
-        izinli_agent=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
-        calisilan_vardiya_sayisi=("vardiya", "nunique")
-    )
-)
+Dosya adı:
 
-team_date_check["takim_bolunmedi_ok"] = team_date_check["calisilan_vardiya_sayisi"].le(1)
+```text
+vardiya_kisi_bazli_full_kontrol.xlsx
+```
 
+Excel içindeki sheet’ler:
 
-# -------------------------------------------------
-# 16) Excel'e yaz
-# -------------------------------------------------
+### 01_agent_day_detail
 
-output_path = "vardiya_kisi_bazli_full_kontrol.xlsx"
+Her agent için her tarih gelir.
 
-with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-    agent_roster_full.to_excel(writer, sheet_name="01_agent_day_detail", index=False)
-    agent_calendar.to_excel(writer, sheet_name="02_agent_calendar", index=False)
-    agent_month_summary.to_excel(writer, sheet_name="03_agent_month_summary", index=False)
-    agent_week_check.to_excel(writer, sheet_name="04_agent_week_check", index=False)
-    coverage_for_excel.to_excel(writer, sheet_name="05_coverage_buffer", index=False)
-    team_base_df.to_excel(writer, sheet_name="06_team_base", index=False)
-    team_date_check.to_excel(writer, sheet_name="07_team_date_check", index=False)
+Çalışıyorsa:
 
-    workbook = writer.book
+```text
+durum = WORK
+```
 
-    header_fmt = workbook.add_format({
-        "bold": True,
-        "bg_color": "#D9EAF7",
-        "border": 1
-    })
+Çalışmıyorsa:
 
-    bad_fmt = workbook.add_format({
-        "bg_color": "#FFC7CE"
-    })
+```text
+durum = OFF
+```
 
-    ok_fmt = workbook.add_format({
-        "bg_color": "#C6EFCE"
-    })
+İzinliyse:
 
-    sheets = {
-        "01_agent_day_detail": agent_roster_full,
-        "02_agent_calendar": agent_calendar,
-        "03_agent_month_summary": agent_month_summary,
-        "04_agent_week_check": agent_week_check,
-        "05_coverage_buffer": coverage_for_excel,
-        "06_team_base": team_base_df,
-        "07_team_date_check": team_date_check
-    }
+```text
+durum_detay = OFF_IZIN
+```
 
-    for sheet_name, df in sheets.items():
-        ws = writer.sheets[sheet_name]
+Bu sheet kişi bazlı detay kontrol için ana tablodur.
 
-        for col_num, value in enumerate(df.columns):
-            ws.write(0, col_num, value, header_fmt)
+---
 
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(df), len(df.columns) - 1)
+### 02_agent_calendar
 
-        for i, col in enumerate(df.columns):
-            width = min(max(len(str(col)) + 2, 12), 35)
-            ws.set_column(i, i, width)
+Agent satırda, tarihler kolonlardadır.
 
-    # Boolean / OK kolonlarını renklendir
-    for sheet_name, df in sheets.items():
-        ws = writer.sheets[sheet_name]
+Gözle kontrol için en pratik sayfadır.
 
-        for col_name in df.columns:
-            if (
-                col_name.endswith("_ok")
-                or col_name in ["genel_ok", "buffer_ici", "takim_bolunmedi_ok"]
-            ):
-                col_idx = df.columns.get_loc(col_name)
+Bir takım filtrelenerek o takımın ay içindeki vardiya düzeni görülebilir.
 
-                ws.conditional_format(
-                    1,
-                    col_idx,
-                    len(df),
-                    col_idx,
-                    {
-                        "type": "cell",
-                        "criteria": "==",
-                        "value": False,
-                        "format": bad_fmt
-                    }
-                )
+---
 
-                ws.conditional_format(
-                    1,
-                    col_idx,
-                    len(df),
-                    col_idx,
-                    {
-                        "type": "cell",
-                        "criteria": "==",
-                        "value": True,
-                        "format": ok_fmt
-                    }
-                )
+### 03_agent_month_summary
 
-print("Excel oluşturuldu:", output_path)
+Agent bazında aylık özet kontrol tablosudur.
+
+Önemli kolonlar:
+
+```text
+base_vardiya_ihlali
+dinlenme_11_saat_ihlali
+sabah_calisir_ihlali
+hamile_sut_hafta_sonu_ihlali
+izin_ihlali
+max_6_gun_ok
+genel_ok
+```
+
+---
+
+### 04_agent_week_check
+
+Agent-hafta bazında çalışma günü kontrolüdür.
+
+Bu versiyonda haftalık 5 gün çalışma kontrolü yapılmaktadır.
+
+---
+
+### 05_coverage_buffer
+
+Gün-vardiya bazında coverage kontrolüdür.
+
+Önemli kolonlar:
+
+```text
+talep
+lower_10pct
+upper_10pct
+atanan
+gap
+under_buffer
+over_buffer
+buffer_ici
+```
+
+`gap` tek başına problem değildir. Önemli olan `buffer_ici` değeridir.
+
+---
+
+### 06_team_base
+
+Takımın hafta bazında seçilen base vardiyasını gösterir.
+
+---
+
+### 07_team_date_check
+
+Takım-tarih bazında takımın bölünüp bölünmediğini kontrol eder.
+
+Önemli kolon:
+
+```text
+takim_bolunmedi_ok
+```
+
+Son hard takım constraint sonrası bu kolonun TRUE olması beklenir.
+
+---
+
+## 13. Bu Versiyonda Henüz Eklenmeyen Yeni Kurallar
+
+Aşağıdaki yeni bilgiler sonraki notebook/versiyonda eklenecektir:
+
+### 1. Yıllık izin haftalık çalışma gününü azaltır
+
+Yeni kural:
+
+```text
+Agent o hafta 1 gün izin aldıysa 5 yerine 4 gün çalışır.
+2 gün izin aldıysa 3 gün çalışır.
+```
+
+Yani:
+
+```text
+weekly_normal_target = 5 - izin_count_this_week
+```
+
+---
+
+### 2. Ayda en az 1 Cumartesi-Pazar peş peşe OFF
+
+Yeni kural:
+
+```text
+Her agent ay içinde en az bir Cumartesi-Pazar çiftinde peş peşe OFF olmalı.
+```
+
+---
+
+### 3. Takım bütünlüğü sadece hafta içi zorunlu
+
+Yeni kural:
+
+```text
+Pazartesi-Cuma: takım aynı vardiyada kalmalı.
+Cumartesi-Pazar: takım bölünebilir.
+```
+
+---
+
+### 4. Mesai / 6. gün çalışma
+
+Yeni kural:
+
+```text
+Agent haftada maksimum 6 gün çalışabilir.
+6. gün mesai sayılır.
+Bir agent ayda maksimum 2 gün mesai yapabilir.
+mesaiye_kalamaz_flg = 1 olan agentlara mesai yazılamaz.
+```
+
+Bu kural için sonraki versiyonda `overtime_week` değişkeni eklenecektir.
+
+---
+
+## 14. Son Durum
+
+Bu versiyonda model feasible çözüm üretmiştir.
+
+Takım bölünmesi hard constraint ile engellenmiştir.
+
+Coverage tarafında %10 buffer uygulanmıştır.
+
+Excel kontrol dosyasında kişi, hafta, takım, coverage ve özel kural kontrolleri yapılabilir hale getirilmiştir.

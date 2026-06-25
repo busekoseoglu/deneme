@@ -1,33 +1,52 @@
-# %% [HÜCRE 13] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA KISITI
-# Herhangi ardışık 7 gün içinde en fazla 6 çalışma günü olabilir.
-# Yani 7 gün üst üste çalışma yasak.
+# %% [HÜCRE 16] - TAKIM HAFTALIK BASE VARDİYA
+# Her takım her hafta için bir tane ana vardiya seçer.
+# Agent çalıştığı gün takımının o haftaki base vardiyasında değilse exception açılır.
 
-max_consecutive_constraints = 0
+team_base_constraints = 0
+exception_link_constraints = 0
 
-MAX_CONSECUTIVE_WORK_DAYS = 6
-WINDOW_DAYS = 7
-
-plan_dates = sorted([pd.to_datetime(ds).date() for ds in PLAN_GUNLER])
-
-date_to_ds = {
-    pd.to_datetime(ds).date(): ds
-    for ds in PLAN_GUNLER
-}
-
-for a in AGENTS:
-    for i in range(0, len(plan_dates) - WINDOW_DAYS + 1):
-        window_dates = plan_dates[i:i + WINDOW_DAYS]
-
-        window_ds = [
-            date_to_ds[d]
-            for d in window_dates
-            if d in date_to_ds
+# Her takım-her hafta için tek base vardiya
+for t in TAKIMLAR:
+    for wk in WEEKS:
+        vars_base = [
+            team_week_base[(t, wk, v)]
+            for v in week_vardiyalari[wk]
+            if (t, wk, v) in team_week_base
         ]
 
-        model.Add(
-            sum(work[(a, ds)] for ds in window_ds) <= MAX_CONSECUTIVE_WORK_DAYS
-        )
+        if vars_base:
+            model.Add(sum(vars_base) == 1)
+            team_base_constraints += 1
 
-        max_consecutive_constraints += 1
 
-print(f"max 6 gün üst üste çalışma kısıtı: {max_consecutive_constraints} adet")
+# Agent ataması takımın haftalık base vardiyasına bağlanır
+for a in AGENTS:
+    t = agent_team.get(a)
+
+    if pd.isna(t) or t is None:
+        continue
+
+    t = str(t).strip()
+
+    for ds in PLAN_GUNLER:
+        wk = day_week[ds]
+
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+
+            if (t, wk, v) in team_week_base:
+                model.Add(
+                    x[(a, ds, v)] <= team_week_base[(t, wk, v)] + exception[(a, ds)]
+                )
+                exception_link_constraints += 1
+            else:
+                # Eğer o vardiya o haftanın base seçeneklerinde yoksa,
+                # bu vardiyada çalışmak direkt exception sayılır.
+                model.Add(
+                    x[(a, ds, v)] <= exception[(a, ds)]
+                )
+                exception_link_constraints += 1
+
+print(f"takım-hafta tek base vardiya kısıtı: {team_base_constraints}")
+print(f"base vardiya/exception bağlantı kısıtı: {exception_link_constraints}")

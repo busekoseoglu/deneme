@@ -1,29 +1,22 @@
-# %% [HÜCRE 10] - COVERAGE KISITI
-# Eski mantık:
-# assigned >= required
-#
-# Yeni mantık:
-# assigned + shortage - excess == required
-#
-# Böylece model infeasible olmaz.
-# Eksik kalan yerleri shortage olarak raporlarız.
+# %% [HÜCRE 11] - GÜNDE MAX 1 VARDİYA + WORK BAĞLANTISI
+# Bir agent bir günde ya hiç çalışmaz ya da tek vardiyada çalışır.
+# work[a, ds] = o gün seçilen vardiya toplamı
 
-coverage_constraints = 0
+daily_one_shift_constraints = 0
 
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        vars_shift = [
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        vars_day = [
             x[(a, ds, v)]
-            for a in AGENTS
+            for v in gun_vardiyalari.get(ds, [])
             if (a, ds, v) in x
         ]
 
-        required = int(talep[(ds, v)])
+        if vars_day:
+            model.Add(sum(vars_day) == work[(a, ds)])
+        else:
+            model.Add(work[(a, ds)] == 0)
 
-        model.Add(
-            sum(vars_shift) + shortage[(ds, v)] - excess[(ds, v)] == required
-        )
+        daily_one_shift_constraints += 1
 
-        coverage_constraints += 1
-
-print(f"coverage kısıtı: {coverage_constraints} gün-vardiya")
+print(f"günde max 1 vardiya/work kısıtı: {daily_one_shift_constraints} agent-gün")

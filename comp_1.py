@@ -1,76 +1,155 @@
-# %% [HÜCRE 12] - HAFTADA 5 GÜN ÇALIŞMA KISITI - GÜVENLİ VERSİYON
-# Amaç:
-# Normalde agent haftada 5 gün çalışır.
-# Ama izin/off/full izin/hafta sonu çalışamaz gibi durumlar yüzünden
-# gerçekten çalışabileceği gün sayısı 5'ten azsa, o kadar çalışır.
+# %% [HÜCRE 9] - CP-SAT MODEL + KARAR DEĞİŞKENLERİ
+# Yeni mantık:
+# x[agent, gün, vardiya] = 1 ise agent o gün o vardiyada çalışır
+# work[agent, gün] = 1 ise agent o gün çalışır
+# team_week_base[takım, hafta, vardiya] = takımın o hafta ana vardiyası
+# exception[agent, gün] = agent o gün takımının haftalık base vardiyası dışında çalıştı mı
+# under_buffer[gün, vardiya] = %10 alt sınırın altında kalan kişi sayısı
+# over_buffer[gün, vardiya] = %10 üst sınırın üstünde kalan kişi sayısı
 
-weekly_work_constraints = 0
-TARGET_WORK_DAYS_PER_WEEK = 5
+from ortools.sat.python import cp_model
+import pandas as pd
+import numpy as np
+from collections import defaultdict
 
-week_days = defaultdict(list)
+model = cp_model.CpModel()
+
+# -----------------------------
+# Yardımcı setler
+# -----------------------------
+
+PLAN_GUNLER = sorted(PLAN_GUNLER)
+
+ALL_VARDIYALAR = sorted(
+    set(v for ds in PLAN_GUNLER for v in gun_vardiyalari.get(ds, []))
+)
+
+TAKIMLAR = sorted(df_tam["takim"].dropna().astype(str).unique().tolist())
+
+agent_team = dict(
+    zip(
+        df_tam["agent_user_code"].astype(str).str.strip(),
+        df_tam["takim"].astype(str).str.strip()
+    )
+)
+
+def week_key(ds):
+    d = pd.to_datetime(ds)
+    iso = d.isocalendar()
+    return f"{int(iso.year)}-W{int(iso.week):02d}"
+
+day_week = {ds: week_key(ds) for ds in PLAN_GUNLER}
+WEEKS = sorted(set(day_week.values()))
+
+# takımın o hafta çalışabileceği vardiyalar
+week_vardiyalari = defaultdict(set)
 
 for ds in PLAN_GUNLER:
-    week_days[day_week[ds]].append(ds)
+    wk = day_week[ds]
+    for v in gun_vardiyalari.get(ds, []):
+        week_vardiyalari[wk].add(v)
 
-for wk in week_days:
-    week_days[wk] = sorted(week_days[wk])
+week_vardiyalari = {
+    wk: sorted(list(vs))
+    for wk, vs in week_vardiyalari.items()
+}
+
+print(f"agent sayısı: {len(AGENTS)}")
+print(f"takım sayısı: {len(TAKIMLAR)}")
+print(f"plan gün sayısı: {len(PLAN_GUNLER)}")
+print(f"hafta sayısı: {len(WEEKS)} -> {WEEKS}")
+print(f"vardiya sayısı: {len(ALL_VARDIYALAR)}")
 
 
-def is_weekend(ds):
-    d = pd.to_datetime(ds).date()
-    return d.weekday() in [5, 6]
+# -----------------------------
+# x değişkeni
+# izinli günlerde x açılmayacak
+# -----------------------------
 
-
-# Agent özel durum map'leri
-hamile_agents = set()
-sut_agents = set()
-
-for _, row in df_tam.iterrows():
-    a = str(row["agent_user_code"]).strip()
-
-    if int(row.get("hamile_flg", 0) or 0) == 1:
-        hamile_agents.add(a)
-
-    if int(row.get("sut_izni_flg", 0) or 0) == 1:
-        sut_agents.add(a)
-
+x = {}
 
 for a in AGENTS:
     izinli = izin_map.get(a, set())
 
-    for wk, days_in_week in week_days.items():
+    for ds in PLAN_GUNLER:
+        d_date = pd.to_datetime(ds).date()
 
-        feasible_days = []
+        if d_date in izinli:
+            continue
 
-        for ds in days_in_week:
-            d_date = pd.to_datetime(ds).date()
+        for v in gun_vardiyalari.get(ds, []):
+            x[(a, ds, v)] = model.NewBoolVar(f"x_{a}_{ds}_{v}")
 
-            # izinliyse çalışamaz
-            if d_date in izinli:
-                continue
 
-            # hamile / süt izni hafta sonu çalışamaz
-            if a in hamile_agents or a in sut_agents:
-                if is_weekend(ds):
-                    continue
+# -----------------------------
+# work değişkeni
+# -----------------------------
 
-            # o gün en az bir x değişkeni var mı?
-            has_option = any(
-                (a, ds, v) in x
-                for v in gun_vardiyalari.get(ds, [])
+work = {}
+
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        work[(a, ds)] = model.NewBoolVar(f"work_{a}_{ds}")
+
+
+# -----------------------------
+# takım-hafta base vardiya değişkeni
+# -----------------------------
+
+team_week_base = {}
+
+for t in TAKIMLAR:
+    for wk in WEEKS:
+        for v in week_vardiyalari[wk]:
+            team_week_base[(t, wk, v)] = model.NewBoolVar(
+                f"team_week_base_{t}_{wk}_{v}"
             )
 
-            if has_option:
-                feasible_days.append(ds)
 
-        # çalışabileceği gün sayısı
-        target_days = min(TARGET_WORK_DAYS_PER_WEEK, len(feasible_days))
+# -----------------------------
+# exception değişkeni
+# -----------------------------
 
-        # bütün hafta work toplamı target kadar olsun
-        model.Add(
-            sum(work[(a, ds)] for ds in days_in_week) == target_days
+exception = {}
+
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        exception[(a, ds)] = model.NewBoolVar(f"exception_{a}_{ds}")
+
+
+# -----------------------------
+# %10 buffer dışı sapma değişkenleri
+# -----------------------------
+# under_buffer:
+# Talep 50 ise alt sınır 45.
+# Atanan 43 olursa under_buffer = 2 olur.
+#
+# over_buffer:
+# Talep 50 ise üst sınır 55.
+# Atanan 58 olursa over_buffer = 3 olur.
+
+under_buffer = {}
+over_buffer = {}
+
+MAX_AGENT = len(AGENTS)
+
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        under_buffer[(ds, v)] = model.NewIntVar(
+            0,
+            MAX_AGENT,
+            f"under_buffer_{ds}_{v}"
         )
 
-        weekly_work_constraints += 1
+        over_buffer[(ds, v)] = model.NewIntVar(
+            0,
+            MAX_AGENT,
+            f"over_buffer_{ds}_{v}"
+        )
 
-print(f"haftada 5 gün çalışma kısıtı: {weekly_work_constraints} agent-hafta")
+
+print(f"x karar değişkeni: {len(x)}")
+print(f"work değişkeni: {len(work)}")
+print(f"team_week_base değişkeni: {len(team_week_base)}")
+print(f"exception değişkeni: {len(exception)}")
+print(f"under/over buffer kovası: {len(under_buffer)}")

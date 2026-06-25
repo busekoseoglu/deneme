@@ -1,161 +1,89 @@
-# %% [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA - HAFTA İÇİ HARD / HAFTA SONU SERBEST
-# Yeni iş kuralı:
-# Pazartesi-Cuma: Takım bütünlüğü korunur. Takımdaki herkes o hafta seçilen base vardiyada çalışır.
-# Cumartesi-Pazar: Takım bütünlüğü zorunlu değildir. Agentlar ihtiyaca göre farklı vardiyalara dağılabilir.
+coverage_for_excel["weekday"] = pd.to_datetime(coverage_for_excel["tarih"]).dt.weekday
+coverage_for_excel["hafta_ici"] = coverage_for_excel["weekday"].isin([0, 1, 2, 3, 4])
 
-team_base_constraints = 0
-team_weekday_link_constraints = 0
-weekend_free_count = 0
-
-# 1. Her takım-her hafta için tek base vardiya seç
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        vars_base = [
-            team_week_base[(t, wk, v)]
-            for v in week_vardiyalari[wk]
-            if (t, wk, v) in team_week_base
-        ]
-
-        if vars_base:
-            model.Add(sum(vars_base) == 1)
-            team_base_constraints += 1
-
-
-# 2. Sadece hafta içi günlerde agent takımının base vardiyasında çalışabilir
-for a in AGENTS:
-    t = agent_team.get(a)
-
-    if t is None or pd.isna(t):
-        continue
-
-    t = str(t).strip()
-
-    for ds in PLAN_GUNLER:
-        weekday = pd.to_datetime(ds).weekday()
-        wk = day_week[ds]
-
-        for v in gun_vardiyalari.get(ds, []):
-
-            if (a, ds, v) not in x:
-                continue
-
-            # Hafta içi: takım base vardiyası hard
-            if weekday in [0, 1, 2, 3, 4]:
-                model.Add(
-                    x[(a, ds, v)] <= team_week_base[(t, wk, v)]
-                )
-                team_weekday_link_constraints += 1
-
-            # Hafta sonu: takım serbest, constraint eklemiyoruz
-            else:
-                weekend_free_count += 1
-
-
-print("takım-hafta tek base vardiya kısıtı:", team_base_constraints)
-print("hafta içi takım hard bağlantı kısıtı:", team_weekday_link_constraints)
-print("hafta sonu serbest bırakılan agent-gün-vardiya opsiyonu:", weekend_free_count)
-
-
-# %% HIZLI KONTROL - HAFTA İÇİ TAKIM / HAFTA SONU SERBEST / BUFFER / MESAİ
-
-# Roster oluştur
-roster_rows = []
-
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
-                roster_rows.append({
-                    "agent_user_code": a,
-                    "tarih": str(ds),
-                    "gun": DAY_TR[pd.to_datetime(ds).weekday()],
-                    "weekday": pd.to_datetime(ds).weekday(),
-                    "hafta": day_week[ds],
-                    "takim": agent_team.get(a),
-                    "vardiya": v,
-                    "baslangic": saat[(ds, v)][0],
-                    "bitis": saat[(ds, v)][1]
-                })
-
-roster_df = pd.DataFrame(roster_rows)
-
-# Takım-gün bölünme kontrolü
-team_day_split = (
-    roster_df
-    .groupby(["hafta", "tarih", "gun", "weekday", "takim"], as_index=False)
+coverage_weektype = (
+    coverage_for_excel
+    .groupby("hafta_ici", as_index=False)
     .agg(
-        calisan_sayi=("agent_user_code", "nunique"),
-        vardiya_sayisi=("vardiya", "nunique")
+        toplam_talep=("talep", "sum"),
+        toplam_atanan=("atanan", "sum"),
+        toplam_under=("under_buffer", "sum"),
+        toplam_over=("over_buffer", "sum")
     )
 )
 
-team_day_split["hafta_ici"] = team_day_split["weekday"].isin([0, 1, 2, 3, 4])
+display(coverage_weektype)
 
-weekday_team_viol = team_day_split[
-    (team_day_split["hafta_ici"]) &
-    (team_day_split["vardiya_sayisi"] > 1)
-]
+weekly_debug_rows = []
 
-weekend_team_split = team_day_split[
-    (~team_day_split["hafta_ici"]) &
-    (team_day_split["vardiya_sayisi"] > 1)
-]
+for a in AGENTS:
+    izinli = izin_map.get(a, set())
 
-print("Hafta içi bölünen takım-gün sayısı:", len(weekday_team_viol))
-print("Hafta sonu bölünen takım-gün sayısı:", len(weekend_team_split))
+    for wk, days_in_week in week_days.items():
 
-display(weekday_team_viol.head(20))
-display(weekend_team_split.head(20))
-
-
-# Coverage under/over kontrolü
-coverage_rows = []
-
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        assigned = sum(
-            solver.Value(x[(a, ds, v)])
-            for a in AGENTS
-            if (a, ds, v) in x
+        izin_count_this_week = sum(
+            1
+            for ds in days_in_week
+            if pd.to_datetime(ds).date() in izinli
         )
 
-        req = int(talep[(ds, v)])
+        raw_normal_target = max(0, 5 - izin_count_this_week)
 
-        coverage_rows.append({
-            "tarih": str(ds),
-            "gun": DAY_TR[pd.to_datetime(ds).weekday()],
-            "hafta": day_week[ds],
-            "vardiya": v,
-            "baslangic": saat[(ds, v)][0],
-            "bitis": saat[(ds, v)][1],
-            "talep": req,
-            "lower_10pct": coverage_lower[(ds, v)],
-            "upper_10pct": coverage_upper[(ds, v)],
-            "atanan": assigned,
-            "gap": assigned - req,
-            "under_buffer": solver.Value(under_buffer[(ds, v)]),
-            "over_buffer": solver.Value(over_buffer[(ds, v)]),
-            "buffer_ici": coverage_lower[(ds, v)] <= assigned <= coverage_upper[(ds, v)]
+        feasible_days = []
+
+        for ds in days_in_week:
+            d_date = pd.to_datetime(ds).date()
+
+            if d_date in izinli:
+                continue
+
+            has_option = any(
+                (a, ds, v) in x
+                for v in gun_vardiyalari.get(ds, [])
+            )
+
+            if has_option:
+                feasible_days.append(ds)
+
+        normal_target = min(raw_normal_target, len(feasible_days))
+
+        worked_days = sum(
+            solver.Value(work[(a, ds)])
+            for ds in days_in_week
+        )
+
+        overtime_val = solver.Value(overtime_week[(a, wk)])
+
+        weekly_debug_rows.append({
+            "agent_user_code": a,
+            "hafta": wk,
+            "haftadaki_gun": len(days_in_week),
+            "izin_count_this_week": izin_count_this_week,
+            "normal_target": normal_target,
+            "worked_days": worked_days,
+            "overtime_week": overtime_val,
+            "worked_minus_target": worked_days - normal_target
         })
 
-coverage_for_excel = pd.DataFrame(coverage_rows)
+weekly_debug_df = pd.DataFrame(weekly_debug_rows)
 
-print("Toplam under_buffer:", coverage_for_excel["under_buffer"].sum())
-print("Toplam over_buffer:", coverage_for_excel["over_buffer"].sum())
-
-
-# Mesai kontrolü
-total_overtime = sum(
-    solver.Value(overtime_week[(a, wk)])
-    for a in AGENTS
-    for wk in WEEKS
+print("normal_target dağılımı:")
+display(
+    weekly_debug_df["normal_target"]
+    .value_counts()
+    .sort_index()
 )
 
-overtime_agent_count = sum(
-    1
-    for a in AGENTS
-    if sum(solver.Value(overtime_week[(a, wk)]) for wk in WEEKS) > 0
+print("izin_count_this_week dağılımı:")
+display(
+    weekly_debug_df["izin_count_this_week"]
+    .value_counts()
+    .sort_index()
 )
 
-print("Toplam mesai günü:", total_overtime)
-print("Mesai yapan agent sayısı:", overtime_agent_count)
+print("worked_minus_target dağılımı:")
+display(
+    weekly_debug_df["worked_minus_target"]
+    .value_counts()
+    .sort_index()
+)

@@ -1,22 +1,20 @@
-# %% [HÜCRE 11] - GÜNDE MAX 1 VARDİYA + WORK BAĞLANTISI
-# Bir agent bir günde ya hiç çalışmaz ya da tek vardiyada çalışır.
-# work[a, ds] = o gün seçilen vardiya toplamı
+# %% [HÜCRE 12] - HAFTADA MAX 5 ÇALIŞMA GÜNÜ
+# Agent bir haftada en fazla 5 gün çalışsın.
+# İzin günleri zaten work=0 olduğu için ayrıca düşmeye gerek yok.
 
-daily_one_shift_constraints = 0
+weekly_work_constraints = 0
+MAX_WORK_DAYS_PER_WEEK = 5
+
+week_days = defaultdict(list)
+
+for ds in PLAN_GUNLER:
+    week_days[day_week[ds]].append(ds)
 
 for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        vars_day = [
-            x[(a, ds, v)]
-            for v in gun_vardiyalari.get(ds, [])
-            if (a, ds, v) in x
-        ]
+    for wk, days_in_week in week_days.items():
+        model.Add(
+            sum(work[(a, ds)] for ds in days_in_week) <= MAX_WORK_DAYS_PER_WEEK
+        )
+        weekly_work_constraints += 1
 
-        if vars_day:
-            model.Add(sum(vars_day) == work[(a, ds)])
-        else:
-            model.Add(work[(a, ds)] == 0)
-
-        daily_one_shift_constraints += 1
-
-print(f"günde max 1 vardiya/work kısıtı: {daily_one_shift_constraints} agent-gün")
+print(f"haftada max {MAX_WORK_DAYS_PER_WEEK} gün çalışma kısıtı: {weekly_work_constraints}")

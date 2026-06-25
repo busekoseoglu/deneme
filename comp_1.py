@@ -1,10 +1,13 @@
-# %% EXCEL - KİŞİ BAZLI KONTROL DOSYASI
+# %% EXCEL - KİŞİ BAZLI FULL KONTROL DOSYASI
+# Her agent x her tarih olacak şekilde kontrol dosyası üretir.
+# Çalışılan günlerde vardiya bilgisi gelir.
+# Çalışılmayan günlerde OFF / OFF_IZIN görünür.
 
 import pandas as pd
 import numpy as np
 
 # -------------------------------------------------
-# 1) Agent bilgilerini roster'a ekle
+# 1) Agent ana bilgileri
 # -------------------------------------------------
 
 agent_cols = [
@@ -13,6 +16,7 @@ agent_cols = [
     "teamleader_name",
     "working_main_group",
     "line_based_main_group",
+    "takim",
     "sabah_calisir_flg",
     "mesaiye_kalamaz_flg",
     "hamile_flg",
@@ -21,44 +25,156 @@ agent_cols = [
     "dogum_izni_flg"
 ]
 
-agent_info = df_tam[agent_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
+agent_base = df_tam[agent_cols].copy()
+agent_base["agent_user_code"] = agent_base["agent_user_code"].astype(str).str.strip()
 
-for c in [
+flag_cols = [
     "sabah_calisir_flg",
     "mesaiye_kalamaz_flg",
     "hamile_flg",
     "sut_izni_flg",
     "idari_izinli_flg",
     "dogum_izni_flg"
-]:
-    agent_info[c] = pd.to_numeric(agent_info[c], errors="coerce").fillna(0).astype(int)
+]
+
+for c in flag_cols:
+    agent_base[c] = pd.to_numeric(agent_base[c], errors="coerce").fillna(0).astype(int)
 
 
-agent_roster = roster_df.merge(
-    agent_info,
-    on="agent_user_code",
+# -------------------------------------------------
+# 2) Tarih ana tablosu
+# -------------------------------------------------
+
+date_base = pd.DataFrame({"tarih": PLAN_GUNLER})
+date_base["tarih"] = date_base["tarih"].astype(str)
+date_base["tarih_dt"] = pd.to_datetime(date_base["tarih"])
+date_base["gun"] = date_base["tarih_dt"].apply(lambda x: DAY_TR[x.weekday()])
+date_base["hafta"] = date_base["tarih"].map(day_week)
+date_base["hafta_sonu"] = date_base["tarih_dt"].dt.weekday.isin([5, 6])
+
+
+# -------------------------------------------------
+# 3) Agent x Tarih full grid
+# -------------------------------------------------
+
+agent_base["_key"] = 1
+date_base["_key"] = 1
+
+agent_roster_full = (
+    agent_base
+    .merge(date_base, on="_key", how="outer")
+    .drop(columns="_key")
+)
+
+agent_base = agent_base.drop(columns="_key")
+date_base = date_base.drop(columns="_key")
+
+
+# -------------------------------------------------
+# 4) Solve sonucundan atanan roster'ı oluştur
+# -------------------------------------------------
+
+roster_rows = []
+
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                roster_rows.append({
+                    "agent_user_code": str(a).strip(),
+                    "tarih": str(ds),
+                    "vardiya": v,
+                    "baslangic": saat[(ds, v)][0],
+                    "bitis": saat[(ds, v)][1]
+                })
+
+roster_assign = pd.DataFrame(roster_rows)
+
+if len(roster_assign) == 0:
+    roster_assign = pd.DataFrame(
+        columns=["agent_user_code", "tarih", "vardiya", "baslangic", "bitis"]
+    )
+
+
+# -------------------------------------------------
+# 5) Full grid'e vardiya atamalarını ekle
+# -------------------------------------------------
+
+agent_roster_full = agent_roster_full.merge(
+    roster_assign,
+    on=["agent_user_code", "tarih"],
     how="left"
 )
 
-# Team base vardiya bilgisini ekle
-agent_roster = agent_roster.merge(
+agent_roster_full["durum"] = np.where(
+    agent_roster_full["vardiya"].notna(),
+    "WORK",
+    "OFF"
+)
+
+
+# -------------------------------------------------
+# 6) İzin bilgisi
+# -------------------------------------------------
+
+agent_roster_full["izinli_mi"] = agent_roster_full.apply(
+    lambda r: pd.to_datetime(r["tarih"]).date() in izin_map.get(r["agent_user_code"], set()),
+    axis=1
+)
+
+agent_roster_full["durum_detay"] = np.where(
+    agent_roster_full["durum"] == "WORK",
+    "WORK",
+    np.where(agent_roster_full["izinli_mi"], "OFF_IZIN", "OFF")
+)
+
+
+# -------------------------------------------------
+# 7) Team base vardiya bilgisini ekle
+# -------------------------------------------------
+
+team_base_rows = []
+
+for t in TAKIMLAR:
+    for wk in WEEKS:
+        for v in week_vardiyalari[wk]:
+            if (t, wk, v) in team_week_base and solver.Value(team_week_base[(t, wk, v)]) == 1:
+                team_base_rows.append({
+                    "takim": t,
+                    "hafta": wk,
+                    "base_vardiya": v
+                })
+
+team_base_df = pd.DataFrame(team_base_rows)
+
+agent_roster_full = agent_roster_full.merge(
     team_base_df,
     on=["takim", "hafta"],
     how="left"
 )
 
-agent_roster["base_vardiya_ok"] = agent_roster["vardiya"].eq(agent_roster["base_vardiya"])
-
-agent_roster["tarih_dt"] = pd.to_datetime(agent_roster["tarih"])
-agent_roster = agent_roster.sort_values(["agent_user_code", "tarih_dt"])
+agent_roster_full["base_vardiya_ok"] = np.where(
+    agent_roster_full["durum"] == "WORK",
+    agent_roster_full["vardiya"].eq(agent_roster_full["base_vardiya"]),
+    True
+)
 
 
 # -------------------------------------------------
-# 2) 11 saat dinlenme kişi bazlı kontrol
+# 8) Saat bazlı kontroller
 # -------------------------------------------------
+
+def dk(t):
+    if pd.isna(t):
+        return np.nan
+    h, m = str(t).split(":")
+    return int(h) * 60 + int(m)
+
 
 def shift_start_end(tarih, baslangic, bitis):
+    if pd.isna(baslangic) or pd.isna(bitis):
+        return pd.NaT, pd.NaT
+
     start_dt = pd.to_datetime(f"{tarih} {baslangic}")
     end_dt = pd.to_datetime(f"{tarih} {bitis}")
 
@@ -68,76 +184,78 @@ def shift_start_end(tarih, baslangic, bitis):
     return start_dt, end_dt
 
 
-agent_roster[["start_dt", "end_dt"]] = agent_roster.apply(
+agent_roster_full[["start_dt", "end_dt"]] = agent_roster_full.apply(
     lambda r: pd.Series(shift_start_end(r["tarih"], r["baslangic"], r["bitis"])),
     axis=1
 )
 
-agent_roster["next_tarih"] = agent_roster.groupby("agent_user_code")["tarih"].shift(-1)
-agent_roster["next_vardiya"] = agent_roster.groupby("agent_user_code")["vardiya"].shift(-1)
-agent_roster["next_start_dt"] = agent_roster.groupby("agent_user_code")["start_dt"].shift(-1)
+agent_roster_full = agent_roster_full.sort_values(
+    ["agent_user_code", "tarih_dt"]
+)
 
-agent_roster["dinlenme_saat"] = (
-    (agent_roster["next_start_dt"] - agent_roster["end_dt"])
+agent_roster_full["next_tarih"] = agent_roster_full.groupby("agent_user_code")["tarih"].shift(-1)
+agent_roster_full["next_durum"] = agent_roster_full.groupby("agent_user_code")["durum"].shift(-1)
+agent_roster_full["next_vardiya"] = agent_roster_full.groupby("agent_user_code")["vardiya"].shift(-1)
+agent_roster_full["next_start_dt"] = agent_roster_full.groupby("agent_user_code")["start_dt"].shift(-1)
+
+agent_roster_full["dinlenme_saat"] = (
+    (agent_roster_full["next_start_dt"] - agent_roster_full["end_dt"])
     .dt.total_seconds() / 3600
 )
 
-agent_roster["dinlenme_11_saat_ok"] = (
-    agent_roster["dinlenme_saat"].isna() |
-    (agent_roster["dinlenme_saat"] >= 11)
+agent_roster_full["dinlenme_11_saat_ok"] = np.where(
+    agent_roster_full["durum"] == "WORK",
+    agent_roster_full["dinlenme_saat"].isna() | (agent_roster_full["dinlenme_saat"] >= 11),
+    True
 )
 
 
 # -------------------------------------------------
-# 3) Özel kural kontrolleri
+# 9) Özel kural kontrolleri
 # -------------------------------------------------
 
-def dk(t):
-    h, m = str(t).split(":")
-    return int(h) * 60 + int(m)
+agent_roster_full["bas_dk"] = agent_roster_full["baslangic"].apply(dk)
+agent_roster_full["bit_dk"] = agent_roster_full["bitis"].apply(dk)
 
-
-agent_roster["bas_dk"] = agent_roster["baslangic"].apply(dk)
-agent_roster["bit_dk"] = agent_roster["bitis"].apply(dk)
-
-# Gece dönen vardiya
-agent_roster.loc[
-    agent_roster["bit_dk"] <= agent_roster["bas_dk"],
-    "bit_dk"
-] += 24 * 60
-
-# Sabah çalışır 20:00 sonrası çalışamaz
-agent_roster["sabah_calisir_ok"] = ~(
-    (agent_roster["sabah_calisir_flg"] == 1) &
-    (agent_roster["bit_dk"] > dk("20:00"))
+mask_gece = (
+    agent_roster_full["durum"].eq("WORK") &
+    agent_roster_full["bit_dk"].notna() &
+    agent_roster_full["bas_dk"].notna() &
+    (agent_roster_full["bit_dk"] <= agent_roster_full["bas_dk"])
 )
 
-# Hamile / süt izni hafta sonu çalışamaz
-agent_roster["hafta_sonu"] = agent_roster["tarih_dt"].dt.weekday.isin([5, 6])
+agent_roster_full.loc[mask_gece, "bit_dk"] += 24 * 60
 
-agent_roster["hamile_sut_hafta_sonu_ok"] = ~(
+# Sabah çalışır: 20:00 sonrası biten vardiyada çalışamaz
+agent_roster_full["sabah_calisir_ok"] = ~(
+    (agent_roster_full["durum"] == "WORK") &
+    (agent_roster_full["sabah_calisir_flg"] == 1) &
+    (agent_roster_full["bit_dk"] > dk("20:00"))
+)
+
+# Hamile / süt izni: hafta sonu çalışamaz
+agent_roster_full["hamile_sut_hafta_sonu_ok"] = ~(
+    (agent_roster_full["durum"] == "WORK") &
     (
-        (agent_roster["hamile_flg"] == 1) |
-        (agent_roster["sut_izni_flg"] == 1)
+        (agent_roster_full["hamile_flg"] == 1) |
+        (agent_roster_full["sut_izni_flg"] == 1)
     ) &
-    (agent_roster["hafta_sonu"])
+    (agent_roster_full["hafta_sonu"])
 )
 
-# İzinli günde çalışma kontrolü
-agent_roster["izinli_gunde_calisma"] = agent_roster.apply(
-    lambda r: pd.to_datetime(r["tarih"]).date() in izin_map.get(r["agent_user_code"], set()),
-    axis=1
+# İzinli günde çalışamaz
+agent_roster_full["izin_ok"] = ~(
+    (agent_roster_full["durum"] == "WORK") &
+    (agent_roster_full["izinli_mi"])
 )
-
-agent_roster["izin_ok"] = ~agent_roster["izinli_gunde_calisma"]
 
 
 # -------------------------------------------------
-# 4) Agent-hafta 5 gün kontrolü
+# 10) Agent-hafta çalışma günü kontrolü
 # -------------------------------------------------
 
 agent_week_check = (
-    agent_roster
+    agent_roster_full
     .groupby(
         [
             "agent_user_code",
@@ -149,38 +267,39 @@ agent_week_check = (
         as_index=False
     )
     .agg(
-        calisilan_gun=("tarih", "nunique"),
-        vardiya_sayisi=("vardiya", "count")
+        calisilan_gun=("durum", lambda x: (x == "WORK").sum()),
+        off_gun=("durum", lambda x: (x == "OFF").sum()),
+        izinli_gun=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
+        haftadaki_gun=("tarih", "nunique")
     )
 )
 
-agent_week_check["haftada_5_gun_ok"] = agent_week_check["calisilan_gun"].eq(5)
+agent_week_check["haftada_5_gun_ok"] = np.where(
+    agent_week_check["haftadaki_gun"] >= 5,
+    agent_week_check["calisilan_gun"].eq(5),
+    agent_week_check["calisilan_gun"].le(agent_week_check["haftadaki_gun"])
+)
 
 
 # -------------------------------------------------
-# 5) Max 6 gün üst üste çalışma kontrolü
+# 11) Max 6 gün üst üste çalışma kontrolü
 # -------------------------------------------------
 
 streak_rows = []
 
-for a, grp in agent_roster.groupby("agent_user_code"):
+for a, grp in agent_roster_full.groupby("agent_user_code"):
     grp = grp.sort_values("tarih_dt")
-    dates = grp["tarih_dt"].dt.date.tolist()
 
     max_streak = 0
     current_streak = 0
-    prev_date = None
 
-    for d in dates:
-        if prev_date is None:
-            current_streak = 1
-        elif (d - prev_date).days == 1:
+    for _, r in grp.iterrows():
+        if r["durum"] == "WORK":
             current_streak += 1
         else:
-            current_streak = 1
+            current_streak = 0
 
         max_streak = max(max_streak, current_streak)
-        prev_date = d
 
     streak_rows.append({
         "agent_user_code": a,
@@ -192,11 +311,11 @@ streak_check = pd.DataFrame(streak_rows)
 
 
 # -------------------------------------------------
-# 6) Agent aylık özet
+# 12) Agent aylık özet
 # -------------------------------------------------
 
 agent_month_summary = (
-    agent_roster
+    agent_roster_full
     .groupby(
         [
             "agent_user_code",
@@ -213,8 +332,9 @@ agent_month_summary = (
         as_index=False
     )
     .agg(
-        toplam_calisilan_gun=("tarih", "nunique"),
-        toplam_vardiya=("vardiya", "count"),
+        toplam_calisilan_gun=("durum", lambda x: (x == "WORK").sum()),
+        toplam_off_gun=("durum", lambda x: (x == "OFF").sum()),
+        toplam_izinli_gun=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
         base_vardiya_ihlali=("base_vardiya_ok", lambda x: (~x).sum()),
         dinlenme_11_saat_ihlali=("dinlenme_11_saat_ok", lambda x: (~x).sum()),
         sabah_calisir_ihlali=("sabah_calisir_ok", lambda x: (~x).sum()),
@@ -240,21 +360,21 @@ agent_month_summary["genel_ok"] = (
 
 
 # -------------------------------------------------
-# 7) Agent takvim görünümü
+# 13) Agent calendar görünümü
 # -------------------------------------------------
 
-calendar_tmp = agent_roster.copy()
-
-calendar_tmp["vardiya_gosterim"] = (
-    calendar_tmp["vardiya"].astype(str)
+agent_roster_full["vardiya_gosterim"] = np.where(
+    agent_roster_full["durum"] == "WORK",
+    agent_roster_full["vardiya"].astype(str)
     + " | "
-    + calendar_tmp["baslangic"].astype(str)
+    + agent_roster_full["baslangic"].astype(str)
     + "-"
-    + calendar_tmp["bitis"].astype(str)
+    + agent_roster_full["bitis"].astype(str),
+    agent_roster_full["durum_detay"]
 )
 
 agent_calendar = (
-    calendar_tmp
+    agent_roster_full
     .pivot_table(
         index=[
             "agent_user_code",
@@ -273,44 +393,74 @@ agent_calendar.columns.name = None
 
 
 # -------------------------------------------------
-# 8) Coverage tablosunu kişi kontrol dosyasına eklemek için sadeleştir
+# 14) Coverage / buffer tablosu
 # -------------------------------------------------
 
-coverage_for_excel = coverage_df.copy()
+coverage_rows = []
 
-coverage_for_excel = coverage_for_excel[
-    [
-        "tarih",
-        "gun",
-        "hafta",
-        "vardiya",
-        "baslangic",
-        "bitis",
-        "talep",
-        "lower_10pct",
-        "upper_10pct",
-        "atanan",
-        "gap",
-        "under_buffer",
-        "over_buffer",
-        "buffer_ici"
-    ]
-].sort_values(["tarih", "baslangic"])
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        assigned = sum(
+            solver.Value(x[(a, ds, v)])
+            for a in AGENTS
+            if (a, ds, v) in x
+        )
+
+        req = int(talep[(ds, v)])
+
+        coverage_rows.append({
+            "tarih": str(ds),
+            "gun": DAY_TR[pd.to_datetime(ds).weekday()],
+            "hafta": day_week[ds],
+            "vardiya": v,
+            "baslangic": saat[(ds, v)][0],
+            "bitis": saat[(ds, v)][1],
+            "talep": req,
+            "lower_10pct": coverage_lower[(ds, v)],
+            "upper_10pct": coverage_upper[(ds, v)],
+            "atanan": assigned,
+            "gap": assigned - req,
+            "under_buffer": solver.Value(under_buffer[(ds, v)]),
+            "over_buffer": solver.Value(over_buffer[(ds, v)]),
+            "buffer_ici": coverage_lower[(ds, v)] <= assigned <= coverage_upper[(ds, v)]
+        })
+
+coverage_for_excel = pd.DataFrame(coverage_rows).sort_values(["tarih", "baslangic"])
 
 
 # -------------------------------------------------
-# 9) Excel'e yaz
+# 15) Takım-tarih kontrol tablosu
 # -------------------------------------------------
 
-output_path = "vardiya_kisi_bazli_kontrol.xlsx"
+team_date_check = (
+    agent_roster_full
+    .groupby(["takim", "tarih", "gun", "hafta"], as_index=False)
+    .agg(
+        toplam_agent=("agent_user_code", "nunique"),
+        calisan_agent=("durum", lambda x: (x == "WORK").sum()),
+        off_agent=("durum", lambda x: (x == "OFF").sum()),
+        izinli_agent=("durum_detay", lambda x: (x == "OFF_IZIN").sum()),
+        calisilan_vardiya_sayisi=("vardiya", "nunique")
+    )
+)
+
+team_date_check["takim_bolunmedi_ok"] = team_date_check["calisilan_vardiya_sayisi"].le(1)
+
+
+# -------------------------------------------------
+# 16) Excel'e yaz
+# -------------------------------------------------
+
+output_path = "vardiya_kisi_bazli_full_kontrol.xlsx"
 
 with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-    agent_roster.to_excel(writer, sheet_name="01_agent_roster_detail", index=False)
-    agent_month_summary.to_excel(writer, sheet_name="02_agent_month_summary", index=False)
-    agent_week_check.to_excel(writer, sheet_name="03_agent_week_check", index=False)
-    agent_calendar.to_excel(writer, sheet_name="04_agent_calendar", index=False)
+    agent_roster_full.to_excel(writer, sheet_name="01_agent_day_detail", index=False)
+    agent_calendar.to_excel(writer, sheet_name="02_agent_calendar", index=False)
+    agent_month_summary.to_excel(writer, sheet_name="03_agent_month_summary", index=False)
+    agent_week_check.to_excel(writer, sheet_name="04_agent_week_check", index=False)
     coverage_for_excel.to_excel(writer, sheet_name="05_coverage_buffer", index=False)
     team_base_df.to_excel(writer, sheet_name="06_team_base", index=False)
+    team_date_check.to_excel(writer, sheet_name="07_team_date_check", index=False)
 
     workbook = writer.book
 
@@ -328,15 +478,17 @@ with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         "bg_color": "#C6EFCE"
     })
 
-    # Basit format
-    for sheet_name, df in {
-        "01_agent_roster_detail": agent_roster,
-        "02_agent_month_summary": agent_month_summary,
-        "03_agent_week_check": agent_week_check,
-        "04_agent_calendar": agent_calendar,
+    sheets = {
+        "01_agent_day_detail": agent_roster_full,
+        "02_agent_calendar": agent_calendar,
+        "03_agent_month_summary": agent_month_summary,
+        "04_agent_week_check": agent_week_check,
         "05_coverage_buffer": coverage_for_excel,
-        "06_team_base": team_base_df
-    }.items():
+        "06_team_base": team_base_df,
+        "07_team_date_check": team_date_check
+    }
+
+    for sheet_name, df in sheets.items():
         ws = writer.sheets[sheet_name]
 
         for col_num, value in enumerate(df.columns):
@@ -349,17 +501,15 @@ with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
             width = min(max(len(str(col)) + 2, 12), 35)
             ws.set_column(i, i, width)
 
-    # Boolean kontrol kolonlarını renklendir
-    for sheet_name, df in {
-        "01_agent_roster_detail": agent_roster,
-        "02_agent_month_summary": agent_month_summary,
-        "03_agent_week_check": agent_week_check,
-        "05_coverage_buffer": coverage_for_excel
-    }.items():
+    # Boolean / OK kolonlarını renklendir
+    for sheet_name, df in sheets.items():
         ws = writer.sheets[sheet_name]
 
         for col_name in df.columns:
-            if col_name.endswith("_ok") or col_name in ["genel_ok", "buffer_ici", "base_vardiya_ok"]:
+            if (
+                col_name.endswith("_ok")
+                or col_name in ["genel_ok", "buffer_ici", "takim_bolunmedi_ok"]
+            ):
                 col_idx = df.columns.get_loc(col_name)
 
                 ws.conditional_format(

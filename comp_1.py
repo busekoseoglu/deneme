@@ -1,61 +1,42 @@
-# %% [HÜCRE] - AYDA EN AZ 1 CUMARTESİ-PAZAR PEŞ PEŞE OFF
-# Her agent için ay içinde en az bir Cumartesi-Pazar çifti tamamen OFF olmalı.
-# Yani o Cumartesi work=0 ve o Pazar work=0 olmalı.
+# %% KONTROL - CUMARTESİ-PAZAR PEŞ PEŞE OFF
 
-weekend_pairs = []
-
-plan_dates = sorted([pd.to_datetime(ds).date() for ds in PLAN_GUNLER])
-date_to_ds = {
-    pd.to_datetime(ds).date(): ds
-    for ds in PLAN_GUNLER
-}
-
-for d in plan_dates:
-    # Cumartesi = 5
-    if d.weekday() == 5:
-        sunday = d + pd.Timedelta(days=1)
-
-        if sunday in date_to_ds:
-            sat_ds = date_to_ds[d]
-            sun_ds = date_to_ds[sunday]
-
-            weekend_pairs.append((sat_ds, sun_ds))
-
-print("Cumartesi-Pazar çiftleri:")
-for p in weekend_pairs:
-    print(p)
-
-
-# pair_off[(a, i)] = 1 ise agent a, i. hafta sonu çiftinde hem Cumartesi hem Pazar OFF
-pair_off = {}
-
-weekend_pair_constraints = 0
+weekend_off_rows = []
 
 for a in AGENTS:
-    pair_vars = []
+    off_pair_count = 0
 
     for i, (sat_ds, sun_ds) in enumerate(weekend_pairs):
-        pair_off[(a, i)] = model.NewBoolVar(f"pair_off_{a}_{i}")
+        sat_work = solver.Value(work[(a, sat_ds)])
+        sun_work = solver.Value(work[(a, sun_ds)])
 
-        # Eğer pair_off = 1 ise Cumartesi çalışamaz
-        model.Add(work[(a, sat_ds)] == 0).OnlyEnforceIf(pair_off[(a, i)])
+        both_off = int((sat_work == 0) and (sun_work == 0))
 
-        # Eğer pair_off = 1 ise Pazar çalışamaz
-        model.Add(work[(a, sun_ds)] == 0).OnlyEnforceIf(pair_off[(a, i)])
+        if both_off == 1:
+            off_pair_count += 1
 
-        # Eğer Cumartesi çalışıyorsa pair_off 1 olamaz
-        model.Add(pair_off[(a, i)] <= 1 - work[(a, sat_ds)])
+        weekend_off_rows.append({
+            "agent_user_code": a,
+            "pair_no": i,
+            "cumartesi": sat_ds,
+            "pazar": sun_ds,
+            "cumartesi_work": sat_work,
+            "pazar_work": sun_work,
+            "both_off": both_off
+        })
 
-        # Eğer Pazar çalışıyorsa pair_off 1 olamaz
-        model.Add(pair_off[(a, i)] <= 1 - work[(a, sun_ds)])
+weekend_off_check = pd.DataFrame(weekend_off_rows)
 
-        pair_vars.append(pair_off[(a, i)])
-        weekend_pair_constraints += 4
+agent_weekend_off_summary = (
+    weekend_off_check
+    .groupby("agent_user_code", as_index=False)
+    .agg(
+        toplam_pes_pese_hafta_sonu_off=("both_off", "sum")
+    )
+)
 
-    # Her agent için ayda en az 1 Cumartesi-Pazar peş peşe OFF
-    if pair_vars:
-        model.Add(sum(pair_vars) >= 1)
-        weekend_pair_constraints += 1
+viol_weekend_pair = agent_weekend_off_summary[
+    agent_weekend_off_summary["toplam_pes_pese_hafta_sonu_off"] < 1
+]
 
-print("pair_off değişken sayısı:", len(pair_off))
-print("Cumartesi-Pazar peş peşe OFF kısıtı:", weekend_pair_constraints)
+print("Peş peşe Cumartesi-Pazar OFF almayan agent sayısı:", len(viol_weekend_pair))
+display(viol_weekend_pair.head(20))

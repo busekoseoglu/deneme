@@ -1,49 +1,27 @@
-# %% [HÜCRE 16] - TAKIM HAFTALIK BASE VARDİYA - HARD
-# Her takım-her hafta için bir tane ana vardiya seçer.
-# Takımdaki herkes o hafta çalıştığı günlerde sadece bu base vardiyada çalışabilir.
-# Böylece aynı gün takımın farklı vardiyalara bölünmesi engellenir.
+# %% [HÜCRE] - OBJECTIVE
+# Amaç:
+# 1. %10 buffer altına düşme olmasın / minimum olsun
+# 2. %10 buffer üstüne çıkma mümkünse az olsun
+#
+# Takım bölünmesin kuralı objective'te değil,
+# "Takım haftalık base vardiya - HARD" hücresinde constraint olarak sağlanıyor.
 
-team_base_constraints = 0
-team_hard_link_constraints = 0
+objective_terms = []
 
-# Her takım-her hafta için tek base vardiya
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        vars_base = [
-            team_week_base[(t, wk, v)]
-            for v in week_vardiyalari[wk]
-            if (t, wk, v) in team_week_base
-        ]
+UNDER_BUFFER_W = 100000   # Eksik kalmak çok pahalı
+OVER_BUFFER_W = 1000      # Fazla yazmak daha az pahalı
 
-        if vars_base:
-            model.Add(sum(vars_base) == 1)
-            team_base_constraints += 1
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        objective_terms.append(
+            UNDER_BUFFER_W * under_buffer[(ds, v)]
+        )
+        objective_terms.append(
+            OVER_BUFFER_W * over_buffer[(ds, v)]
+        )
 
+model.Minimize(sum(objective_terms))
 
-# Agent sadece takımının haftalık base vardiyasında çalışabilir
-for a in AGENTS:
-    t = agent_team.get(a)
-
-    if pd.isna(t) or t is None:
-        continue
-
-    t = str(t).strip()
-
-    for ds in PLAN_GUNLER:
-        wk = day_week[ds]
-
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) not in x:
-                continue
-
-            # HARD bağlantı:
-            # team_week_base[(t, wk, v)] = 1 ise bu vardiya takımın base vardiyasıdır.
-            # 0 ise agent bu vardiyaya atanamaz.
-            model.Add(
-                x[(a, ds, v)] <= team_week_base[(t, wk, v)]
-            )
-
-            team_hard_link_constraints += 1
-
-print(f"takım-hafta tek base vardiya kısıtı: {team_base_constraints}")
-print(f"takım hard base bağlantı kısıtı: {team_hard_link_constraints}")
+print("objective term sayısı:", len(objective_terms))
+print("under buffer weight:", UNDER_BUFFER_W)
+print("over buffer weight:", OVER_BUFFER_W)

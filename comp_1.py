@@ -1,62 +1,97 @@
-# %% [KONTROL] - BASE DIŞI ÇALIŞANLARA AGENT ÖZELLİKLERİNİ EKLE
+# %% [KONTROL] - TAKIM BAZINDA BASE DIŞI ORANI
 
-agent_cols = [
-    "agent_user_code",
-    "agent_name",
-    "teamleader_name",
-    "working_main_group",
-    "line_based_main_group",
-    "sabah_calisir_flg",
-    "mesaiye_kalamaz_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg"
-]
-
-agent_info = df_tam[agent_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-roster_base_detail = roster_base_check.merge(
-    agent_info,
-    on="agent_user_code",
-    how="left"
+team_split_summary = (
+    roster_base_detail
+    .groupby(["hafta", "takim"], as_index=False)
+    .agg(
+        toplam_calisma=("agent_user_code", "count"),
+        base_disi_sayi=("base_disi", "sum"),
+        ozel_durumlu_base_disi=("ozel_durumlu", lambda x: x[roster_base_detail.loc[x.index, "base_disi"] == 1].sum())
+    )
 )
 
-# Özel durum flag'i
-flag_cols = [
-    "sabah_calisir_flg",
-    "mesaiye_kalamaz_flg",
-    "hamile_flg",
-    "sut_izni_flg",
-    "idari_izinli_flg",
-    "dogum_izni_flg"
-]
-
-for c in flag_cols:
-    roster_base_detail[c] = pd.to_numeric(
-        roster_base_detail[c], errors="coerce"
-    ).fillna(0).astype(int)
-
-roster_base_detail["ozel_durumlu"] = (
-    (roster_base_detail["sabah_calisir_flg"] == 1) |
-    (roster_base_detail["mesaiye_kalamaz_flg"] == 1) |
-    (roster_base_detail["hamile_flg"] == 1) |
-    (roster_base_detail["sut_izni_flg"] == 1) |
-    (roster_base_detail["idari_izinli_flg"] == 1) |
-    (roster_base_detail["dogum_izni_flg"] == 1)
-).astype(int)
-
-base_disi_df = roster_base_detail[
-    roster_base_detail["base_disi"] == 1
-].copy()
-
-print("base dışı çalışan satır:", len(base_disi_df))
-print("base dışı özel durumlu satır:", base_disi_df["ozel_durumlu"].sum())
-print("base dışı normal satır:", len(base_disi_df) - base_disi_df["ozel_durumlu"].sum())
+team_split_summary["base_disi_oran"] = (
+    team_split_summary["base_disi_sayi"] / team_split_summary["toplam_calisma"]
+)
 
 display(
-    base_disi_df[
+    team_split_summary
+    .sort_values("base_disi_sayi", ascending=False)
+    .head(50)
+)
+
+# %% [KONTROL] - TAKIM GÜN BAZINDA KAÇ VARDİYAYA BÖLÜNMÜŞ?
+
+team_day_split = (
+    roster_df
+    .groupby(["hafta", "tarih", "gun", "takim"], as_index=False)
+    .agg(
+        calisan_sayi=("agent_user_code", "nunique"),
+        vardiya_sayisi=("vardiya", "nunique")
+    )
+)
+
+team_day_split["bolundu_mu"] = (team_day_split["vardiya_sayisi"] > 1).astype(int)
+
+print("takım-gün toplam:", len(team_day_split))
+print("bölünen takım-gün:", team_day_split["bolundu_mu"].sum())
+
+display(
+    team_day_split[team_day_split["bolundu_mu"] == 1]
+    .sort_values(["hafta", "tarih", "vardiya_sayisi"], ascending=[True, True, False])
+    .head(100)
+)
+
+# %% [KONTROL] - BÖLÜNEN TAKIMLARDA VARDİYA DAĞILIMI
+
+split_detail = (
+    roster_base_detail
+    .groupby(
+        [
+            "hafta",
+            "tarih",
+            "gun",
+            "takim",
+            "base_vardiya",
+            "vardiya"
+        ],
+        as_index=False
+    )
+    .agg(
+        kisi_sayisi=("agent_user_code", "nunique"),
+        ozel_durumlu_sayi=("ozel_durumlu", "sum"),
+        base_disi_sayi=("base_disi", "sum")
+    )
+)
+
+# Sadece bölünen takım-günleri al
+split_team_days = team_day_split[
+    team_day_split["bolundu_mu"] == 1
+][["hafta", "tarih", "takim"]]
+
+split_detail = split_detail.merge(
+    split_team_days,
+    on=["hafta", "tarih", "takim"],
+    how="inner"
+)
+
+display(
+    split_detail
+    .sort_values(["hafta", "tarih", "takim", "kisi_sayisi"], ascending=[True, True, True, False])
+    .head(150)
+)
+
+# %% [KONTROL] - NORMAL KİŞİLERİN BASE DIŞINA ÇIKMASI
+
+normal_base_disi = base_disi_df[
+    base_disi_df["ozel_durumlu"] == 0
+].copy()
+
+print("normal base dışı satır:", len(normal_base_disi))
+print("normal base dışı unique agent:", normal_base_disi["agent_user_code"].nunique())
+
+display(
+    normal_base_disi[
         [
             "agent_user_code",
             "agent_name",
@@ -66,12 +101,22 @@ display(
             "hafta",
             "vardiya",
             "base_vardiya",
-            "is_exception",
-            "ozel_durumlu",
-            "sabah_calisir_flg",
-            "mesaiye_kalamaz_flg",
-            "hamile_flg",
-            "sut_izni_flg"
+            "is_exception"
         ]
-    ].sort_values(["hafta", "takim", "tarih"]).head(100)
+    ]
+    .sort_values(["hafta", "takim", "agent_user_code", "tarih"])
+    .head(100)
 )
+
+# %% [KONTROL] - BASE DIŞI GENEL ÖZET
+
+print("Toplam çalışma satırı:", len(roster_base_detail))
+print("Base dışı satır:", roster_base_detail["base_disi"].sum())
+print("Base dışı oran:", round(roster_base_detail["base_disi"].mean(), 4))
+
+print("\nBase dışı özel durumlu:", base_disi_df["ozel_durumlu"].sum())
+print("Base dışı normal:", len(base_disi_df) - base_disi_df["ozel_durumlu"].sum())
+
+print("\nBölünen takım-gün:", team_day_split["bolundu_mu"].sum())
+print("Toplam takım-gün:", len(team_day_split))
+print("Bölünme oranı:", round(team_day_split["bolundu_mu"].mean(), 4))

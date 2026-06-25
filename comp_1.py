@@ -1,56 +1,4 @@
-# Under / over en çok hangi vardiyalarda?
-
-coverage_shift_summary = (
-    coverage_for_excel
-    .groupby(["vardiya", "baslangic", "bitis"], as_index=False)
-    .agg(
-        toplam_talep=("talep", "sum"),
-        toplam_atanan=("atanan", "sum"),
-        toplam_under=("under_buffer", "sum"),
-        toplam_over=("over_buffer", "sum"),
-        gun_sayisi=("tarih", "nunique")
-    )
-)
-
-display(
-    coverage_shift_summary
-    .sort_values("toplam_under", ascending=False)
-    .head(20)
-)
-
-display(
-    coverage_shift_summary
-    .sort_values("toplam_over", ascending=False)
-    .head(20)
-)
-
-# Gün bazlı under / over
-
-coverage_day_summary = (
-    coverage_for_excel
-    .groupby(["tarih", "gun"], as_index=False)
-    .agg(
-        toplam_talep=("talep", "sum"),
-        toplam_atanan=("atanan", "sum"),
-        toplam_under=("under_buffer", "sum"),
-        toplam_over=("over_buffer", "sum")
-    )
-)
-
-display(
-    coverage_day_summary
-    .sort_values("toplam_under", ascending=False)
-    .head(20)
-)
-
-display(
-    coverage_day_summary
-    .sort_values("toplam_over", ascending=False)
-    .head(20)
-)
-
-
-# Mesai değişkeni haftalık çalışma gününe doğru bağlanmış mı?
+# %% DOĞRU HAFTALIK ÇALIŞMA / MESAİ DEBUG
 
 weekly_debug_rows = []
 
@@ -65,7 +13,25 @@ for a in AGENTS:
             if pd.to_datetime(ds).date() in izinli
         )
 
-        normal_target = max(0, 5 - izin_count_this_week)
+        raw_normal_target = max(0, 5 - izin_count_this_week)
+
+        feasible_days = []
+
+        for ds in days_in_week:
+            d_date = pd.to_datetime(ds).date()
+
+            if d_date in izinli:
+                continue
+
+            has_option = any(
+                (a, ds, v) in x
+                for v in gun_vardiyalari.get(ds, [])
+            )
+
+            if has_option:
+                feasible_days.append(ds)
+
+        normal_target = min(raw_normal_target, len(feasible_days))
 
         worked_days = sum(
             solver.Value(work[(a, ds)])
@@ -77,7 +43,10 @@ for a in AGENTS:
         weekly_debug_rows.append({
             "agent_user_code": a,
             "hafta": wk,
+            "haftadaki_gun": len(days_in_week),
             "izin_count_this_week": izin_count_this_week,
+            "raw_normal_target": raw_normal_target,
+            "feasible_day_count": len(feasible_days),
             "normal_target": normal_target,
             "worked_days": worked_days,
             "overtime_week": overtime_val,
@@ -95,6 +64,6 @@ display(
 
 display(
     weekly_debug_df
-    .sort_values("worked_minus_target", ascending=False)
+    .sort_values(["worked_minus_target", "hafta"], ascending=[True, True])
     .head(50)
 )

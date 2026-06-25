@@ -1,155 +1,49 @@
-# %% [HÜCRE 9] - CP-SAT MODEL + KARAR DEĞİŞKENLERİ
-# Yeni mantık:
-# x[agent, gün, vardiya] = 1 ise agent o gün o vardiyada çalışır
-# work[agent, gün] = 1 ise agent o gün çalışır
-# team_week_base[takım, hafta, vardiya] = takımın o hafta ana vardiyası
-# exception[agent, gün] = agent o gün takımının haftalık base vardiyası dışında çalıştı mı
-# under_buffer[gün, vardiya] = %10 alt sınırın altında kalan kişi sayısı
-# over_buffer[gün, vardiya] = %10 üst sınırın üstünde kalan kişi sayısı
-
-from ortools.sat.python import cp_model
-import pandas as pd
-import numpy as np
-from collections import defaultdict
-
-model = cp_model.CpModel()
-
-# -----------------------------
-# Yardımcı setler
-# -----------------------------
-
-PLAN_GUNLER = sorted(PLAN_GUNLER)
-
-ALL_VARDIYALAR = sorted(
-    set(v for ds in PLAN_GUNLER for v in gun_vardiyalari.get(ds, []))
-)
-
-TAKIMLAR = sorted(df_tam["takim"].dropna().astype(str).unique().tolist())
-
-agent_team = dict(
-    zip(
-        df_tam["agent_user_code"].astype(str).str.strip(),
-        df_tam["takim"].astype(str).str.strip()
-    )
-)
-
-def week_key(ds):
-    d = pd.to_datetime(ds)
-    iso = d.isocalendar()
-    return f"{int(iso.year)}-W{int(iso.week):02d}"
-
-day_week = {ds: week_key(ds) for ds in PLAN_GUNLER}
-WEEKS = sorted(set(day_week.values()))
-
-# takımın o hafta çalışabileceği vardiyalar
-week_vardiyalari = defaultdict(set)
-
-for ds in PLAN_GUNLER:
-    wk = day_week[ds]
-    for v in gun_vardiyalari.get(ds, []):
-        week_vardiyalari[wk].add(v)
-
-week_vardiyalari = {
-    wk: sorted(list(vs))
-    for wk, vs in week_vardiyalari.items()
-}
-
-print(f"agent sayısı: {len(AGENTS)}")
-print(f"takım sayısı: {len(TAKIMLAR)}")
-print(f"plan gün sayısı: {len(PLAN_GUNLER)}")
-print(f"hafta sayısı: {len(WEEKS)} -> {WEEKS}")
-print(f"vardiya sayısı: {len(ALL_VARDIYALAR)}")
-
-
-# -----------------------------
-# x değişkeni
-# izinli günlerde x açılmayacak
-# -----------------------------
-
-x = {}
-
-for a in AGENTS:
-    izinli = izin_map.get(a, set())
-
-    for ds in PLAN_GUNLER:
-        d_date = pd.to_datetime(ds).date()
-
-        if d_date in izinli:
-            continue
-
-        for v in gun_vardiyalari.get(ds, []):
-            x[(a, ds, v)] = model.NewBoolVar(f"x_{a}_{ds}_{v}")
-
-
-# -----------------------------
-# work değişkeni
-# -----------------------------
-
-work = {}
-
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        work[(a, ds)] = model.NewBoolVar(f"work_{a}_{ds}")
-
-
-# -----------------------------
-# takım-hafta base vardiya değişkeni
-# -----------------------------
-
-team_week_base = {}
-
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        for v in week_vardiyalari[wk]:
-            team_week_base[(t, wk, v)] = model.NewBoolVar(
-                f"team_week_base_{t}_{wk}_{v}"
-            )
-
-
-# -----------------------------
-# exception değişkeni
-# -----------------------------
-
-exception = {}
-
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        exception[(a, ds)] = model.NewBoolVar(f"exception_{a}_{ds}")
-
-
-# -----------------------------
-# %10 buffer dışı sapma değişkenleri
-# -----------------------------
-# under_buffer:
-# Talep 50 ise alt sınır 45.
-# Atanan 43 olursa under_buffer = 2 olur.
+# %% [HÜCRE 10] - COVERAGE KISITI - %10 BUFFERLI
+# Talebin %10 altı ve %10 üstü cezasız kabul edilir.
+# Buffer dışına çıkılırsa under_buffer / over_buffer açılır.
 #
-# over_buffer:
-# Talep 50 ise üst sınır 55.
-# Atanan 58 olursa over_buffer = 3 olur.
+# Örnek:
+# Talep 50 ise lower=45, upper=55
+# Atanan 46 ise ceza yok
+# Atanan 55 ise ceza yok
+# Atanan 43 ise under_buffer=2
+# Atanan 58 ise over_buffer=3
 
-under_buffer = {}
-over_buffer = {}
+import math
 
-MAX_AGENT = len(AGENTS)
+BUFFER_RATE = 0.10
+
+coverage_lower = {}
+coverage_upper = {}
+
+coverage_constraints = 0
 
 for ds in PLAN_GUNLER:
     for v in gun_vardiyalari.get(ds, []):
-        under_buffer[(ds, v)] = model.NewIntVar(
-            0,
-            MAX_AGENT,
-            f"under_buffer_{ds}_{v}"
+
+        required = int(talep[(ds, v)])
+
+        lower_req = math.floor(required * (1 - BUFFER_RATE))
+        upper_req = math.ceil(required * (1 + BUFFER_RATE))
+
+        coverage_lower[(ds, v)] = lower_req
+        coverage_upper[(ds, v)] = upper_req
+
+        assigned = sum(
+            x[(a, ds, v)]
+            for a in AGENTS
+            if (a, ds, v) in x
         )
 
-        over_buffer[(ds, v)] = model.NewIntVar(
-            0,
-            MAX_AGENT,
-            f"over_buffer_{ds}_{v}"
+        model.Add(
+            assigned + under_buffer[(ds, v)] >= lower_req
         )
 
+        model.Add(
+            assigned - over_buffer[(ds, v)] <= upper_req
+        )
 
-print(f"x karar değişkeni: {len(x)}")
-print(f"work değişkeni: {len(work)}")
-print(f"team_week_base değişkeni: {len(team_week_base)}")
-print(f"exception değişkeni: {len(exception)}")
-print(f"under/over buffer kovası: {len(under_buffer)}")
+        coverage_constraints += 2
+
+print(f"coverage buffer constraint sayısı: {coverage_constraints}")
+print(f"buffer oranı: %{int(BUFFER_RATE * 100)}")

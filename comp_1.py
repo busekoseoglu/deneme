@@ -1,50 +1,21 @@
-# %% [HÜCRE 17] - OBJECTIVE
-# Öncelik:
-# 1. Eksik kişi bırakma
-# 2. Fazla kişi atama
-# 3. Takımın haftalık base vardiyasından ayrılma
-# 4. Özel durumlu kişilerin exception cezası daha düşük
+# %% [HÜCRE 18] - SOLVE
 
-objective_terms = []
+solver = cp_model.CpSolver()
 
-SHORTAGE_W = 100000
-EXCESS_W = 1000
-EXCEPTION_NORMAL_W = 1000
-EXCEPTION_SPECIAL_W = 100
+solver.parameters.max_time_in_seconds = 300
+solver.parameters.num_search_workers = 8
+solver.parameters.log_search_progress = True
 
-# shortage / excess cezaları
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        objective_terms.append(SHORTAGE_W * shortage[(ds, v)])
-        objective_terms.append(EXCESS_W * excess[(ds, v)])
+status = solver.Solve(model)
 
+status_map = {
+    cp_model.OPTIMAL: "OPTIMAL",
+    cp_model.FEASIBLE: "FEASIBLE",
+    cp_model.INFEASIBLE: "INFEASIBLE",
+    cp_model.MODEL_INVALID: "MODEL_INVALID",
+    cp_model.UNKNOWN: "UNKNOWN"
+}
 
-# özel durumlu agentlar
-special_agents = set()
-
-for _, row in df_tam.iterrows():
-    a = str(row["agent_user_code"]).strip()
-
-    is_special = (
-        int(row.get("hamile_flg", 0) or 0) == 1
-        or int(row.get("sut_izni_flg", 0) or 0) == 1
-        or int(row.get("sabah_calisir_flg", 0) or 0) == 1
-    )
-
-    if is_special:
-        special_agents.add(a)
-
-
-# exception cezaları
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        if a in special_agents:
-            objective_terms.append(EXCEPTION_SPECIAL_W * exception[(a, ds)])
-        else:
-            objective_terms.append(EXCEPTION_NORMAL_W * exception[(a, ds)])
-
-
-model.Minimize(sum(objective_terms))
-
-print(f"objective term sayısı: {len(objective_terms)}")
-print(f"special agent sayısı: {len(special_agents)}")
+print("status:", status_map.get(status, status))
+print("objective:", solver.ObjectiveValue() if status in [cp_model.OPTIMAL, cp_model.FEASIBLE] else None)
+print("wall time:", solver.WallTime())

@@ -1,25 +1,39 @@
-# %% SOLVE - DAHA UZUN SÜRE
+team_day_split = (
+    roster_df
+    .groupby(["hafta", "tarih", "gun", "weekday", "takim"], as_index=False)
+    .agg(
+        calisan_sayi=("agent_user_code", "nunique"),
+        vardiya_sayisi=("vardiya", "nunique")
+    )
+)
 
-solver = cp_model.CpSolver()
+team_day_split["hafta_ici"] = team_day_split["weekday"].isin([0, 1, 2, 3, 4])
 
-solver.parameters.max_time_in_seconds = 1200
-solver.parameters.num_search_workers = 8
-solver.parameters.log_search_progress = True
+weekday_team_viol = team_day_split[
+    (team_day_split["hafta_ici"]) &
+    (team_day_split["vardiya_sayisi"] > 1)
+]
 
-status = solver.Solve(model)
+print("Hafta içi bölünen takım-gün sayısı:", len(weekday_team_viol))
+display(weekday_team_viol.head(20))
 
-status_map = {
-    cp_model.OPTIMAL: "OPTIMAL",
-    cp_model.FEASIBLE: "FEASIBLE",
-    cp_model.INFEASIBLE: "INFEASIBLE",
-    cp_model.MODEL_INVALID: "MODEL_INVALID",
-    cp_model.UNKNOWN: "UNKNOWN"
-}
 
-print("status:", status_map.get(status, status))
 
-if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-    print("objective:", solver.ObjectiveValue())
-    print("best bound:", solver.BestObjectiveBound())
-    print("gap:", solver.ObjectiveValue() - solver.BestObjectiveBound())
-    print("wall time:", solver.WallTime())
+team_day_split = (
+    roster_df
+    .groupby(["hafta", "tarih", "gun", "weekday", "takim"], as_index=False)
+    .agg(
+        calisan_sayi=("agent_user_code", "nunique"),
+        vardiya_sayisi=("vardiya", "nunique")
+    )
+)
+
+team_day_split["hafta_ici"] = team_day_split["weekday"].isin([0, 1, 2, 3, 4])
+
+weekday_team_viol = team_day_split[
+    (team_day_split["hafta_ici"]) &
+    (team_day_split["vardiya_sayisi"] > 1)
+]
+
+print("Hafta içi bölünen takım-gün sayısı:", len(weekday_team_viol))
+display(weekday_team_viol.head(20))

@@ -1,265 +1,135 @@
-# Vardiya Planlama Modeli — Güncel Versiyon Özeti
+# %% [HÜCRE] - GECE / AKŞAM VARDİYA HAFTASI DEĞİŞKENİ
+# Kural:
+# Agent ay içinde en fazla 2 hafta gece/akşam vardiyasında çalışabilir.
+# Gece/akşam vardiyaları:
+# 17:00-01:00, 18:00-02:00, 00:00-08:00
 
-Bu versiyonda amaç, agent–gün–vardiya atamasını yaparken coverage ihtiyacını %10 buffer içinde karşılamak, kişi bazlı çalışma kurallarını korumak ve takım bütünlüğünü hafta içi sağlamak.
+def normalize_time_str(t):
+    """
+    Saat değerini HH:MM formatına çevirir.
+    Örn: '17:00:00' -> '17:00'
+    """
+    if pd.isna(t):
+        return None
 
----
+    t = str(t).strip()
 
-## 1. Ana Karar Değişkenleri
+    if len(t) >= 5:
+        return t[:5]
 
-### Agent vardiya ataması
+    return t
 
-```python
-x[(agent, tarih, vardiya)]
-```
 
-Agent ilgili tarihte ilgili vardiyada çalışıyorsa 1, aksi halde 0.
+NIGHT_SHIFT_WINDOWS = {
+    ("17:00", "01:00"),
+    ("18:00", "02:00"),
+    ("00:00", "08:00")
+}
 
----
+night_shift_map = {}
 
-### Agent günlük çalışma değişkeni
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        bas = normalize_time_str(saat[(ds, v)][0])
+        bit = normalize_time_str(saat[(ds, v)][1])
 
-```python
-work[(agent, tarih)]
-```
+        night_shift_map[(ds, v)] = (bas, bit) in NIGHT_SHIFT_WINDOWS
 
-Agent o gün çalışıyorsa 1, çalışmıyorsa 0.
 
-Bu değişken `x` ile bağlandı:
+print("Gece/akşam vardiyası olan gün-vardiya sayısı:", sum(night_shift_map.values()))
 
-```python
-sum(x[(a, ds, v)] for v in gun_vardiyalari[ds]) == work[(a, ds)]
-```
+# night_week[(a, wk)] = 1 ise agent o hafta en az 1 gece/akşam vardiyası almış demektir.
+night_week = {}
 
-Böylece agent bir günde maksimum 1 vardiya alabiliyor.
+for a in AGENTS:
+    for wk in WEEKS:
+        night_week[(a, wk)] = model.NewBoolVar(f"night_week_{a}_{wk}")
 
----
 
-### Takım haftalık base vardiya değişkeni
 
-```python
-team_week_base[(takim, hafta, vardiya)]
-```
+# %% [HÜCRE] - AYDA MAX 2 HAFTA GECE / AKŞAM VARDİYASI
 
-Her takım için her hafta 1 tane ana vardiya seçiliyor.
+MAX_NIGHT_WEEKS_PER_MONTH = 2
 
-Hafta içi günlerde takım bütünlüğü korunuyor:
+night_week_link_constraints = 0
+night_week_limit_constraints = 0
 
-```python
-x[(a, ds, v)] <= team_week_base[(takim, hafta, v)]
-```
+for a in AGENTS:
+    for wk in WEEKS:
+        days_in_week = week_days[wk]
 
-Bu kısıt sadece Pazartesi–Cuma için uygulanıyor. Cumartesi-Pazar günleri takım serbest bırakıldı.
+        night_vars_this_week = []
 
----
+        for ds in days_in_week:
+            for v in gun_vardiyalari.get(ds, []):
 
-### Coverage buffer değişkenleri
+                if not night_shift_map.get((ds, v), False):
+                    continue
 
-```python
-under_buffer[(tarih, vardiya)]
-over_buffer[(tarih, vardiya)]
-```
+                if (a, ds, v) in x:
+                    night_vars_this_week.append(x[(a, ds, v)])
 
-Talep birebir karşılanmak zorunda değil. %10 buffer verildi.
+        if night_vars_this_week:
+            # Eğer agent bu hafta herhangi bir gece/akşam vardiyası alırsa night_week = 1 olur
+            for var in night_vars_this_week:
+                model.Add(var <= night_week[(a, wk)])
+                night_week_link_constraints += 1
 
-Örnek:
+            # Eğer hiç gece/akşam vardiyası almıyorsa night_week = 0 kalır
+            model.Add(night_week[(a, wk)] <= sum(night_vars_this_week))
+            night_week_link_constraints += 1
 
-```text
-Talep = 50
-Alt sınır = 45
-Üst sınır = 55
+        else:
+            model.Add(night_week[(a, wk)] == 0)
+            night_week_link_constraints += 1
 
-Atanan 46 ise OK
-Atanan 55 ise OK
-Atanan 43 ise under_buffer = 2
-Atanan 58 ise over_buffer = 3
-```
+    # Ay içinde en fazla 2 hafta gece/akşam vardiyası
+    model.Add(
+        sum(night_week[(a, wk)] for wk in WEEKS)
+        <= MAX_NIGHT_WEEKS_PER_MONTH
+    )
+    night_week_limit_constraints += 1
 
-Coverage kısıtı:
 
-```python
-assigned + under_buffer[(ds, v)] >= lower_req
-assigned - over_buffer[(ds, v)] <= upper_req
-```
+print("Gece/akşam hafta bağlantı kısıtı:", night_week_link_constraints)
+print("Agent bazlı max 2 gece/akşam hafta kısıtı:", night_week_limit_constraints)
 
----
 
-### Mesai değişkeni
 
-```python
-overtime_week[(agent, hafta)]
-```
+# %% KONTROL - AGENT BAZLI GECE / AKŞAM HAFTASI
 
-Agent ilgili haftada mesai yaptıysa 1, yapmadıysa 0.
-
-Bu versiyonda mesai 6. gün çalışma olarak modellendi.
-
-Kurallar:
-
-```text
-Haftalık normal hedef = 5 - izin günü
-Çalışılan gün = normal hedef + overtime_week
-Ayda maksimum 2 mesai
-mesaiye_kalamaz_flg = 1 olan agentlara mesai yazılamaz
-```
-
----
-
-### Cumartesi-Pazar peş peşe OFF değişkeni
-
-```python
-pair_off[(agent, hafta_sonu_cifti)]
-```
-
-Agent ilgili Cumartesi-Pazar çiftinde iki gün de OFF ise 1.
-
-Her agent için ayda en az 1 kez Cumartesi-Pazar peş peşe OFF zorunlu tutuldu:
-
-```python
-sum(pair_off[(a, i)] for i in weekend_pairs) >= 1
-```
-
----
-
-## 2. Eklenen Ana Kurallar
-
-### Günlük maksimum 1 vardiya
-
-Her agent bir günde en fazla 1 vardiyada çalışabilir.
-
----
-
-### Haftalık çalışma hedefi
-
-Önceki modelde agent haftada 5 gün çalışıyordu.
-
-Yeni modelde izin günleri dikkate alındı:
-
-```text
-İzin yoksa: 5 gün çalışır
-1 gün izin varsa: 4 gün çalışır
-2 gün izin varsa: 3 gün çalışır
-```
-
-Mesai varsa hedefin 1 gün üstüne çıkabilir.
-
----
-
-### Maksimum 6 gün üst üste çalışma
-
-Herhangi 7 günlük pencerede en fazla 6 çalışma günü olabilir.
-
----
-
-### 11 saat dinlenme
-
-Agent’ın iki vardiyası arasında minimum 11 saat dinlenme olmalı.
-
----
-
-### Sabah çalışan kısıtı
-
-`sabah_calisir_flg = 1` olan agentlar 20:00 sonrası biten vardiyalarda çalışamaz.
-
----
-
-### Hamile / süt izni kısıtı
-
-`hamile_flg = 1` veya `sut_izni_flg = 1` olan agentlar hafta sonu çalışamaz.
-
----
-
-### İzinli günde çalışma yasağı
-
-`izin_map` içinde izinli görünen günlerde agent için vardiya değişkeni açılmadı / çalışma engellendi.
-
----
-
-### Takım bütünlüğü
-
-Hafta içi takım bütünlüğü hard constraint olarak uygulandı.
-
-```text
-Pazartesi-Cuma: Takım aynı vardiyada kalır.
-Cumartesi-Pazar: Takım bölünebilir.
-```
-
----
-
-### Ayda en az 1 Cumartesi-Pazar peş peşe OFF
-
-Her agent ay içinde en az bir hafta sonunda hem Cumartesi hem Pazar OFF olacak şekilde planlanır.
-
----
-
-## 3. Objective
-
-Objective sade tutuldu.
-
-Öncelikler:
-
-1. `under_buffer` minimize edilsin.
-2. `over_buffer` minimize edilsin.
-3. Gereksiz mesai minimize edilsin.
-
-Ağırlıklar:
-
-```python
-UNDER_BUFFER_W = 100000
-OVER_BUFFER_W = 1000
-OVERTIME_W = 5000
-```
-
----
-
-## 4. Son Solve Sonucu
-
-1500 saniye limit ile çözüm alındı.
-
-Sonuç:
-
-```text
-under_buffer = 0
-over_buffer = 37
-toplam mesai = 0
-objective = 37,000
-best_bound = 37,000
-```
-
-Bu sonuçta model optimal kapanmıştır.
-
-Hiçbir vardiyada %10 alt sınırın altına düşülmemiştir. Sadece toplam 37 kişilik %10 üst sınır aşımı kalmıştır.
-
----
-
-## 5. Excel Kontrol Dosyası
-
-Son çözüm için kişi bazlı final kontrol Excel’i oluşturuldu:
-
-```text
-vardiya_final_kisi_bazli_kontrol.xlsx
-```
-
-Sheet’ler:
-
-```text
-00_summary
-01_agent_day_detail
-02_agent_calendar
-03_agent_month_summary
-04_agent_week_check
-05_coverage_buffer
-06_team_date_check
-07_team_base
-08_weekend_pair_off
-09_weekend_off_summary
-```
-
-Kontrol için özellikle bakılacak alanlar:
-
-```text
-03_agent_month_summary → genel_ok
-04_agent_week_check → haftalik_calisma_ok
-05_coverage_buffer → under_buffer / over_buffer / buffer_ici
-06_team_date_check → hafta içi takim_butunlugu_ok
-09_weekend_off_summary → pes_pese_hafta_sonu_off_ok
-```
+night_week_rows = []
+
+for a in AGENTS:
+    for wk in WEEKS:
+        night_week_rows.append({
+            "agent_user_code": a,
+            "hafta": wk,
+            "night_week": solver.Value(night_week[(a, wk)])
+        })
+
+night_week_check = pd.DataFrame(night_week_rows)
+
+night_week_summary = (
+    night_week_check
+    .groupby("agent_user_code", as_index=False)
+    .agg(
+        toplam_gece_aksam_haftasi=("night_week", "sum")
+    )
+)
+
+night_week_summary["max_2_gece_aksam_haftasi_ok"] = (
+    night_week_summary["toplam_gece_aksam_haftasi"] <= 2
+)
+
+viol_night_week = night_week_summary[
+    night_week_summary["max_2_gece_aksam_haftasi_ok"] == False
+]
+
+print("2 haftadan fazla gece/akşam vardiyası alan agent sayısı:", len(viol_night_week))
+
+display(
+    night_week_summary
+    .sort_values("toplam_gece_aksam_haftasi", ascending=False)
+    .head(30)
+)

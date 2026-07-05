@@ -1,286 +1,142 @@
-# %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ - BASELINE VERSİYON
-# Bu versiyon resmi tatili haftalık hedefe karıştırmaz.
-# Amacımız önce modeli tekrar feasible hale getirmek.
-#
-# Mantık:
-# - Haftalık çalışma = normal hedef + overtime_week
-# - İzin günleri normal hedeften düşer
-# - mesaiye_kalamaz agent overtime alamaz
-# - ayda max mesai hard kalır
+# %% DEBUG - RESMİ TATİLDE HARD X==0 SABİTLEME VAR MI?
 
-# -------------------------------------------------
-# Hafta yapısı yoksa oluştur
-# -------------------------------------------------
+# Bu hücre solve'dan hemen önce çalışmalı.
+# Amaç: modelin içine resmi tatil günü için x[(a, ds, v)] == 0 hard kısıtı eklenmiş mi görmek.
 
-if "day_week" not in globals() or "week_days" not in globals() or "WEEKS" not in globals():
+resmi_tatil_debug_days = set()
 
-    day_week = {}
-    week_days = {}
+if "resmi_tatil_plan_gunleri" in globals():
+    resmi_tatil_debug_days = set(resmi_tatil_plan_gunleri)
+else:
+    if "RESMI_TATIL_GUNLERI" in globals():
+        resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
 
-    for ds in PLAN_GUNLER:
-        dt = pd.to_datetime(ds)
-        wk = f"{dt.isocalendar().year}-W{dt.isocalendar().week:02d}"
+        for ds in PLAN_GUNLER:
+            if pd.to_datetime(ds).strftime("%Y-%m-%d") in resmi_tatil_key_set:
+                resmi_tatil_debug_days.add(ds)
 
-        day_week[ds] = wk
-
-        if wk not in week_days:
-            week_days[wk] = []
-
-        week_days[wk].append(ds)
-
-    WEEKS = sorted(week_days.keys())
+print("Resmi tatil debug günleri:", resmi_tatil_debug_days)
 
 
-# -------------------------------------------------
-# Mesaiye kalamaz agentlar
-# -------------------------------------------------
+# x variable index -> key map
+x_index_to_key = {}
 
-mesaiye_kalamaz_agents = set(
-    df_tam[
-        pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce")
-        .fillna(0)
-        .astype(int) == 1
-    ]["agent_user_code"].astype(str).str.strip()
-)
+for key, var in x.items():
+    x_index_to_key[var.Index()] = key
 
 
-weekly_work_constraints = 0
-weekly_overtime_block_constraints = 0
-monthly_overtime_constraints = 0
-weekly_target_debug_rows = []
+# work variable index -> key map
+work_index_to_key = {}
+
+for key, var in work.items():
+    work_index_to_key[var.Index()] = key
 
 
-for a in AGENTS:
-    a = str(a).strip()
+hard_zero_x_rows = []
+hard_zero_work_rows = []
 
-    for wk in WEEKS:
+proto = model.Proto()
 
-        week_days_list = week_days[wk]
+for c_idx, ct in enumerate(proto.constraints):
 
-        work_vars = [
-            work[(a, ds)]
-            for ds in week_days_list
-            if (a, ds) in work
-        ]
+    if not ct.HasField("linear"):
+        continue
 
-        if not work_vars:
-            continue
+    lin = ct.linear
 
-        # -------------------------------------------------
-        # 1) İzin günleri
-        # -------------------------------------------------
+    # Sadece tek değişkenli x == 0 / work == 0 kısıtlarını yakalıyoruz.
+    # model.Add(x == 0) genelde:
+    # vars = [x_index], coeffs = [1], domain = [0, 0]
+    if len(lin.vars) == 1 and len(lin.coeffs) == 1:
+        var_idx = lin.vars[0]
+        coeff = lin.coeffs[0]
+        domain = list(lin.domain)
 
-        izin_count = sum(
-            1
-            for ds in week_days_list
-            if ds in izin_map.get(a, set())
-        )
+        if coeff == 1 and domain == [0, 0]:
 
-        # -------------------------------------------------
-        # 2) Normal hedef
-        # -------------------------------------------------
+            if var_idx in x_index_to_key:
+                a, ds, v = x_index_to_key[var_idx]
 
-        normal_target = NORMAL_WORK_DAYS - izin_count
-        normal_target = max(0, normal_target)
+                if ds in resmi_tatil_debug_days:
+                    bas, bit = saat[(ds, v)] if (ds, v) in saat else (None, None)
 
-        # Bu hafta modelde gerçekten çalışabileceği gün sayısı
-        feasible_day_count = len(work_vars)
-
-        # Plan ayının başı/sonu gibi eksik haftalarda hedefi kırp
-        normal_target = min(normal_target, feasible_day_count)
-
-        # -------------------------------------------------
-        # 3) Haftalık çalışma eşitliği
-        # -------------------------------------------------
-
-        model.Add(
-            sum(work_vars) == normal_target + overtime_week[(a, wk)]
-        )
-
-        weekly_work_constraints += 1
-
-        # -------------------------------------------------
-        # 4) Mesaiye kalamaz agent mesai alamaz
-        # -------------------------------------------------
-
-        if a in mesaiye_kalamaz_agents:
-            model.Add(overtime_week[(a, wk)] == 0)
-            weekly_overtime_block_constraints += 1
-
-        # Eğer +1 mesai koyacak fiziksel gün yoksa overtime kapat
-        if normal_target + 1 > feasible_day_count:
-            model.Add(overtime_week[(a, wk)] == 0)
-            weekly_overtime_block_constraints += 1
-
-        weekly_target_debug_rows.append({
-            "agent_user_code": a,
-            "week": wk,
-            "normal_target": normal_target,
-            "feasible_day_count": feasible_day_count,
-            "izin_count": izin_count,
-            "mesaiye_kalamaz": a in mesaiye_kalamaz_agents
-        })
-
-
-# -------------------------------------------------
-# 5) Ayda max mesai hard kuralı
-# -------------------------------------------------
-
-for a in AGENTS:
-    a = str(a).strip()
-
-    model.Add(
-        sum(
-            overtime_week[(a, wk)]
-            for wk in WEEKS
-            if (a, wk) in overtime_week
-        ) <= MAX_OVERTIME_PER_MONTH
-    )
-
-    monthly_overtime_constraints += 1
-
-
-weekly_target_debug_df = pd.DataFrame(weekly_target_debug_rows)
-
-print("Haftalık çalışma kısıtı:", weekly_work_constraints)
-print("Haftalık mesai kapatma kısıtı:", weekly_overtime_block_constraints)
-print("Aylık max mesai kısıtı:", monthly_overtime_constraints)
-
-display(
-    weekly_target_debug_df
-    .sort_values(["week", "agent_user_code"])
-    .head(100)
-)
-
-
-# %% [HÜCRE] - ARİFE HARD / RESMİ TATİL SOFT DEBUG ÇALIŞMA KURALLARI
-
-arife_mesai = {}
-resmi_tatil_mesai = {}
-resmi_tatil_kisitli_ihlal = {}
-
-tatil_constraints = 0
-arife_09_13_zorunlu_constraints = 0
-arife_13_sonrasi_yasak_constraints = 0
-arife_non_kisitli_ozel_vardiya_yasak_constraints = 0
-resmi_tatil_kisitli_soft_constraints = 0
-tatil_skip_rows = []
-
-
-for a in AGENTS:
-    a = str(a).strip()
-
-    # -------------------------------------------------
-    # 1) ARİFE KURALLARI - HARD
-    # -------------------------------------------------
-    for ds in arife_plan_gunleri:
-
-        ds_key = tatil_ds_key(ds)
-        ozel_v = ARIFE_GUNLERI[ds_key]["ozel_vardiya_kodu"]
-
-        if a in tatil_kisitli_agents:
-
-            # Kısıtlı agent izinliyse arife 09-13'e zorlamıyoruz.
-            if ds in izin_map.get(a, set()):
-                tatil_skip_rows.append({
-                    "agent_user_code": a,
-                    "date": ds,
-                    "rule": "arife_09_13",
-                    "reason": "izinli"
-                })
-
-            else:
-                # Kısıtlı agent arife özel 09-13 vardiyasına hard atanır.
-                if (a, ds, ozel_v) in x:
-                    model.Add(x[(a, ds, ozel_v)] == 1)
-                    arife_09_13_zorunlu_constraints += 1
-                else:
-                    tatil_skip_rows.append({
+                    hard_zero_x_rows.append({
+                        "constraint_index": c_idx,
                         "agent_user_code": a,
                         "date": ds,
-                        "rule": "arife_09_13",
-                        "reason": "ozel_09_13_x_yok"
+                        "shift": v,
+                        "shift_start": bas,
+                        "shift_end": bit,
                     })
 
-            # Kısıtlı agentlar arife günü 13 sonrasına sarkan vardiyada çalışamaz.
-            for v in gun_vardiyalari.get(ds, []):
+            if var_idx in work_index_to_key:
+                a, ds = work_index_to_key[var_idx]
 
-                if (a, ds, v) not in x:
-                    continue
-
-                if arife_kisitli_yasak_vardiya_mi.get((ds, v), False):
-                    model.Add(x[(a, ds, v)] == 0)
-                    arife_13_sonrasi_yasak_constraints += 1
-
-        else:
-            # Kısıtlı olmayan agentlar özel ARIFE_09_13 vardiyasına atanamaz.
-            if (a, ds, ozel_v) in x:
-                model.Add(x[(a, ds, ozel_v)] == 0)
-                arife_non_kisitli_ozel_vardiya_yasak_constraints += 1
-
-        # Arife mesai etiketi
-        for v in gun_vardiyalari.get(ds, []):
-
-            if (a, ds, v) not in x:
-                continue
-
-            if arife_mesai_vardiyasi_mi.get((ds, v), False):
-
-                arife_mesai[(a, ds, v)] = model.NewBoolVar(
-                    f"arife_mesai_{a}_{ds}_{v}"
-                )
-
-                model.Add(arife_mesai[(a, ds, v)] == x[(a, ds, v)])
-                tatil_constraints += 1
+                if ds in resmi_tatil_debug_days:
+                    hard_zero_work_rows.append({
+                        "constraint_index": c_idx,
+                        "agent_user_code": a,
+                        "date": ds,
+                    })
 
 
-    # -------------------------------------------------
-    # 2) RESMİ TATİL KURALLARI - SOFT DEBUG
-    # -------------------------------------------------
-    for ds in resmi_tatil_plan_gunleri:
+hard_zero_x_df = pd.DataFrame(hard_zero_x_rows)
+hard_zero_work_df = pd.DataFrame(hard_zero_work_rows)
 
-        for v in gun_vardiyalari.get(ds, []):
+print("Resmi tatil günü hard x==0 sayısı:", len(hard_zero_x_df))
+print("Resmi tatil günü hard work==0 sayısı:", len(hard_zero_work_df))
 
-            if (a, ds, v) not in x:
-                continue
+if len(hard_zero_x_df) > 0:
+    agent_info_cols = [
+        "agent_user_code",
+        "agent_name",
+        "takim",
+        "teamleader_name",
+        "hamile_flg",
+        "sut_izni_flg",
+        "mesaiye_kalamaz_flg",
+        "sabah_calisir_flg"
+    ]
 
-            # Kısıtlı agentlar resmi tatilde normalde çalışamaz.
-            # Şimdilik hard yasak değil, soft ihlal.
-            if a in tatil_kisitli_agents:
+    agent_info = df_tam[agent_info_cols].copy()
+    agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
 
-                resmi_tatil_kisitli_ihlal[(a, ds, v)] = model.NewBoolVar(
-                    f"resmi_tatil_kisitli_ihlal_{a}_{ds}_{v}"
-                )
+    hard_zero_x_df = hard_zero_x_df.merge(
+        agent_info,
+        on="agent_user_code",
+        how="left"
+    )
 
-                model.Add(
-                    resmi_tatil_kisitli_ihlal[(a, ds, v)] >= x[(a, ds, v)]
-                )
+    print("Resmi tatilde hard x==0 detay:")
+    display(
+        hard_zero_x_df
+        .sort_values(["shift_start", "shift_end", "takim", "agent_user_code"])
+        .head(200)
+    )
 
-                resmi_tatil_kisitli_soft_constraints += 1
-
-            # Resmi tatilde çalışan herkes resmi tatil mesaisi olarak etiketlenir.
-            if resmi_tatil_mesai_vardiyasi_mi.get((ds, v), False):
-
-                resmi_tatil_mesai[(a, ds, v)] = model.NewBoolVar(
-                    f"resmi_tatil_mesai_{a}_{ds}_{v}"
-                )
-
-                model.Add(resmi_tatil_mesai[(a, ds, v)] == x[(a, ds, v)])
-                tatil_constraints += 1
+if len(hard_zero_work_df) > 0:
+    print("Resmi tatilde hard work==0 detay:")
+    display(
+        hard_zero_work_df
+        .sort_values(["date", "agent_user_code"])
+        .head(200)
+    )
 
 
-print("Arife 09-13 zorunlu atama kısıtı:", arife_09_13_zorunlu_constraints)
-print("Arife 13 sonrası hard yasak kısıtı:", arife_13_sonrasi_yasak_constraints)
-print("Arife non-kısıtlı özel vardiya yasak kısıtı:", arife_non_kisitli_ozel_vardiya_yasak_constraints)
-print("Arife mesai değişken sayısı:", len(arife_mesai))
+# %% DEBUG - RESMİ TATİL SOFT MU HARD MI?
 
-print("Resmi tatil kısıtlı soft ihlal kısıtı:", resmi_tatil_kisitli_soft_constraints)
-print("Resmi tatil kısıtlı ihlal değişken sayısı:", len(resmi_tatil_kisitli_ihlal))
-print("Resmi tatil mesai değişken sayısı:", len(resmi_tatil_mesai))
+print("Arife günleri:", arife_plan_gunleri if "arife_plan_gunleri" in globals() else None)
+print("Resmi tatil günleri:", resmi_tatil_plan_gunleri if "resmi_tatil_plan_gunleri" in globals() else None)
 
-print("Toplam tatil yardımcı kısıtı:", tatil_constraints)
+print("resmi_tatil_kisitli_ihlal var mı:", "resmi_tatil_kisitli_ihlal" in globals())
+print("resmi_tatil_kisitli_ihlal değişken sayısı:", len(resmi_tatil_kisitli_ihlal) if "resmi_tatil_kisitli_ihlal" in globals() else 0)
 
-if tatil_skip_rows:
-    tatil_skip_df = pd.DataFrame(tatil_skip_rows)
-    print("Tatil skip sayısı:", len(tatil_skip_df))
-    display(tatil_skip_df.head(100))
+print("resmi_tatil_mesai değişken sayısı:", len(resmi_tatil_mesai) if "resmi_tatil_mesai" in globals() else 0)
+
+print("weekly_target_debug_df var mı:", "weekly_target_debug_df" in globals())
+
+if "weekly_target_debug_df" in globals():
+    display(
+        weekly_target_debug_df
+        .head(20)
+    )

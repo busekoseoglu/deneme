@@ -105,3 +105,25 @@ display(
     arife_kisitli_full_df
     .sort_values(["13_sonrasina_sarkiyor_mu", "hedef_09_13_atandi_mi", "takim", "agent_user_code"], ascending=[False, True, True, True])
 )
+
+
+
+# %% KONTROL - ARİFE KISITLI AGENT VARDİYA ÖZETİ
+
+display(
+    arife_kisitli_full_df
+    .groupby(
+        [
+            "shift_start",
+            "shift_end",
+            "hedef_09_13_atandi_mi",
+            "13_sonrasina_sarkiyor_mu",
+            "hamile_flg",
+            "sut_izni_flg",
+            "mesaiye_kalamaz_flg"
+        ],
+        as_index=False
+    )
+    .agg(agent_sayisi=("agent_user_code", "nunique"))
+    .sort_values(["13_sonrasina_sarkiyor_mu", "shift_start", "shift_end"], ascending=[False, True, True])
+)

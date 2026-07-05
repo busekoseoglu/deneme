@@ -1,34 +1,16 @@
-# -------------------------------------------------
-# ARİFE PARAMETRELERİ
-# -------------------------------------------------
-
-# Arife günü:
-# - 13:00 öncesi başlayan vardiyalar normal sayılır.
-# - 13:00 ve sonrası başlayan vardiyalar arife mesaisi sayılır.
-# - Hamile / süt izni / mesai yapamaz agentlar 13:00 sonrasına sarkan vardiyalarda çalışamaz.
-# - Bu agentlar arife günü 09:00-13:00 vardiyasına yazılır.
-"ARIFE_GUNLERI": {
-    "2026-06-16": {
-        "mesai_baslangic": "13:00",
-        "kisitli_agent_normal_vardiya": ("09:00", "13:00"),
-    }
-},
-
-# Şimdilik 0 bırakıyoruz.
-# Amaç arife mesaisini Excel'de etiketlemek; coverage'ı bozacak ceza vermemek.
-"ARIFE_MESAI_W": 0,
-
-
-ARIFE_GUNLERI = CONFIG["ARIFE_GUNLERI"]
-ARIFE_MESAI_W = CONFIG["ARIFE_MESAI_W"]
-
-
-
 # %% [HÜCRE] - ARİFE VARDİYA SINIFLANDIRMA YARDIMCILARI
+
+def arife_ds_key(ds):
+    """
+    PLAN_GUNLER içindeki tarih string de olsa Timestamp de olsa
+    'YYYY-MM-DD' formatına çevirir.
+    """
+    return pd.to_datetime(ds).strftime("%Y-%m-%d")
+
 
 def arife_dakika(s):
     """
-    '09:00' veya '9:00' gibi saatleri dakikaya çevirir.
+    '09:00' veya '9:00' formatındaki saati dakikaya çevirir.
     """
     hh, mm = str(s).split(":")
     return int(hh) * 60 + int(mm)
@@ -62,9 +44,9 @@ def arife_mesai_vardiyasi_mi_func(ds, v):
       Örn: 13-22, 15-00 mesaili.
     """
 
-    ds = str(ds)
+    ds_key = arife_ds_key(ds)
 
-    if ds not in ARIFE_GUNLERI:
+    if ds_key not in ARIFE_GUNLERI:
         return False
 
     if (ds, v) not in saat:
@@ -72,7 +54,7 @@ def arife_mesai_vardiyasi_mi_func(ds, v):
 
     bas, bit, bas_dk, bit_dk = arife_vardiya_abs_aralik(ds, v)
 
-    limit_dk = arife_dakika(ARIFE_GUNLERI[ds]["mesai_baslangic"])
+    limit_dk = arife_dakika(ARIFE_GUNLERI[ds_key]["mesai_baslangic"])
 
     # 13:00 öncesi başlayan vardiyalar normal.
     if bas_dk < limit_dk:
@@ -84,15 +66,15 @@ def arife_mesai_vardiyasi_mi_func(ds, v):
 
 def arife_kisitli_agent_icin_yasak_vardiya_mi_func(ds, v):
     """
-    Hamile / süt izni / mesai yapamaz agentlar için yasak vardiyayı belirler.
+    Hamile / süt izni / mesaiye kalamaz agentlar için yasak vardiyayı belirler.
 
     Bu kişiler arife günü 13:00 sonrasına sarkan hiçbir vardiyada çalışamaz.
     Bu nedenle 12-21 normal plan sayılsa bile bu kişiler için yasaktır.
     """
 
-    ds = str(ds)
+    ds_key = arife_ds_key(ds)
 
-    if ds not in ARIFE_GUNLERI:
+    if ds_key not in ARIFE_GUNLERI:
         return False
 
     if (ds, v) not in saat:
@@ -100,10 +82,10 @@ def arife_kisitli_agent_icin_yasak_vardiya_mi_func(ds, v):
 
     bas, bit, bas_dk, bit_dk = arife_vardiya_abs_aralik(ds, v)
 
-    limit_dk = arife_dakika(ARIFE_GUNLERI[ds]["mesai_baslangic"])
+    limit_dk = arife_dakika(ARIFE_GUNLERI[ds_key]["mesai_baslangic"])
 
-    # 13:00 sonrasına sarkıyorsa kısıtlı agent için yasak.
     # 09-13 gibi tam 13:00'te biten vardiya yasak değildir.
+    # 13:00 sonrasına sarkıyorsa yasaktır.
     return bit_dk > limit_dk
 
 
@@ -116,42 +98,11 @@ for ds in PLAN_GUNLER:
         arife_kisitli_yasak_vardiya_mi[(ds, v)] = arife_kisitli_agent_icin_yasak_vardiya_mi_func(ds, v)
 
 
-print("Arife günleri:", list(ARIFE_GUNLERI.keys()))
-print("Arife mesaili vardiya sayısı:", sum(arife_mesai_vardiyasi_mi.values()))
-print("Arife kısıtlı agent için yasak vardiya sayısı:", sum(arife_kisitli_yasak_vardiya_mi.values()))
-
-
-
-# %% KONTROL - ARİFE VARDİYA SINIFLANDIRMASI
-
-arife_vardiya_check_rows = []
-
-for ds in PLAN_GUNLER:
-    if str(ds) not in ARIFE_GUNLERI:
-        continue
-
-    for v in gun_vardiyalari.get(ds, []):
-        bas, bit = saat[(ds, v)]
-
-        arife_vardiya_check_rows.append({
-            "date": ds,
-            "shift": v,
-            "start": bas,
-            "end": bit,
-            "arife_mesai_vardiyasi_mi": arife_mesai_vardiyasi_mi.get((ds, v), False),
-            "kisitli_agent_icin_yasak_mi": arife_kisitli_yasak_vardiya_mi.get((ds, v), False),
-            "required": int(talep[(ds, v)])
-        })
-
-arife_vardiya_check_df = pd.DataFrame(arife_vardiya_check_rows)
-
-display(
-    arife_vardiya_check_df
-    .sort_values(["start", "end"])
-)
-
-
-# %% [HÜCRE] - ARİFE ÇALIŞMA KURALLARI
+# Arife günleri
+arife_plan_gunleri = [
+    ds for ds in PLAN_GUNLER
+    if arife_ds_key(ds) in ARIFE_GUNLERI
+]
 
 # Arifede 13 sonrası çalışamayacak agentlar:
 # - hamile
@@ -165,25 +116,27 @@ arife_kisitli_agents = set(
     ]["agent_user_code"].astype(str).str.strip()
 )
 
-# Arife mesaisi değişkenleri:
-# Kısıtlı olmayan agentlar 13:00 ve sonrası başlayan vardiyalarda çalışırsa 1 olur.
+print("Arife günleri:", arife_plan_gunleri)
+print("Arife kısıtlı agent sayısı:", len(arife_kisitli_agents))
+print("Arife mesaili vardiya sayısı:", sum(arife_mesai_vardiyasi_mi.values()))
+print("Arife kısıtlı agent için yasak vardiya sayısı:", sum(arife_kisitli_yasak_vardiya_mi.values()))
+
+
+
+# %% [HÜCRE] - ARİFE ÇALIŞMA KURALLARI
+
 arife_mesai = {}
 
 arife_constraints = 0
 arife_09_13_zorunlu_constraints = 0
 arife_skip_rows = []
 
-arife_plan_gunleri = [
-    ds for ds in PLAN_GUNLER
-    if str(ds) in ARIFE_GUNLERI
-]
-
 for a in AGENTS:
     a = str(a).strip()
 
     for ds in arife_plan_gunleri:
 
-        ds_key = str(ds)
+        ds_key = arife_ds_key(ds)
 
         # -------------------------------------------------
         # 1) Kısıtlı agentlar 13:00 sonrasına sarkan vardiyada çalışamaz
@@ -212,8 +165,6 @@ for a in AGENTS:
                 continue
 
             hedef_bas, hedef_bit = ARIFE_GUNLERI[ds_key]["kisitli_agent_normal_vardiya"]
-            hedef_bas_dk = arife_dakika(hedef_bas)
-            hedef_bit_dk = arife_dakika(hedef_bit)
 
             hedef_vardiya_vars = []
 
@@ -226,14 +177,12 @@ for a in AGENTS:
                     continue
 
                 bas, bit = saat[(ds, v)]
-                bas_dk = arife_dakika(bas)
-                bit_dk = arife_dakika(bit)
 
-                if bas_dk == hedef_bas_dk and bit_dk == hedef_bit_dk:
+                if bas == hedef_bas and bit == hedef_bit:
                     hedef_vardiya_vars.append(x[(a, ds, v)])
 
             # 09-13 vardiyası varsa hard çalıştırıyoruz.
-            # Yoksa infeasible olmasın diye zorlamıyoruz, skip raporuna yazıyoruz.
+            # Yoksa infeasible olmasın diye zorlamıyoruz; rapora yazıyoruz.
             if hedef_vardiya_vars:
                 model.Add(sum(hedef_vardiya_vars) == 1)
                 arife_09_13_zorunlu_constraints += 1
@@ -254,8 +203,6 @@ for a in AGENTS:
 
             if arife_mesai_vardiyasi_mi.get((ds, v), False):
 
-                # Kısıtlı agentlarda zaten 13 sonrası yasak olduğu için
-                # onlar adına arife_mesai değişkeni açmıyoruz.
                 if a not in arife_kisitli_agents:
 
                     arife_mesai[(a, ds, v)] = model.NewBoolVar(
@@ -278,12 +225,175 @@ if arife_skip_rows:
     display(arife_skip_df.head(100))
 
 
+
+# %% [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA - HAFTA İÇİ HARD / HAFTA SONU SERBEST
+# Yeni iş kuralı:
+# Pazartesi-Cuma: Takım bütünlüğü korunur. Takımdaki herkes o hafta seçilen base vardiyada çalışır.
+# Cumartesi-Pazar: Takım bütünlüğü zorunlu değildir. Agentlar ihtiyaca göre farklı vardiyalara dağılabilir.
+# Arife günü: özel kural vardır, takım base hard kuralından hariç tutulur.
+
+team_base_constraints = 0
+team_weekday_link_constraints = 0
+weekend_free_count = 0
+arife_team_base_skip_count = 0
+
+# 1. Her takım-her hafta için tek base vardiya seç
+for t in TAKIMLAR:
+    for wk in WEEKS:
+        vars_base = [
+            team_week_base[(t, wk, v)]
+            for v in week_vardiyalari[wk]
+            if (t, wk, v) in team_week_base
+        ]
+
+        if vars_base:
+            model.Add(sum(vars_base) == 1)
+            team_base_constraints += 1
+
+
+# 2. Sadece hafta içi günlerde agent takımının base vardiyasında çalışabilir
+for a in AGENTS:
+    a = str(a).strip()
+
+    t = agent_team.get(a)
+
+    if t is None or pd.isna(t):
+        continue
+
+    t = str(t).strip()
+
+    for ds in PLAN_GUNLER:
+
+        # Arife günü özel planlandığı için takım base hard kuralından çıkarılır.
+        if arife_ds_key(ds) in ARIFE_GUNLERI:
+            arife_team_base_skip_count += 1
+            continue
+
+        weekday = pd.to_datetime(ds).weekday()
+        wk = day_week[ds]
+
+        for v in gun_vardiyalari.get(ds, []):
+
+            if (a, ds, v) not in x:
+                continue
+
+            # Hafta içi: takım base vardiyası hard
+            if weekday in [0, 1, 2, 3, 4]:
+
+                if (t, wk, v) in team_week_base:
+                    model.Add(
+                        x[(a, ds, v)] <= team_week_base[(t, wk, v)]
+                    )
+                    team_weekday_link_constraints += 1
+
+                else:
+                    # Eğer bu vardiya takımın haftalık base seçeneklerinde yoksa,
+                    # hafta içi bu vardiyaya atanamaz.
+                    model.Add(x[(a, ds, v)] == 0)
+                    team_weekday_link_constraints += 1
+
+            # Hafta sonu: takım serbest, constraint eklemiyoruz
+            else:
+                weekend_free_count += 1
+
+
+print("Takım-hafta tek base vardiya kısıtı:", team_base_constraints)
+print("Hafta içi takım hard bağlantı kısıtı:", team_weekday_link_constraints)
+print("Hafta sonu serbest bırakılan agent-gün-vardiya opsiyonu:", weekend_free_count)
+print("Arife takım base skip sayısı:", arife_team_base_skip_count)
+
+
+# %% [HÜCRE] - FAZLA ATAMA ÜST LİMİTİ
+# Bu hücrede her vardiyada talebin üstüne çıkabilecek maksimum kişi sayısını sınırlıyoruz.
+#
+# Genel kural:
+# assigned <= required + 15
+#
+# Gece/akşam vardiyası ise:
+# assigned <= required + 3
+#
+# Arife 09-13 özel durumu:
+# Hamile / süt izni / mesaiye kalamaz agentlar 09-13'e hard yazıldığı için
+# bu vardiyada cap, zorunlu agent sayısını alabilecek kadar esnetilir.
+
+fazla_atama_cap_constraints = 0
+arife_cap_relax_rows = []
+
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+
+        required = int(talep[(ds, v)])
+
+        assigned = sum(
+            x[(a, ds, v)]
+            for a in AGENTS
+            if (a, ds, v) in x
+        )
+
+        max_fazla = fazla_atama_ust_limit[(ds, v)]
+
+        # -------------------------------------------------
+        # ARİFE 09-13 ÖZEL DURUMU
+        # -------------------------------------------------
+        if arife_ds_key(ds) in ARIFE_GUNLERI and (ds, v) in saat:
+
+            hedef_bas, hedef_bit = ARIFE_GUNLERI[arife_ds_key(ds)]["kisitli_agent_normal_vardiya"]
+
+            bas, bit = saat[(ds, v)]
+
+            if bas == hedef_bas and bit == hedef_bit:
+
+                forced_count = 0
+
+                for a in arife_kisitli_agents:
+                    a = str(a).strip()
+
+                    # İzinliyse 09-13'e zorlanmıyor.
+                    if ds in izin_map.get(a, set()):
+                        continue
+
+                    if (a, ds, v) in x:
+                        forced_count += 1
+
+                # Bu vardiyada en az forced_count kişilik alan olmalı.
+                min_needed_extra = max(0, forced_count - required)
+
+                if min_needed_extra > max_fazla:
+                    arife_cap_relax_rows.append({
+                        "date": ds,
+                        "shift": v,
+                        "required": required,
+                        "old_max_fazla": max_fazla,
+                        "forced_count": forced_count,
+                        "new_max_fazla": min_needed_extra
+                    })
+
+                    max_fazla = min_needed_extra
+
+        model.Add(
+            assigned <= required + max_fazla
+        )
+
+        fazla_atama_cap_constraints += 1
+
+
+print("Fazla atama üst limit kısıtı:", fazla_atama_cap_constraints)
+print("Genel max fazla atama:", GENEL_MAX_FAZLA_ATAMA)
+print("Gece/akşam max fazla atama:", GECE_MAX_FAZLA_ATAMA)
+
+if arife_cap_relax_rows:
+    arife_cap_relax_df = pd.DataFrame(arife_cap_relax_rows)
+    print("Arife 09-13 cap esnetilen satır sayısı:", len(arife_cap_relax_df))
+    display(arife_cap_relax_df)
+
+
+
 # -------------------------------------------------
 # ARİFE MESAİ CEZASI
 # -------------------------------------------------
 # ARIFE_MESAI_W şu an 0.
-# Yani coverage bozulmasın diye arife mesaisine ceza vermiyoruz.
-# Sadece Excel / kontrol tarafında arife mesaisi olarak etiketliyoruz.
+# Bu nedenle model arife mesaisinden kaçmak için coverage bozmaz.
+# Sadece arife mesaisi Excel/kontrol tarafında etiketlenir.
 
 if "arife_mesai" in globals() and ARIFE_MESAI_W > 0:
     for (a, ds, v), var in arife_mesai.items():
@@ -292,7 +402,6 @@ if "arife_mesai" in globals() and ARIFE_MESAI_W > 0:
         )
 
 print("ARIFE_MESAI_W:", ARIFE_MESAI_W)
-
 
 
 # %% KONTROL - ARİFE KURALLARI

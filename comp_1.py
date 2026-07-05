@@ -225,3 +225,38 @@ display(
     .sort_values(["weekly_under", "weekly_over", "week", "takim"], ascending=[False, False, True, True])
     .head(200)
 )
+
+
+print("Weekly under toplam:", sum(
+    solver.Value(v)
+    for v in weekly_under.values()
+))
+
+print("Weekly over toplam:", sum(
+    solver.Value(v)
+    for v in weekly_over.values()
+))
+
+print("Resmi tatil kısıtlı ihlal toplam:", sum(
+    solver.Value(v)
+    for v in resmi_tatil_kisitli_ihlal.values()
+) if "resmi_tatil_kisitli_ihlal" in globals() else 0)
+
+print("Arife 13 sonrası ihlal kontrolü:")
+arife_ihlal_sayisi = 0
+
+for a in AGENTS:
+    a = str(a).strip()
+    if a not in tatil_kisitli_agents:
+        continue
+
+    for ds in arife_plan_gunleri:
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+
+            if arife_kisitli_yasak_vardiya_mi.get((ds, v), False):
+                if solver.Value(x[(a, ds, v)]) == 1:
+                    arife_ihlal_sayisi += 1
+
+print("Arife 13 sonrası ihlal sayısı:", arife_ihlal_sayisi)

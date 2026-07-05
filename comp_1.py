@@ -1,14 +1,7 @@
-# %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ - FEASIBLE DAY DÜZELTMELİ
-# Bu versiyon resmi tatili özel haftalık hedefe karıştırmaz.
-# Ama agentın gerçekten çalışabileceği gün sayısını doğru hesaplar.
-#
-# Kritik düzeltme:
-# work[(a, ds)] var diye gün feasible sayılmaz.
-# O gün agent için en az bir x[(a, ds, v)] değişkeni varsa feasible sayılır.
-
-# -------------------------------------------------
-# Hafta yapısı yoksa oluştur
-# -------------------------------------------------
+# %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ - SOFT DEBUG
+# Amaç:
+# Haftalık hedef infeasible yapmasın.
+# Hedef tutmazsa weekly_under / weekly_over değişkenleriyle sapmayı gösterelim.
 
 if "day_week" not in globals() or "week_days" not in globals() or "WEEKS" not in globals():
 
@@ -29,10 +22,6 @@ if "day_week" not in globals() or "week_days" not in globals() or "WEEKS" not in
     WEEKS = sorted(week_days.keys())
 
 
-# -------------------------------------------------
-# Mesaiye kalamaz agentlar
-# -------------------------------------------------
-
 mesaiye_kalamaz_agents = set(
     df_tam[
         pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce")
@@ -42,31 +31,12 @@ mesaiye_kalamaz_agents = set(
 )
 
 
-# -------------------------------------------------
-# Agent-gün bazında gerçekten vardiya opsiyonu var mı?
-# -------------------------------------------------
-
-agent_day_has_shift = {}
-
-for a in AGENTS:
-    a = str(a).strip()
-
-    for ds in PLAN_GUNLER:
-
-        has_shift = False
-
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) in x:
-                has_shift = True
-                break
-
-        agent_day_has_shift[(a, ds)] = has_shift
-
-
 weekly_work_constraints = 0
 weekly_overtime_block_constraints = 0
 monthly_overtime_constraints = 0
 
+weekly_under = {}
+weekly_over = {}
 weekly_target_debug_rows = []
 
 
@@ -77,7 +47,6 @@ for a in AGENTS:
 
         week_days_list = week_days[wk]
 
-        # Bu agent-week için work değişkenleri
         work_vars = [
             work[(a, ds)]
             for ds in week_days_list
@@ -87,72 +56,48 @@ for a in AGENTS:
         if not work_vars:
             continue
 
-        # -------------------------------------------------
-        # 1) İzin günleri
-        # -------------------------------------------------
-
-        izin_days_this_week = set(
-            ds
+        izin_count = sum(
+            1
             for ds in week_days_list
             if ds in izin_map.get(a, set())
         )
 
-        izin_count = len(izin_days_this_week)
-
-        # -------------------------------------------------
-        # 2) Gerçekten çalışılabilir günler
-        # -------------------------------------------------
-        # Bir günün feasible olması için:
-        # - work değişkeni olmalı
-        # - izin günü olmamalı
-        # - agent için en az bir x değişkeni olmalı
-
-        feasible_days = [
-            ds
-            for ds in week_days_list
-            if (a, ds) in work
-            and ds not in izin_days_this_week
-            and agent_day_has_shift.get((a, ds), False)
-        ]
-
-        feasible_day_count = len(feasible_days)
-
-        # -------------------------------------------------
-        # 3) Normal haftalık hedef
-        # -------------------------------------------------
-
         normal_target = NORMAL_WORK_DAYS - izin_count
         normal_target = max(0, normal_target)
 
-        # Kritik:
-        # Eğer agentın gerçekten çalışabileceği gün sayısı hedefin altındaysa hedefi kırp.
-        normal_target = min(normal_target, feasible_day_count)
+        # Eksik hafta koruması
+        normal_target = min(normal_target, len(work_vars))
 
-        # -------------------------------------------------
-        # 4) Haftalık çalışma eşitliği
-        # -------------------------------------------------
-        # work_vars içinde work==0 sabitlenmiş günler olabilir.
-        # Sorun değil; hedef feasible_day_count'e göre kırpıldı.
+        weekly_under[(a, wk)] = model.NewIntVar(
+            0,
+            len(work_vars),
+            f"weekly_under_{a}_{wk}"
+        )
+
+        weekly_over[(a, wk)] = model.NewIntVar(
+            0,
+            len(work_vars),
+            f"weekly_over_{a}_{wk}"
+        )
+
+        # ESKİ HARD:
+        # sum(work_vars) == normal_target + overtime_week[(a, wk)]
+        #
+        # YENİ SOFT:
+        # Eğer hedef tutmazsa weekly_under / weekly_over ile sapmayı yakalıyoruz.
 
         model.Add(
-            sum(work_vars) == normal_target + overtime_week[(a, wk)]
+            sum(work_vars)
+            + weekly_under[(a, wk)]
+            - weekly_over[(a, wk)]
+            ==
+            normal_target + overtime_week[(a, wk)]
         )
 
         weekly_work_constraints += 1
 
-        # -------------------------------------------------
-        # 5) Mesaiye kalamaz agent mesai alamaz
-        # -------------------------------------------------
-
+        # Mesaiye kalamaz agent mesai alamaz.
         if a in mesaiye_kalamaz_agents:
-            model.Add(overtime_week[(a, wk)] == 0)
-            weekly_overtime_block_constraints += 1
-
-        # -------------------------------------------------
-        # 6) +1 mesai koyacak gerçek feasible gün yoksa overtime kapat
-        # -------------------------------------------------
-
-        if normal_target + 1 > feasible_day_count:
             model.Add(overtime_week[(a, wk)] == 0)
             weekly_overtime_block_constraints += 1
 
@@ -160,22 +105,13 @@ for a in AGENTS:
             "agent_user_code": a,
             "week": wk,
             "normal_target": normal_target,
-            "feasible_day_count": feasible_day_count,
+            "work_var_count": len(work_vars),
             "izin_count": izin_count,
-            "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
-            "no_shift_day_count": sum(
-                1
-                for ds in week_days_list
-                if (a, ds) in work
-                and not agent_day_has_shift.get((a, ds), False)
-            )
+            "mesaiye_kalamaz": a in mesaiye_kalamaz_agents
         })
 
 
-# -------------------------------------------------
-# 7) Ayda max mesai hard kuralı
-# -------------------------------------------------
-
+# Ayda max mesai hard kalsın.
 for a in AGENTS:
     a = str(a).strip()
 
@@ -192,13 +128,100 @@ for a in AGENTS:
 
 weekly_target_debug_df = pd.DataFrame(weekly_target_debug_rows)
 
-print("Haftalık çalışma kısıtı:", weekly_work_constraints)
+print("Haftalık çalışma soft kısıtı:", weekly_work_constraints)
 print("Haftalık mesai kapatma kısıtı:", weekly_overtime_block_constraints)
 print("Aylık max mesai kısıtı:", monthly_overtime_constraints)
+print("weekly_under değişken sayısı:", len(weekly_under))
+print("weekly_over değişken sayısı:", len(weekly_over))
 
-print("Feasible day debug:")
 display(
     weekly_target_debug_df
-    .sort_values(["no_shift_day_count", "week", "agent_user_code"], ascending=[False, True, True])
-    .head(100)
+    .sort_values(["week", "agent_user_code"])
+    .head(10)
+)
+
+
+# -------------------------------------------------
+# HAFTALIK HEDEF SAPMA CEZASI
+# -------------------------------------------------
+
+WEEKLY_UNDER_W = 200000
+WEEKLY_OVER_W = 50000
+
+if "weekly_under" in globals():
+    for (a, wk), var in weekly_under.items():
+        objective_terms.append(WEEKLY_UNDER_W * var)
+
+if "weekly_over" in globals():
+    for (a, wk), var in weekly_over.items():
+        objective_terms.append(WEEKLY_OVER_W * var)
+
+print("WEEKLY_UNDER_W:", WEEKLY_UNDER_W)
+print("WEEKLY_OVER_W:", WEEKLY_OVER_W)
+
+
+# %% KONTROL - HAFTALIK HEDEF SAPMALARI
+
+weekly_deviation_rows = []
+
+for (a, wk), under_var in weekly_under.items():
+
+    under_val = solver.Value(under_var)
+    over_val = solver.Value(weekly_over[(a, wk)])
+
+    if under_val == 0 and over_val == 0:
+        continue
+
+    week_days_list = week_days[wk]
+
+    actual_work_days = sum(
+        solver.Value(work[(a, ds)])
+        for ds in week_days_list
+        if (a, ds) in work
+    )
+
+    overtime_val = (
+        solver.Value(overtime_week[(a, wk)])
+        if (a, wk) in overtime_week
+        else None
+    )
+
+    weekly_deviation_rows.append({
+        "agent_user_code": a,
+        "week": wk,
+        "actual_work_days": actual_work_days,
+        "overtime_week": overtime_val,
+        "weekly_under": under_val,
+        "weekly_over": over_val,
+    })
+
+weekly_deviation_df = pd.DataFrame(weekly_deviation_rows)
+
+agent_info_cols = [
+    "agent_user_code",
+    "agent_name",
+    "takim",
+    "teamleader_name",
+    "hamile_flg",
+    "sut_izni_flg",
+    "mesaiye_kalamaz_flg",
+    "sabah_calisir_flg"
+]
+
+agent_info = df_tam[agent_info_cols].copy()
+agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
+
+if len(weekly_deviation_df) > 0:
+    weekly_deviation_df = weekly_deviation_df.merge(
+        agent_info,
+        on="agent_user_code",
+        how="left"
+    )
+
+print("Haftalık hedef sapması olan agent-week sayısı:", len(weekly_deviation_df))
+
+display(
+    weekly_deviation_df
+    .sort_values(["weekly_under", "weekly_over", "week", "takim"], ascending=[False, False, True, True])
+    .head(200)
 )

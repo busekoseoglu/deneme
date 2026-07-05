@@ -1,39 +1,33 @@
 # %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ
-# Amaç:
-# Her agent haftalık çalışma hedefi kadar çalışır.
-# İzin günleri hedeften düşer.
-# Resmi tatilde çalışamayacak agentlar için resmi tatil günü de hedeften düşer.
+# Resmi tatil düzeltmeli versiyon
 #
-# Örn:
-# Normal hedef = 5
-# Agent 1 gün izinliyse hedef = 4
-# Agent resmi tatilde çalışamaz ve o hafta 1 resmi tatil varsa hedef = 4
-# Hem izin hem resmi tatil aynı güne denk gelirse 1 kez düşülür.
+# Mantık:
+# - İzin günleri haftalık normal hedeften düşer.
+# - Resmi tatil günleri HERKESİN normal haftalık hedefinden düşer.
+# - Resmi tatilde çalışabilen agent resmi tatilde çalışırsa bu overtime_week ile mesai olur.
+# - Hamile / süt izni / mesaiye kalamaz agentlar resmi tatilde zaten çalışamaz.
 
 # -------------------------------------------------
-# Hafta günlerini garanti oluştur
+# Hafta yapısı yoksa oluştur
 # -------------------------------------------------
-# Sende week_days bazen tanımlı olmayabiliyor.
-# Bu yüzden bu hücre kendi içinde haftaları oluşturuyor.
 
-day_week = {}
-week_days = {}
+if "day_week" not in globals() or "week_days" not in globals() or "WEEKS" not in globals():
 
-for ds in PLAN_GUNLER:
-    dt = pd.to_datetime(ds)
-    wk = f"{dt.isocalendar().year}-W{dt.isocalendar().week:02d}"
+    day_week = {}
+    week_days = {}
 
-    day_week[ds] = wk
+    for ds in PLAN_GUNLER:
+        dt = pd.to_datetime(ds)
+        wk = f"{dt.isocalendar().year}-W{dt.isocalendar().week:02d}"
 
-    if wk not in week_days:
-        week_days[wk] = []
+        day_week[ds] = wk
 
-    week_days[wk].append(ds)
+        if wk not in week_days:
+            week_days[wk] = []
 
-WEEKS = sorted(week_days.keys())
+        week_days[wk].append(ds)
 
-print("Hafta sayısı:", len(WEEKS))
-print("Haftalar:", WEEKS)
+    WEEKS = sorted(week_days.keys())
 
 
 # -------------------------------------------------
@@ -50,17 +44,15 @@ mesaiye_kalamaz_agents = set(
 
 
 # -------------------------------------------------
-# Resmi tatilde çalışamayacak agentlar
+# Tatil kısıtlı agentlar
 # -------------------------------------------------
-# Tatil helper hücresinde tatil_kisitli_agents zaten oluştuysa onu kullanır.
-# Yoksa burada tekrar oluşturur.
-#
 # Kısıtlı agent:
 # - hamile
 # - süt izni
 # - mesaiye kalamaz
 
 if "tatil_kisitli_agents" not in globals():
+
     tatil_kisitli_agents = set(
         df_tam[
             (pd.to_numeric(df_tam["hamile_flg"], errors="coerce").fillna(0).astype(int) == 1) |
@@ -69,14 +61,22 @@ if "tatil_kisitli_agents" not in globals():
         ]["agent_user_code"].astype(str).str.strip()
     )
 
-# Resmi tatil günlerini güvenli şekilde al
+
+# -------------------------------------------------
+# Resmi tatil günlerini güvenli al
+# -------------------------------------------------
+
+resmi_tatil_gunleri_for_weekly = set()
+
 if "resmi_tatil_plan_gunleri" in globals():
+
     resmi_tatil_gunleri_for_weekly = set(resmi_tatil_plan_gunleri)
+
 else:
-    resmi_tatil_gunleri_for_weekly = set()
 
     if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
         if "RESMI_TATIL_GUNLERI" in globals():
+
             resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
 
             for ds in PLAN_GUNLER:
@@ -85,9 +85,12 @@ else:
                 if ds_key in resmi_tatil_key_set:
                     resmi_tatil_gunleri_for_weekly.add(ds)
 
+
+print("Hafta sayısı:", len(WEEKS))
+print("Haftalar:", WEEKS)
 print("Mesaiye kalamaz agent sayısı:", len(mesaiye_kalamaz_agents))
 print("Tatil kısıtlı agent sayısı:", len(tatil_kisitli_agents))
-print("Haftalık hedeften düşülecek resmi tatil günleri:", resmi_tatil_gunleri_for_weekly)
+print("Haftalık normal hedeften düşülecek resmi tatil günleri:", resmi_tatil_gunleri_for_weekly)
 
 
 # -------------------------------------------------
@@ -107,7 +110,6 @@ for a in AGENTS:
 
         week_days_list = week_days[wk]
 
-        # Bu agent-week için work değişkenleri
         work_vars = [
             work[(a, ds)]
             for ds in week_days_list
@@ -128,53 +130,66 @@ for a in AGENTS:
         )
 
         # -------------------------------------------------
-        # 2) Resmi tatil nedeniyle çalışamayacağı günler
+        # 2) Resmi tatil günleri
         # -------------------------------------------------
-        # Sadece tatil kısıtlı agentlar için düşülür.
-        # Diğer agentlar resmi tatilde çalışabilir; çalışırlarsa resmi tatil mesaisi olarak etiketlenir.
+        # DİKKAT:
+        # Resmi tatil herkesin normal haftalık hedefinden düşer.
+        # Çünkü resmi tatil normal mesai günü değildir.
+        # O gün çalışan kişi ekstra/mesai çalışmış olur.
 
-        resmi_tatil_off_days_this_week = set()
+        resmi_tatil_days_this_week = set(
+            ds
+            for ds in week_days_list
+            if ds in resmi_tatil_gunleri_for_weekly
+        )
 
-        if a in tatil_kisitli_agents:
-            resmi_tatil_off_days_this_week = set(
-                ds
-                for ds in week_days_list
-                if ds in resmi_tatil_gunleri_for_weekly
-            )
-
-        # Aynı gün hem izin hem resmi tatilse iki kere düşmeyelim.
-        hedef_dusulecek_gunler = izin_days_this_week | resmi_tatil_off_days_this_week
-
-        # -------------------------------------------------
-        # 3) Normal haftalık hedef
-        # -------------------------------------------------
+        # Normal hedeften düşülecek günler:
+        # izin + resmi tatil
+        # Aynı gün hem izin hem resmi tatilse 1 kere düşülür.
+        hedef_dusulecek_gunler = izin_days_this_week | resmi_tatil_days_this_week
 
         normal_target = NORMAL_WORK_DAYS - len(hedef_dusulecek_gunler)
         normal_target = max(0, normal_target)
 
-        # Agentın o hafta çalışabileceği gün sayısı
-        # İzin ve resmi tatil-off günlerini çıkarıyoruz.
-        feasible_days = [
-            ds
-            for ds in week_days_list
-            if (a, ds) in work
-            and ds not in hedef_dusulecek_gunler
-        ]
+        # -------------------------------------------------
+        # 3) Agentın fiziksel çalışabileceği günler
+        # -------------------------------------------------
+        # İzin günlerinde kimse çalışamaz.
+        # Resmi tatilde kısıtlı agent çalışamaz.
+        # Resmi tatilde kısıtlı olmayan agent çalışabilir; çalışırsa overtime_week = 1 olur.
+
+        feasible_days = []
+
+        for ds in week_days_list:
+
+            if (a, ds) not in work:
+                continue
+
+            if ds in izin_days_this_week:
+                continue
+
+            if a in tatil_kisitli_agents and ds in resmi_tatil_days_this_week:
+                continue
+
+            feasible_days.append(ds)
 
         feasible_day_count = len(feasible_days)
 
-        # Hedef, mümkün gün sayısını aşmasın.
+        # Normal hedef fiziksel mümkün gün sayısını aşmasın.
         normal_target = min(normal_target, feasible_day_count)
 
         # -------------------------------------------------
         # 4) Haftalık çalışma eşitliği
         # -------------------------------------------------
-        # Bu mevcut ana mantık:
-        # çalışma günü = normal hedef + mesai
+        # Resmi tatilde çalışan normal agent için:
+        # normal_target = 4
+        # toplam work = 5
+        # overtime_week = 1 olur.
 
         model.Add(
             sum(work_vars) == normal_target + overtime_week[(a, wk)]
         )
+
         weekly_work_constraints += 1
 
         # -------------------------------------------------
@@ -186,9 +201,8 @@ for a in AGENTS:
             weekly_overtime_block_constraints += 1
 
         # -------------------------------------------------
-        # 6) Eğer mesai yapmak fiziksel olarak mümkün değilse mesaiyi kapat
+        # 6) Fiziksel olarak +1 mesai yapacak gün yoksa mesaiyi kapat
         # -------------------------------------------------
-        # Örn: feasible_day_count = normal_target ise +1 mesai koyacak gün yoktur.
 
         if normal_target + 1 > feasible_day_count:
             model.Add(overtime_week[(a, wk)] == 0)
@@ -200,10 +214,10 @@ for a in AGENTS:
             "normal_target": normal_target,
             "feasible_day_count": feasible_day_count,
             "izin_days_count": len(izin_days_this_week),
-            "resmi_tatil_off_days_count": len(resmi_tatil_off_days_this_week),
+            "resmi_tatil_days_count": len(resmi_tatil_days_this_week),
             "hedef_dusulecek_gun_count": len(hedef_dusulecek_gunler),
             "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
-            "tatil_kisitli_agent": a in tatil_kisitli_agents
+            "tatil_kisitli_agent": a in tatil_kisitli_agents,
         })
 
 
@@ -231,10 +245,10 @@ print("Haftalık çalışma kısıtı:", weekly_work_constraints)
 print("Haftalık mesai kapatma kısıtı:", weekly_overtime_block_constraints)
 print("Aylık max mesai kısıtı:", monthly_overtime_constraints)
 
-print("Resmi tatil nedeniyle haftalık hedefi düşen agent-week sayısı:")
+print("Resmi tatil olan haftalarda hedefler:")
 display(
     weekly_target_debug_df[
-        weekly_target_debug_df["resmi_tatil_off_days_count"] > 0
+        weekly_target_debug_df["resmi_tatil_days_count"] > 0
     ]
     .sort_values(["week", "agent_user_code"])
     .head(100)

@@ -1,155 +1,30 @@
-# %% DEBUG - RESMİ TATİLDE HARD X==0 / WORK==0 VAR MI?
-# Bu versiyon HasField / WhichOneof kullanmaz.
+model.Add(work[(a, ds)] == 0)
 
-resmi_tatil_debug_days = set()
-
-if "resmi_tatil_plan_gunleri" in globals():
-    resmi_tatil_debug_days = set(resmi_tatil_plan_gunleri)
-else:
-    if "RESMI_TATIL_GUNLERI" in globals():
-        resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
-
-        for ds in PLAN_GUNLER:
-            ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
-
-            if ds_key in resmi_tatil_key_set:
-                resmi_tatil_debug_days.add(ds)
-
-print("Resmi tatil debug günleri:", resmi_tatil_debug_days)
+model.Add(x[(a, ds, v)] == 0)
 
 
-x_index_to_key = {
-    var.Index(): key
-    for key, var in x.items()
-}
-
-work_index_to_key = {
-    var.Index(): key
-    for key, var in work.items()
-}
+model.Add(resmi_tatil_kisitli_ihlal[(a, ds, v)] >= x[(a, ds, v)])
 
 
-hard_zero_x_rows = []
-hard_zero_work_rows = []
 
-proto = model.Proto()
+# %% DEBUG - RESMİ TATİL İZİN_MAP'E GİRMİŞ Mİ?
 
-for c_idx, ct in enumerate(proto.constraints):
+resmi_tatil_izin_rows = []
 
-    # Bazı OR-Tools sürümlerinde ct.linear var ama boş olabilir.
-    # Bu yüzden try/except ile gidiyoruz.
-    try:
-        lin = ct.linear
-        vars_list = list(lin.vars)
-        coeffs_list = list(lin.coeffs)
-        domain_list = list(lin.domain)
-    except Exception:
-        continue
+for a in AGENTS:
+    a = str(a).strip()
 
-    # Tek değişkenli x == 0 / work == 0 kısıtlarını arıyoruz.
-    if len(vars_list) != 1:
-        continue
-
-    if len(coeffs_list) != 1:
-        continue
-
-    var_idx = vars_list[0]
-    coeff = coeffs_list[0]
-
-    if coeff != 1:
-        continue
-
-    if domain_list != [0, 0]:
-        continue
-
-    # x == 0
-    if var_idx in x_index_to_key:
-        a, ds, v = x_index_to_key[var_idx]
-
-        if ds in resmi_tatil_debug_days:
-            bas, bit = saat[(ds, v)] if (ds, v) in saat else (None, None)
-
-            hard_zero_x_rows.append({
-                "constraint_index": c_idx,
+    for ds in resmi_tatil_plan_gunleri:
+        if ds in izin_map.get(a, set()):
+            resmi_tatil_izin_rows.append({
                 "agent_user_code": a,
                 "date": ds,
-                "shift": v,
-                "shift_start": bas,
-                "shift_end": bit,
+                "tatil_kisitli_agent": a in tatil_kisitli_agents
             })
 
-    # work == 0
-    if var_idx in work_index_to_key:
-        a, ds = work_index_to_key[var_idx]
+resmi_tatil_izin_df = pd.DataFrame(resmi_tatil_izin_rows)
 
-        if ds in resmi_tatil_debug_days:
-            hard_zero_work_rows.append({
-                "constraint_index": c_idx,
-                "agent_user_code": a,
-                "date": ds,
-            })
+print("Resmi tatil günü izin_map içinde görünen agent sayısı:", len(resmi_tatil_izin_df))
 
-
-hard_zero_x_df = pd.DataFrame(hard_zero_x_rows)
-hard_zero_work_df = pd.DataFrame(hard_zero_work_rows)
-
-print("Resmi tatil günü hard x==0 sayısı:", len(hard_zero_x_df))
-print("Resmi tatil günü hard work==0 sayısı:", len(hard_zero_work_df))
-
-
-if len(hard_zero_x_df) > 0:
-    agent_info_cols = [
-        "agent_user_code",
-        "agent_name",
-        "takim",
-        "teamleader_name",
-        "hamile_flg",
-        "sut_izni_flg",
-        "mesaiye_kalamaz_flg",
-        "sabah_calisir_flg"
-    ]
-
-    agent_info = df_tam[agent_info_cols].copy()
-    agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-    hard_zero_x_df = hard_zero_x_df.merge(
-        agent_info,
-        on="agent_user_code",
-        how="left"
-    )
-
-    print("Resmi tatilde hard x==0 detay:")
-    display(
-        hard_zero_x_df
-        .sort_values(["shift_start", "shift_end", "takim", "agent_user_code"])
-        .head(300)
-    )
-
-
-if len(hard_zero_work_df) > 0:
-    agent_info_cols = [
-        "agent_user_code",
-        "agent_name",
-        "takim",
-        "teamleader_name",
-        "hamile_flg",
-        "sut_izni_flg",
-        "mesaiye_kalamaz_flg",
-        "sabah_calisir_flg"
-    ]
-
-    agent_info = df_tam[agent_info_cols].copy()
-    agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-    hard_zero_work_df = hard_zero_work_df.merge(
-        agent_info,
-        on="agent_user_code",
-        how="left"
-    )
-
-    print("Resmi tatilde hard work==0 detay:")
-    display(
-        hard_zero_work_df
-        .sort_values(["date", "takim", "agent_user_code"])
-        .head(300)
-    )
+if len(resmi_tatil_izin_df) > 0:
+    display(resmi_tatil_izin_df.head(100))

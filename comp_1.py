@@ -1,28 +1,22 @@
-# %% EXCEL EXPORT - KAPSAMLI PLAN + KONTROLLER
+# %% FINAL EXCEL EXPORT - KAPSAMLI VARDİYA PLANI + TÜM KONTROLLER
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import os
-
-# -------------------------------------------------
-# 0) Solve kontrolü
-# -------------------------------------------------
-
-try:
-    feasible_statuses = [cp_model.OPTIMAL, cp_model.FEASIBLE]
-    if status not in feasible_statuses:
-        raise ValueError(f"Model çözümü feasible değil. Status: {status}")
-except NameError:
-    print("Uyarı: status veya cp_model bulunamadı. Yine de export deneniyor.")
+from datetime import datetime
 
 
-# -------------------------------------------------
-# 1) Genel helper fonksiyonlar
-# -------------------------------------------------
+# =================================================
+# 0) GENEL KONTROLLER / HELPERLAR
+# =================================================
 
 def ds_key(ds):
     return pd.to_datetime(ds).strftime("%Y-%m-%d")
+
+
+def normalize_agent(a):
+    return str(a).strip()
+
 
 def safe_solver_value(var, default=0):
     try:
@@ -30,15 +24,31 @@ def safe_solver_value(var, default=0):
     except Exception:
         return default
 
+
 def get_shift_time(ds, v):
-    if (ds, v) in saat:
+    if "saat" in globals() and (ds, v) in saat:
         return saat[(ds, v)][0], saat[(ds, v)][1]
     return None, None
 
-def normalize_agent(a):
-    return str(a).strip()
+
+def safe_day_name(ds):
+    gun_map = {
+        0: "Pazartesi",
+        1: "Salı",
+        2: "Çarşamba",
+        3: "Perşembe",
+        4: "Cuma",
+        5: "Cumartesi",
+        6: "Pazar",
+    }
+    return gun_map[pd.to_datetime(ds).weekday()]
+
 
 def agent_izinli_mi_export(a, ds):
+    """
+    izin_map içinde tarih string/date/timestamp gelebilir.
+    Hepsini güvenli şekilde kontrol eder.
+    """
     a = normalize_agent(a)
     izinler = izin_map.get(a, set())
 
@@ -62,13 +72,27 @@ def agent_izinli_mi_export(a, ds):
 
     ds_str = pd.to_datetime(ds).strftime("%Y-%m-%d")
     ds_date = pd.to_datetime(ds).date()
+    ds_ts = pd.to_datetime(ds)
 
-    return (ds in izin_set) or (ds_str in izin_set) or (ds_date in izin_set)
+    return (
+        ds in izin_set
+        or ds_str in izin_set
+        or ds_date in izin_set
+        or ds_ts in izin_set
+    )
 
 
-# -------------------------------------------------
-# 2) Agent info
-# -------------------------------------------------
+def df_or_empty(df, columns=None):
+    if df is None:
+        return pd.DataFrame(columns=columns if columns else [])
+    if isinstance(df, pd.DataFrame):
+        return df
+    return pd.DataFrame(df)
+
+
+# =================================================
+# 1) AGENT INFO
+# =================================================
 
 agent_info_cols = [
     "agent_user_code",
@@ -80,52 +104,73 @@ agent_info_cols = [
     "hamile_flg",
     "sut_izni_flg",
     "mesaiye_kalamaz_flg",
-    "sabah_calisir_flg"
+    "sabah_calisir_flg",
 ]
 
-available_agent_info_cols = [c for c in agent_info_cols if c in df_tam.columns]
+available_agent_info_cols = [
+    c for c in agent_info_cols
+    if c in df_tam.columns
+]
 
 agent_info_df = df_tam[available_agent_info_cols].copy()
 agent_info_df["agent_user_code"] = agent_info_df["agent_user_code"].astype(str).str.strip()
 
+agent_info_df = agent_info_df.drop_duplicates("agent_user_code")
+
 agent_info_map = (
     agent_info_df
-    .drop_duplicates("agent_user_code")
     .set_index("agent_user_code")
     .to_dict("index")
 )
 
 
-# -------------------------------------------------
-# 3) Özel gün setleri
-# -------------------------------------------------
+# =================================================
+# 2) ÖZEL GÜN SETLERİ
+# =================================================
 
 arife_days_set = set(arife_plan_gunleri) if "arife_plan_gunleri" in globals() else set()
 resmi_tatil_days_set = set(resmi_tatil_plan_gunleri) if "resmi_tatil_plan_gunleri" in globals() else set()
-ozel_tatil_days_set = set(ozel_tatil_plan_gunleri) if "ozel_tatil_plan_gunleri" in globals() else arife_days_set | resmi_tatil_days_set
 
+if "ozel_tatil_plan_gunleri" in globals():
+    ozel_tatil_days_set = set(ozel_tatil_plan_gunleri)
+else:
+    ozel_tatil_days_set = arife_days_set | resmi_tatil_days_set
+
+arife_ozel_vardiya_kodlari_export = set(
+    arife_ozel_vardiya_kodlari
+) if "arife_ozel_vardiya_kodlari" in globals() else set()
+
+
+# Arife mesai atamaları
 arife_mesai_assignments = set()
+
 if "arife_mesai" in globals():
     for (a, ds, v), var in arife_mesai.items():
         if safe_solver_value(var) == 1:
             arife_mesai_assignments.add((normalize_agent(a), ds, v))
 
+
+# Resmi tatil mesai atamaları
 resmi_tatil_mesai_assignments = set()
+
 if "resmi_tatil_mesai" in globals():
     for (a, ds, v), var in resmi_tatil_mesai.items():
         if safe_solver_value(var) == 1:
             resmi_tatil_mesai_assignments.add((normalize_agent(a), ds, v))
 
+
+# Resmi tatil kısıtlı ihlal atamaları
 resmi_tatil_ihlal_assignments = set()
+
 if "resmi_tatil_kisitli_ihlal" in globals():
     for (a, ds, v), var in resmi_tatil_kisitli_ihlal.items():
         if safe_solver_value(var) == 1:
             resmi_tatil_ihlal_assignments.add((normalize_agent(a), ds, v))
 
 
-# -------------------------------------------------
-# 4) Agent günlük plan
-# -------------------------------------------------
+# =================================================
+# 3) AGENT GÜNLÜK PLAN
+# =================================================
 
 agent_day_rows = []
 
@@ -134,6 +179,7 @@ for a in AGENTS:
     info = agent_info_map.get(a, {})
 
     for ds in PLAN_GUNLER:
+
         assigned_shift = None
         shift_start = None
         shift_end = None
@@ -146,19 +192,20 @@ for a in AGENTS:
                 assigned = 1
                 break
 
+        wk = day_week.get(ds) if "day_week" in globals() else None
+        weekday = pd.to_datetime(ds).weekday()
+
         is_leave = agent_izinli_mi_export(a, ds)
         is_arife = ds in arife_days_set
         is_resmi_tatil = ds in resmi_tatil_days_set
         is_ozel_gun = ds in ozel_tatil_days_set
 
-        wk = day_week[ds] if "day_week" in globals() and ds in day_week else None
-        weekday = pd.to_datetime(ds).weekday()
-
-        overtime_week_val = None
+        normal_overtime_week = None
         if wk is not None and (a, wk) in overtime_week:
-            overtime_week_val = safe_solver_value(overtime_week[(a, wk)])
+            normal_overtime_week = safe_solver_value(overtime_week[(a, wk)])
 
         status_label = "OFF"
+        special_day_label = ""
 
         if is_leave:
             status_label = "İZİN"
@@ -166,7 +213,13 @@ for a in AGENTS:
         if assigned == 1:
             status_label = "WORK"
 
-            if is_arife and assigned_shift in arife_ozel_vardiya_kodlari:
+            if is_arife:
+                special_day_label = "ARIFE"
+
+            if is_resmi_tatil:
+                special_day_label = "RESMI_TATIL"
+
+            if is_arife and assigned_shift in arife_ozel_vardiya_kodlari_export:
                 status_label = "ARIFE_09_13"
 
             if (a, ds, assigned_shift) in arife_mesai_assignments:
@@ -188,9 +241,10 @@ for a in AGENTS:
             "date": ds_key(ds),
             "week": wk,
             "weekday": weekday,
-            "gun": pd.to_datetime(ds).day_name(),
+            "gun": safe_day_name(ds),
             "assigned": assigned,
             "status": status_label,
+            "special_day_label": special_day_label,
             "assigned_shift": assigned_shift,
             "shift_start": shift_start,
             "shift_end": shift_end,
@@ -198,7 +252,7 @@ for a in AGENTS:
             "is_arife": is_arife,
             "is_resmi_tatil": is_resmi_tatil,
             "is_ozel_gun": is_ozel_gun,
-            "overtime_week": overtime_week_val,
+            "normal_overtime_week": normal_overtime_week,
             "hamile_flg": info.get("hamile_flg"),
             "sut_izni_flg": info.get("sut_izni_flg"),
             "mesaiye_kalamaz_flg": info.get("mesaiye_kalamaz_flg"),
@@ -208,38 +262,45 @@ for a in AGENTS:
 agent_day_plan_df = pd.DataFrame(agent_day_rows)
 
 
-# -------------------------------------------------
-# 5) Takvim planı: agent satır, gün kolon
-# -------------------------------------------------
+# =================================================
+# 4) TAKVİM SHEETLERİ
+# =================================================
 
-calendar_df = agent_day_plan_df.pivot_table(
+calendar_status_df = agent_day_plan_df.pivot_table(
     index=["agent_user_code", "agent_name", "takim", "teamleader_name"],
     columns="date",
     values="status",
     aggfunc="first"
 ).reset_index()
 
-# Vardiya saatli takvim
-calendar_shift_df = agent_day_plan_df.copy()
-calendar_shift_df["calendar_value"] = np.where(
-    calendar_shift_df["assigned"] == 1,
-    calendar_shift_df["assigned_shift"].fillna("") + " (" +
-    calendar_shift_df["shift_start"].fillna("") + "-" +
-    calendar_shift_df["shift_end"].fillna("") + ")",
-    calendar_shift_df["status"]
+calendar_value_df = agent_day_plan_df.copy()
+
+calendar_value_df["calendar_value"] = np.where(
+    calendar_value_df["assigned"] == 1,
+    calendar_value_df["assigned_shift"].fillna("") +
+    " (" +
+    calendar_value_df["shift_start"].fillna("") +
+    "-" +
+    calendar_value_df["shift_end"].fillna("") +
+    ")",
+    calendar_value_df["status"]
 )
 
-calendar_shift_df = calendar_shift_df.pivot_table(
+calendar_shift_df = calendar_value_df.pivot_table(
     index=["agent_user_code", "agent_name", "takim", "teamleader_name"],
     columns="date",
     values="calendar_value",
     aggfunc="first"
 ).reset_index()
 
+# Excel başlıkları tarih/numara diye bozmasın
+calendar_status_df.columns = [str(c) for c in calendar_status_df.columns]
+calendar_shift_df.columns = [str(c) for c in calendar_shift_df.columns]
 
-# -------------------------------------------------
-# 6) Coverage kontrol
-# -------------------------------------------------
+
+# =================================================
+# 5) COVERAGE KONTROL
+# =================================================
 
 coverage_rows = []
 
@@ -250,6 +311,7 @@ for ds in PLAN_GUNLER:
             continue
 
         required = int(talep[(ds, v)])
+
         assigned = sum(
             safe_solver_value(x[(a, ds, v)])
             for a in AGENTS
@@ -261,14 +323,37 @@ for ds in PLAN_GUNLER:
         lower_req = coverage_lower.get((ds, v), None) if "coverage_lower" in globals() else None
         upper_req = coverage_upper.get((ds, v), None) if "coverage_upper" in globals() else None
 
-        under_buffer_val = safe_solver_value(under_buffer[(ds, v)]) if (ds, v) in under_buffer else None
-        over_buffer_val = safe_solver_value(over_buffer[(ds, v)]) if (ds, v) in over_buffer else None
-        missing_val = safe_solver_value(missing_to_required[(ds, v)]) if (ds, v) in missing_to_required else None
-        excess_val = safe_solver_value(excess_to_required[(ds, v)]) if (ds, v) in excess_to_required else None
+        under_buffer_val = (
+            safe_solver_value(under_buffer[(ds, v)])
+            if "under_buffer" in globals() and (ds, v) in under_buffer
+            else None
+        )
+
+        over_buffer_val = (
+            safe_solver_value(over_buffer[(ds, v)])
+            if "over_buffer" in globals() and (ds, v) in over_buffer
+            else None
+        )
+
+        missing_val = (
+            safe_solver_value(missing_to_required[(ds, v)])
+            if "missing_to_required" in globals() and (ds, v) in missing_to_required
+            else None
+        )
+
+        excess_val = (
+            safe_solver_value(excess_to_required[(ds, v)])
+            if "excess_to_required" in globals() and (ds, v) in excess_to_required
+            else None
+        )
+
+        buffer_ici = None
+        if lower_req is not None and upper_req is not None:
+            buffer_ici = assigned >= lower_req and assigned <= upper_req
 
         coverage_rows.append({
             "date": ds_key(ds),
-            "gun": pd.to_datetime(ds).day_name(),
+            "gun": safe_day_name(ds),
             "weekday": pd.to_datetime(ds).weekday(),
             "hafta_ici": pd.to_datetime(ds).weekday() in [0, 1, 2, 3, 4],
             "week": day_week.get(ds) if "day_week" in globals() else None,
@@ -282,11 +367,7 @@ for ds in PLAN_GUNLER:
             "upper_buffer": upper_req,
             "gap_to_lower": assigned - lower_req if lower_req is not None else None,
             "gap_to_upper": assigned - upper_req if upper_req is not None else None,
-            "buffer_ici": (
-                assigned >= lower_req and assigned <= upper_req
-                if lower_req is not None and upper_req is not None
-                else None
-            ),
+            "buffer_ici": buffer_ici,
             "under_buffer": under_buffer_val,
             "over_buffer": over_buffer_val,
             "missing_to_required": missing_val,
@@ -298,10 +379,20 @@ for ds in PLAN_GUNLER:
 
 coverage_gap_df = pd.DataFrame(coverage_rows)
 
+coverage_zero_assigned_df = coverage_gap_df[
+    (coverage_gap_df["required"] > 0) &
+    (coverage_gap_df["assigned"] == 0)
+].copy()
 
-# -------------------------------------------------
-# 7) Haftalık hedef kontrol
-# -------------------------------------------------
+coverage_worst_df = coverage_gap_df.sort_values(
+    ["gap_to_lower", "gap_to_required"],
+    ascending=[True, True]
+).head(100).copy()
+
+
+# =================================================
+# 6) HAFTALIK HEDEF KONTROL
+# =================================================
 
 weekly_rows = []
 
@@ -311,8 +402,16 @@ for a in AGENTS:
 
     for wk, days_in_week in week_days.items():
 
-        resmi_tatil_days_this_week = set(ds for ds in days_in_week if ds in resmi_tatil_days_set)
-        izin_days_this_week = set(ds for ds in days_in_week if agent_izinli_mi_export(a, ds))
+        resmi_tatil_days_this_week = set(
+            ds for ds in days_in_week
+            if ds in resmi_tatil_days_set
+        )
+
+        izin_days_this_week = set(
+            ds for ds in days_in_week
+            if agent_izinli_mi_export(a, ds)
+        )
+
         izin_normal_days_this_week = izin_days_this_week - resmi_tatil_days_this_week
 
         normal_work_days = [
@@ -338,9 +437,23 @@ for a in AGENTS:
             if (a, ds) in work and ds in resmi_tatil_days_this_week
         )
 
-        overtime_val = safe_solver_value(overtime_week[(a, wk)]) if (a, wk) in overtime_week else 0
-        weekly_under_val = safe_solver_value(weekly_under[(a, wk)]) if "weekly_under" in globals() and (a, wk) in weekly_under else 0
-        weekly_over_val = safe_solver_value(weekly_over[(a, wk)]) if "weekly_over" in globals() and (a, wk) in weekly_over else 0
+        overtime_val = (
+            safe_solver_value(overtime_week[(a, wk)])
+            if "overtime_week" in globals() and (a, wk) in overtime_week
+            else 0
+        )
+
+        weekly_under_val = (
+            safe_solver_value(weekly_under[(a, wk)])
+            if "weekly_under" in globals() and (a, wk) in weekly_under
+            else 0
+        )
+
+        weekly_over_val = (
+            safe_solver_value(weekly_over[(a, wk)])
+            if "weekly_over" in globals() and (a, wk) in weekly_over
+            else 0
+        )
 
         weekly_rows.append({
             "agent_user_code": a,
@@ -368,10 +481,18 @@ for a in AGENTS:
 
 weekly_target_check_df = pd.DataFrame(weekly_rows)
 
+weekly_under_detail_df = weekly_target_check_df[
+    weekly_target_check_df["weekly_under"] > 0
+].sort_values(["week", "weekly_under", "agent_user_code"], ascending=[True, False, True]).copy()
 
-# -------------------------------------------------
-# 8) Mesai özeti
-# -------------------------------------------------
+weekly_over_detail_df = weekly_target_check_df[
+    weekly_target_check_df["weekly_over"] > 0
+].sort_values(["week", "weekly_over", "agent_user_code"], ascending=[True, False, True]).copy()
+
+
+# =================================================
+# 7) MESAİ ÖZET
+# =================================================
 
 mesai_rows = []
 
@@ -382,7 +503,7 @@ for a in AGENTS:
     normal_mesai_count = sum(
         safe_solver_value(overtime_week[(a, wk)])
         for wk in WEEKS
-        if (a, wk) in overtime_week
+        if "overtime_week" in globals() and (a, wk) in overtime_week
     )
 
     arife_mesai_count = sum(
@@ -429,9 +550,9 @@ for a in AGENTS:
 mesai_summary_df = pd.DataFrame(mesai_rows)
 
 
-# -------------------------------------------------
-# 9) Özel gün çalışanları
-# -------------------------------------------------
+# =================================================
+# 8) ÖZEL GÜN ÇALIŞANLARI
+# =================================================
 
 special_day_df = agent_day_plan_df[
     agent_day_plan_df["is_ozel_gun"] == True
@@ -443,9 +564,9 @@ special_day_df = special_day_df[
 ].sort_values(["date", "status", "takim", "agent_user_code"])
 
 
-# -------------------------------------------------
-# 10) Resmi tatil ihlal sheet
-# -------------------------------------------------
+# =================================================
+# 9) RESMİ TATİL İHLAL
+# =================================================
 
 resmi_tatil_ihlal_rows = []
 
@@ -471,10 +592,9 @@ for (a, ds, v) in resmi_tatil_ihlal_assignments:
 resmi_tatil_ihlal_df = pd.DataFrame(resmi_tatil_ihlal_rows)
 
 
-# -------------------------------------------------
-# 11) Takım bölünme kontrol
-# Özel günleri hafta içi takım kontrolünden hariç tutuyoruz.
-# -------------------------------------------------
+# =================================================
+# 10) TAKIM BÖLÜNME KONTROL
+# =================================================
 
 weekday_team_rows = []
 weekend_team_rows = []
@@ -506,7 +626,7 @@ for ds in PLAN_GUNLER:
         row = {
             "week": day_week.get(ds) if "day_week" in globals() else None,
             "date": ds_key(ds),
-            "gun": pd.to_datetime(ds).day_name(),
+            "gun": safe_day_name(ds),
             "weekday": weekday,
             "hafta_ici": weekday in [0, 1, 2, 3, 4],
             "is_ozel_gun": is_special,
@@ -519,9 +639,11 @@ for ds in PLAN_GUNLER:
         if is_special:
             if len(set(assigned_shifts)) > 1:
                 special_team_rows.append(row)
+
         elif weekday in [0, 1, 2, 3, 4]:
             if len(set(assigned_shifts)) > 1:
                 weekday_team_rows.append(row)
+
         else:
             if len(set(assigned_shifts)) > 1:
                 weekend_team_rows.append(row)
@@ -531,11 +653,53 @@ weekend_team_split_df = pd.DataFrame(weekend_team_rows)
 special_team_split_df = pd.DataFrame(special_team_rows)
 
 
-# -------------------------------------------------
-# 12) Hafta sonu OFF kontrol
-# -------------------------------------------------
+# =================================================
+# 11) TAKIM BASE SEÇİMİ KONTROL
+# =================================================
 
-weekend_off_rows = []
+team_base_rows = []
+
+if "team_week_base" in globals():
+    for t in TAKIMLAR:
+        t = str(t).strip()
+
+        for wk in WEEKS:
+            for v in week_vardiyalari.get(wk, []):
+
+                if (t, wk, v) not in team_week_base:
+                    continue
+
+                if safe_solver_value(team_week_base[(t, wk, v)]) != 1:
+                    continue
+
+                start, end = None, None
+
+                for ds in week_days[wk]:
+                    if (ds, v) in saat:
+                        start, end = saat[(ds, v)]
+                        break
+
+                team_size = sum(
+                    1
+                    for a in AGENTS
+                    if str(agent_team.get(normalize_agent(a), "")).strip() == t
+                )
+
+                team_base_rows.append({
+                    "week": wk,
+                    "takim": t,
+                    "base_shift": v,
+                    "shift_start": start,
+                    "shift_end": end,
+                    "team_size": team_size,
+                })
+
+team_base_selection_df = pd.DataFrame(team_base_rows)
+
+
+# =================================================
+# 12) HAFTA SONU OFF KONTROL
+# =================================================
 
 weekend_pairs_final = []
 plan_dates = sorted([pd.to_datetime(ds).date() for ds in PLAN_GUNLER])
@@ -547,18 +711,27 @@ for d in plan_dates:
         if sunday in date_to_ds:
             weekend_pairs_final.append((date_to_ds[d], date_to_ds[sunday]))
 
+weekend_off_rows = []
+
 for a in AGENTS:
     a = normalize_agent(a)
     info = agent_info_map.get(a, {})
 
-    pair_off_count = 0
-
     for i, (sat_ds, sun_ds) in enumerate(weekend_pairs_final):
-        sat_work = safe_solver_value(work[(a, sat_ds)]) if (a, sat_ds) in work else 0
-        sun_work = safe_solver_value(work[(a, sun_ds)]) if (a, sun_ds) in work else 0
+
+        sat_work = (
+            safe_solver_value(work[(a, sat_ds)])
+            if (a, sat_ds) in work
+            else 0
+        )
+
+        sun_work = (
+            safe_solver_value(work[(a, sun_ds)])
+            if (a, sun_ds) in work
+            else 0
+        )
 
         pair_off = 1 if sat_work == 0 and sun_work == 0 else 0
-        pair_off_count += pair_off
 
         weekend_off_rows.append({
             "agent_user_code": a,
@@ -577,18 +750,27 @@ for a in AGENTS:
 
 weekend_off_df = pd.DataFrame(weekend_off_rows)
 
-weekend_off_summary_df = (
-    weekend_off_df
-    .groupby(["agent_user_code", "agent_name", "takim", "teamleader_name"], as_index=False)
-    .agg(pair_off_count=("pair_off", "sum"))
-)
+if len(weekend_off_df) > 0:
+    weekend_off_summary_df = (
+        weekend_off_df
+        .groupby(["agent_user_code", "agent_name", "takim", "teamleader_name"], as_index=False)
+        .agg(pair_off_count=("pair_off", "sum"))
+    )
+    weekend_off_summary_df["en_az_1_pair_off_ok"] = weekend_off_summary_df["pair_off_count"] >= 1
+else:
+    weekend_off_summary_df = pd.DataFrame(columns=[
+        "agent_user_code",
+        "agent_name",
+        "takim",
+        "teamleader_name",
+        "pair_off_count",
+        "en_az_1_pair_off_ok",
+    ])
 
-weekend_off_summary_df["en_az_1_pair_off_ok"] = weekend_off_summary_df["pair_off_count"] >= 1
 
-
-# -------------------------------------------------
-# 13) Agent aylık özet
-# -------------------------------------------------
+# =================================================
+# 13) AGENT AYLIK ÖZET
+# =================================================
 
 agent_monthly_df = (
     agent_day_plan_df
@@ -596,24 +778,31 @@ agent_monthly_df = (
     .agg(
         total_assigned_days=("assigned", "sum"),
         izin_days=("is_leave", "sum"),
-        arife_days=("is_arife", "sum"),
-        resmi_tatil_days=("is_resmi_tatil", "sum"),
+        arife_flag_days=("is_arife", "sum"),
+        resmi_tatil_flag_days=("is_resmi_tatil", "sum"),
     )
 )
 
-status_counts = (
+status_counts_df = (
     agent_day_plan_df
     .pivot_table(
-        index=["agent_user_code"],
+        index="agent_user_code",
         columns="status",
         values="date",
         aggfunc="count",
-        fill_value=0
+        fill_value=0,
     )
     .reset_index()
 )
 
-agent_monthly_df = agent_monthly_df.merge(status_counts, on="agent_user_code", how="left")
+status_counts_df.columns = [str(c) for c in status_counts_df.columns]
+
+agent_monthly_df = agent_monthly_df.merge(
+    status_counts_df,
+    on="agent_user_code",
+    how="left"
+)
+
 agent_monthly_df = agent_monthly_df.merge(
     mesai_summary_df[
         [
@@ -625,13 +814,13 @@ agent_monthly_df = agent_monthly_df.merge(
         ]
     ],
     on="agent_user_code",
-    how="left"
+    how="left",
 )
 
 
-# -------------------------------------------------
-# 14) Vardiya bazlı özet
-# -------------------------------------------------
+# =================================================
+# 14) VARDİYA ÖZET
+# =================================================
 
 shift_summary_df = (
     coverage_gap_df
@@ -643,20 +832,20 @@ shift_summary_df = (
         toplam_under_buffer=("under_buffer", "sum"),
         toplam_missing=("missing_to_required", "sum"),
         toplam_excess=("excess_to_required", "sum"),
-        satir_sayisi=("date", "count")
+        satir_sayisi=("date", "count"),
     )
     .sort_values(["shift_start", "shift_end", "shift"])
 )
 
 
-# -------------------------------------------------
-# 15) Özet sheet
-# -------------------------------------------------
+# =================================================
+# 15) ÖZET SHEET
+# =================================================
 
 summary_rows = [
     {"metric": "Agent sayısı", "value": len(AGENTS)},
     {"metric": "Plan gün sayısı", "value": len(PLAN_GUNLER)},
-    {"metric": "Vardiya satır sayısı", "value": len(coverage_gap_df)},
+    {"metric": "Vardiya coverage satır sayısı", "value": len(coverage_gap_df)},
     {"metric": "Toplam talep", "value": coverage_gap_df["required"].sum()},
     {"metric": "Toplam atanan", "value": coverage_gap_df["assigned"].sum()},
     {"metric": "Toplam gap_to_required", "value": coverage_gap_df["gap_to_required"].sum()},
@@ -664,9 +853,11 @@ summary_rows = [
     {"metric": "Toplam missing_to_required", "value": coverage_gap_df["missing_to_required"].sum()},
     {"metric": "Toplam over_buffer", "value": coverage_gap_df["over_buffer"].sum()},
     {"metric": "Toplam excess_to_required", "value": coverage_gap_df["excess_to_required"].sum()},
-    {"metric": "Hiç atanmayan talep vardiyası", "value": coverage_gap_df[(coverage_gap_df["required"] > 0) & (coverage_gap_df["assigned"] == 0)].shape[0]},
+    {"metric": "Hiç atanmayan talep vardiyası", "value": len(coverage_zero_assigned_df)},
     {"metric": "Weekly under toplam", "value": weekly_target_check_df["weekly_under"].sum()},
     {"metric": "Weekly over toplam", "value": weekly_target_check_df["weekly_over"].sum()},
+    {"metric": "Weekly under agent-week sayısı", "value": (weekly_target_check_df["weekly_under"] > 0).sum()},
+    {"metric": "Weekly over agent-week sayısı", "value": (weekly_target_check_df["weekly_over"] > 0).sum()},
     {"metric": "Normal mesai toplam", "value": mesai_summary_df["normal_mesai_count"].sum()},
     {"metric": "Arife mesai toplam", "value": mesai_summary_df["arife_mesai_count"].sum()},
     {"metric": "Resmi tatil mesai toplam", "value": mesai_summary_df["resmi_tatil_mesai_count"].sum()},
@@ -678,6 +869,10 @@ summary_rows = [
 
 summary_df = pd.DataFrame(summary_rows)
 
+
+# =================================================
+# 16) PARAMETRELER
+# =================================================
 
 debug_params = {
     "BUFFER_RATE": BUFFER_RATE if "BUFFER_RATE" in globals() else None,
@@ -701,178 +896,303 @@ debug_params_df = pd.DataFrame(
 )
 
 
-# -------------------------------------------------
-# 16) Excel yazımı
-# -------------------------------------------------
+# =================================================
+# 17) OPSİYONEL DEBUG SHEETLER
+# =================================================
+
+optional_sheets = {}
+
+if "team_base_capacity_debug_df" in globals():
+    optional_sheets["17_Base_Kapasite_Guard"] = df_or_empty(team_base_capacity_debug_df)
+
+if "weekly_equation_check_df" in globals():
+    optional_sheets["18_Weekly_Equation"] = df_or_empty(weekly_equation_check_df)
+
+if "fazla_atama_kontrol" in globals():
+    optional_sheets["19_Fazla_Atama_Kontrol"] = df_or_empty(fazla_atama_kontrol)
+
+if "arife_cap_relax_df" in globals():
+    optional_sheets["20_Arife_Cap_Relax"] = df_or_empty(arife_cap_relax_df)
+
+
+# =================================================
+# 18) EXCEL YAZIMI
+# =================================================
 
 output_file = f"vardiya_plani_kapsamli_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
+sheet_df_map = {
+    "00_Ozet": summary_df,
+    "01_Agent_Gunluk_Plan": agent_day_plan_df,
+    "02_Takvim_Vardiya": calendar_shift_df,
+    "03_Takvim_Status": calendar_status_df,
+    "04_Coverage_Kontrol": coverage_gap_df,
+    "05_Haftalik_Hedef": weekly_target_check_df,
+    "06_Mesai_Ozet": mesai_summary_df,
+    "07_Ozel_Gun_Calisan": special_day_df,
+    "08_Resmi_Tatil_Ihlal": resmi_tatil_ihlal_df,
+    "09_Takim_Bolunme_HI": weekday_team_viol_df,
+    "10_Takim_Bolunme_HS": weekend_team_split_df,
+    "11_Takim_Bolunme_Ozel": special_team_split_df,
+    "12_Team_Base_Secim": team_base_selection_df,
+    "13_Weekend_OFF_Ozet": weekend_off_summary_df,
+    "14_Weekend_OFF_Detay": weekend_off_df,
+    "15_Agent_Aylik_Ozet": agent_monthly_df,
+    "16_Vardiya_Ozet": shift_summary_df,
+    "17_Coverage_En_Kotu": coverage_worst_df,
+    "18_Atanmayan_Talep": coverage_zero_assigned_df,
+    "19_Weekly_Under_Detay": weekly_under_detail_df,
+    "20_Weekly_Over_Detay": weekly_over_detail_df,
+    "21_Parametreler": debug_params_df,
+}
+
+# Optional sheetleri sonlara ekle
+sheet_df_map.update(optional_sheets)
+
 with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
 
-    summary_df.to_excel(writer, sheet_name="00_Ozet", index=False)
-    agent_day_plan_df.to_excel(writer, sheet_name="01_Agent_Gunluk_Plan", index=False)
-    calendar_shift_df.to_excel(writer, sheet_name="02_Takvim_Vardiya", index=False)
-    calendar_df.to_excel(writer, sheet_name="03_Takvim_Status", index=False)
-    coverage_gap_df.to_excel(writer, sheet_name="04_Coverage_Kontrol", index=False)
-    weekly_target_check_df.to_excel(writer, sheet_name="05_Haftalik_Hedef", index=False)
-    mesai_summary_df.to_excel(writer, sheet_name="06_Mesai_Ozet", index=False)
-    special_day_df.to_excel(writer, sheet_name="07_Ozel_Gun_Calisan", index=False)
-    resmi_tatil_ihlal_df.to_excel(writer, sheet_name="08_Resmi_Tatil_Ihlal", index=False)
-    weekday_team_viol_df.to_excel(writer, sheet_name="09_Takim_Bolunme_HI", index=False)
-    weekend_team_split_df.to_excel(writer, sheet_name="10_Takim_Bolunme_HS", index=False)
-    special_team_split_df.to_excel(writer, sheet_name="11_Takim_Bolunme_Ozel", index=False)
-    weekend_off_summary_df.to_excel(writer, sheet_name="12_Weekend_OFF_Ozet", index=False)
-    weekend_off_df.to_excel(writer, sheet_name="13_Weekend_OFF_Detay", index=False)
-    agent_monthly_df.to_excel(writer, sheet_name="14_Agent_Aylik_Ozet", index=False)
-    shift_summary_df.to_excel(writer, sheet_name="15_Vardiya_Ozet", index=False)
-    debug_params_df.to_excel(writer, sheet_name="16_Parametreler", index=False)
+    for sheet_name, df_sheet in sheet_df_map.items():
+        df_sheet = df_or_empty(df_sheet)
+        df_sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
     workbook = writer.book
 
+    # Formatlar
     header_format = workbook.add_format({
         "bold": True,
         "bg_color": "#1F4E78",
         "font_color": "white",
         "border": 1,
         "align": "center",
-        "valign": "vcenter"
+        "valign": "vcenter",
     })
 
-    date_format = workbook.add_format({"num_format": "yyyy-mm-dd"})
-    warning_format = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
-    good_format = workbook.add_format({"bg_color": "#C6EFCE", "font_color": "#006100"})
-    special_format = workbook.add_format({"bg_color": "#FFEB9C", "font_color": "#9C6500"})
-    izin_format = workbook.add_format({"bg_color": "#D9EAD3", "font_color": "#274E13"})
-    off_format = workbook.add_format({"bg_color": "#E7E6E6", "font_color": "#666666"})
-    mesai_format = workbook.add_format({"bg_color": "#F4CCCC", "font_color": "#990000"})
-    arife_format = workbook.add_format({"bg_color": "#D9EAD3", "font_color": "#274E13"})
-    resmi_tatil_format = workbook.add_format({"bg_color": "#CFE2F3", "font_color": "#073763"})
+    warning_format = workbook.add_format({
+        "bg_color": "#FFC7CE",
+        "font_color": "#9C0006",
+    })
 
-    for sheet_name, worksheet in writer.sheets.items():
+    good_format = workbook.add_format({
+        "bg_color": "#C6EFCE",
+        "font_color": "#006100",
+    })
+
+    special_format = workbook.add_format({
+        "bg_color": "#FFEB9C",
+        "font_color": "#9C6500",
+    })
+
+    izin_format = workbook.add_format({
+        "bg_color": "#D9EAD3",
+        "font_color": "#274E13",
+    })
+
+    off_format = workbook.add_format({
+        "bg_color": "#E7E6E6",
+        "font_color": "#666666",
+    })
+
+    mesai_format = workbook.add_format({
+        "bg_color": "#F4CCCC",
+        "font_color": "#990000",
+    })
+
+    arife_format = workbook.add_format({
+        "bg_color": "#D9EAD3",
+        "font_color": "#274E13",
+    })
+
+    resmi_tatil_format = workbook.add_format({
+        "bg_color": "#CFE2F3",
+        "font_color": "#073763",
+    })
+
+    # Header + genişlik + filtre
+    for sheet_name, df_sheet in sheet_df_map.items():
+
+        safe_sheet_name = sheet_name[:31]
+        worksheet = writer.sheets[safe_sheet_name]
+        df_sheet = df_or_empty(df_sheet)
+
         worksheet.freeze_panes(1, 0)
-        worksheet.autofilter(0, 0, 0, 50)
 
-        # Header format
-        try:
-            max_col = worksheet.dim_colmax
-            for col_num in range(max_col + 1):
-                worksheet.write(0, col_num, worksheet.table[0][col_num].string if hasattr(worksheet, "table") else None, header_format)
-        except Exception:
-            pass
+        if len(df_sheet.columns) > 0:
+            worksheet.autofilter(0, 0, max(len(df_sheet), 1), len(df_sheet.columns) - 1)
 
-        # Kolon genişlikleri
-        worksheet.set_column(0, 0, 16)
-        worksheet.set_column(1, 5, 18)
-        worksheet.set_column(6, 20, 14)
-        worksheet.set_column(21, 60, 16)
+        for col_num, col_name in enumerate(df_sheet.columns):
+            worksheet.write(0, col_num, str(col_name), header_format)
 
-    # Sheet özel conditional formatting
+            col_name_str = str(col_name)
+
+            if col_name_str == "agent_user_code":
+                worksheet.set_column(col_num, col_num, 16)
+
+            elif col_name_str == "agent_name":
+                worksheet.set_column(col_num, col_num, 24)
+
+            elif col_name_str == "takim":
+                worksheet.set_column(col_num, col_num, 34)
+
+            elif col_name_str == "teamleader_name":
+                worksheet.set_column(col_num, col_num, 24)
+
+            elif col_name_str in ["date", "saturday", "sunday"]:
+                worksheet.set_column(col_num, col_num, 14)
+
+            elif col_name_str in ["vardiyalar", "calendar_value"]:
+                worksheet.set_column(col_num, col_num, 28)
+
+            elif safe_sheet_name in ["02_Takvim_Vardiya", "03_Takvim_Status"] and col_num >= 4:
+                worksheet.set_column(col_num, col_num, 16)
+
+            elif col_name_str in ["metric", "parameter"]:
+                worksheet.set_column(col_num, col_num, 42)
+
+            else:
+                worksheet.set_column(col_num, col_num, 15)
+
+    # =================================================
+    # Conditional formatting
+    # =================================================
+
+    # Coverage
     ws_cov = writer.sheets["04_Coverage_Kontrol"]
     cov_rows = len(coverage_gap_df) + 1
-    cov_cols = len(coverage_gap_df.columns)
 
-    if "gap_to_lower" in coverage_gap_df.columns:
-        col_idx = coverage_gap_df.columns.get_loc("gap_to_lower")
-        ws_cov.conditional_format(1, col_idx, cov_rows, col_idx, {
-            "type": "cell",
-            "criteria": "<",
-            "value": 0,
-            "format": warning_format
-        })
+    if len(coverage_gap_df) > 0:
 
-    if "buffer_ici" in coverage_gap_df.columns:
-        col_idx = coverage_gap_df.columns.get_loc("buffer_ici")
-        ws_cov.conditional_format(1, col_idx, cov_rows, col_idx, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "False",
-            "format": warning_format
-        })
+        if "gap_to_lower" in coverage_gap_df.columns:
+            col_idx = coverage_gap_df.columns.get_loc("gap_to_lower")
+            ws_cov.conditional_format(1, col_idx, cov_rows, col_idx, {
+                "type": "cell",
+                "criteria": "<",
+                "value": 0,
+                "format": warning_format,
+            })
 
+        if "buffer_ici" in coverage_gap_df.columns:
+            col_idx = coverage_gap_df.columns.get_loc("buffer_ici")
+            ws_cov.conditional_format(1, col_idx, cov_rows, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "False",
+                "format": warning_format,
+            })
+
+        if "gap_to_required" in coverage_gap_df.columns:
+            col_idx = coverage_gap_df.columns.get_loc("gap_to_required")
+            ws_cov.conditional_format(1, col_idx, cov_rows, col_idx, {
+                "type": "cell",
+                "criteria": "<",
+                "value": 0,
+                "format": special_format,
+            })
+
+    # Haftalık hedef
     ws_week = writer.sheets["05_Haftalik_Hedef"]
     week_rows = len(weekly_target_check_df) + 1
 
-    if "weekly_under" in weekly_target_check_df.columns:
-        col_idx = weekly_target_check_df.columns.get_loc("weekly_under")
-        ws_week.conditional_format(1, col_idx, week_rows, col_idx, {
-            "type": "cell",
-            "criteria": ">",
-            "value": 0,
-            "format": warning_format
-        })
+    if len(weekly_target_check_df) > 0:
 
-    if "weekly_over" in weekly_target_check_df.columns:
-        col_idx = weekly_target_check_df.columns.get_loc("weekly_over")
-        ws_week.conditional_format(1, col_idx, week_rows, col_idx, {
-            "type": "cell",
-            "criteria": ">",
-            "value": 0,
-            "format": special_format
-        })
+        if "weekly_under" in weekly_target_check_df.columns:
+            col_idx = weekly_target_check_df.columns.get_loc("weekly_under")
+            ws_week.conditional_format(1, col_idx, week_rows, col_idx, {
+                "type": "cell",
+                "criteria": ">",
+                "value": 0,
+                "format": warning_format,
+            })
 
-    # Takvim status renklendirme
-    for sheet_name in ["02_Takvim_Vardiya", "03_Takvim_Status"]:
-        ws = writer.sheets[sheet_name]
-        max_rows = len(calendar_shift_df) + 1 if sheet_name == "02_Takvim_Vardiya" else len(calendar_df) + 1
-        max_cols = len(calendar_shift_df.columns) if sheet_name == "02_Takvim_Vardiya" else len(calendar_df.columns)
+        if "weekly_over" in weekly_target_check_df.columns:
+            col_idx = weekly_target_check_df.columns.get_loc("weekly_over")
+            ws_week.conditional_format(1, col_idx, week_rows, col_idx, {
+                "type": "cell",
+                "criteria": ">",
+                "value": 0,
+                "format": special_format,
+            })
 
-        ws.conditional_format(1, 4, max_rows, max_cols, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "İZİN",
-            "format": izin_format
-        })
+        if "target_plus_overtime_ok" in weekly_target_check_df.columns:
+            col_idx = weekly_target_check_df.columns.get_loc("target_plus_overtime_ok")
+            ws_week.conditional_format(1, col_idx, week_rows, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "False",
+                "format": warning_format,
+            })
 
-        ws.conditional_format(1, 4, max_rows, max_cols, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "OFF",
-            "format": off_format
-        })
+    # Takvim renklendirme
+    for safe_sheet_name, df_calendar in [
+        ("02_Takvim_Vardiya", calendar_shift_df),
+        ("03_Takvim_Status", calendar_status_df),
+    ]:
+        ws = writer.sheets[safe_sheet_name]
 
-        ws.conditional_format(1, 4, max_rows, max_cols, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "MESAI",
-            "format": mesai_format
-        })
+        if len(df_calendar.columns) > 4:
+            max_rows = len(df_calendar) + 1
+            max_cols = len(df_calendar.columns) - 1
 
-        ws.conditional_format(1, 4, max_rows, max_cols, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "ARIFE_09_13",
-            "format": arife_format
-        })
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "İZİN",
+                "format": izin_format,
+            })
 
-        ws.conditional_format(1, 4, max_rows, max_cols, {
-            "type": "text",
-            "criteria": "containing",
-            "value": "RESMI_TATIL",
-            "format": resmi_tatil_format
-        })
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "OFF",
+                "format": off_format,
+            })
 
-    # Özel gün sheet format
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "MESAI",
+                "format": mesai_format,
+            })
+
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "ARIFE_09_13",
+                "format": arife_format,
+            })
+
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "RESMI_TATIL",
+                "format": resmi_tatil_format,
+            })
+
+    # Özel gün
     ws_special = writer.sheets["07_Ozel_Gun_Calisan"]
-    special_rows = len(special_day_df) + 1
 
-    if "status" in special_day_df.columns:
+    if len(special_day_df) > 0 and "status" in special_day_df.columns:
+        special_rows = len(special_day_df) + 1
         col_idx = special_day_df.columns.get_loc("status")
+
         ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
             "type": "text",
             "criteria": "containing",
             "value": "MESAI",
-            "format": mesai_format
+            "format": mesai_format,
         })
+
         ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
             "type": "text",
             "criteria": "containing",
             "value": "IHLAL",
-            "format": warning_format
+            "format": warning_format,
         })
 
-    # Özet sheet biraz daha okunaklı olsun
+    # Özet sheet genişlik
     ws_summary = writer.sheets["00_Ozet"]
-    ws_summary.set_column(0, 0, 42)
-    ws_summary.set_column(1, 1, 20)
+    ws_summary.set_column(0, 0, 46)
+    ws_summary.set_column(1, 1, 18)
 
 print("Excel oluşturuldu:", os.path.abspath(output_file))
+print("Sheet sayısı:", len(sheet_df_map))
+print("Dosya:", output_file)

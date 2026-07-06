@@ -1,118 +1,137 @@
-# %% KONTROL - V01 00:00-08:00 İÇİN TAKIM BASE SEÇİMİ VE KAPASİTE
+# %% [HÜCRE] - HAFTALIK TAKIM BASE KAPASİTE KORUMASI - GENEL
+# Amaç:
+# Takım hard kuralı varken, hafta içi talebi olan hiçbir vardiya base seçimsiz kalmasın.
+#
+# Mantık:
+# Bir vardiyanın hafta içi talebi varsa,
+# o hafta o vardiyayı base seçen takımların toplam kişi sayısı,
+# o vardiyanın haftadaki maksimum lower buffer ihtiyacını karşılamalı.
+#
+# Böylece V01 gibi hiçbir vardiya selected_team_count=0 kalmaz.
 
-v01_rows = []
+team_base_capacity_constraints = 0
+team_base_capacity_debug_rows = []
 
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-
-        if (ds, v) not in saat:
-            continue
-
-        bas, bit = saat[(ds, v)]
-
-        if bas != "00:00" or bit != "08:00":
-            continue
-
-        wk = day_week[ds]
-        required = int(talep[(ds, v)])
-
-        assigned = sum(
-            solver.Value(x[(a, ds, v)])
-            for a in AGENTS
-            if (a, ds, v) in x
-        )
-
-        # Bu vardiyaya x değişkeni olan agent sayısı
-        x_agent_count = sum(
-            1
-            for a in AGENTS
-            if (a, ds, v) in x
-        )
-
-        # Bu vardiyada base seçmiş takımlar
-        selected_teams = []
-        selected_team_agent_count = 0
-
-        for t in TAKIMLAR:
-            if (t, wk, v) in team_week_base and solver.Value(team_week_base[(t, wk, v)]) == 1:
-                selected_teams.append(t)
-
-                selected_team_agent_count += sum(
-                    1
-                    for a in AGENTS
-                    if str(agent_team.get(str(a).strip(), "")).strip() == str(t).strip()
-                )
-
-        v01_rows.append({
-            "date": ds,
-            "week": wk,
-            "shift": v,
-            "start": bas,
-            "end": bit,
-            "required": required,
-            "assigned": assigned,
-            "gap": assigned - required,
-            "x_agent_count": x_agent_count,
-            "selected_team_count": len(selected_teams),
-            "selected_team_agent_count": selected_team_agent_count,
-            "selected_teams": selected_teams
-        })
-
-v01_debug_df = pd.DataFrame(v01_rows)
-
-display(
-    v01_debug_df
-    .sort_values(["date"])
+# Takım büyüklükleri
+team_size_map = (
+    df_tam
+    .assign(takim=df_tam["takim"].astype(str).str.strip())
+    .groupby("takim")["agent_user_code"]
+    .nunique()
+    .to_dict()
 )
 
+for wk in WEEKS:
 
-# %% KONTROL - HAFTALIK TAKIM BASE VARDİYA DAĞILIMI
+    # Bu hafta özel günler hariç hafta içi günler
+    normal_weekdays = []
 
-team_base_rows = []
+    for ds in week_days[wk]:
 
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        for v in week_vardiyalari[wk]:
+        if "ozel_tatil_plan_gunleri" in globals() and ds in ozel_tatil_plan_gunleri:
+            continue
+
+        weekday = pd.to_datetime(ds).weekday()
+
+        if weekday in [0, 1, 2, 3, 4]:
+            normal_weekdays.append(ds)
+
+    if not normal_weekdays:
+        continue
+
+    # Bu haftadaki weekday vardiya kodları
+    vardiyalar_this_week = sorted(
+        set(
+            v
+            for ds in normal_weekdays
+            for v in gun_vardiyalari.get(ds, [])
+            if (ds, v) in talep
+            and (ds, v) in saat
+            and v not in arife_ozel_vardiya_kodlari
+        )
+    )
+
+    for v in vardiyalar_this_week:
+
+        # Bu vardiyanın o hafta hafta içindeki maksimum ihtiyacı
+        required_values = []
+
+        for ds in normal_weekdays:
+
+            if (ds, v) not in talep:
+                continue
+
+            required = int(talep[(ds, v)])
+
+            # Buffer lower varsa onu kullan.
+            # Yoksa required kullan.
+            lower_req = coverage_lower.get((ds, v), required) if "coverage_lower" in globals() else required
+
+            required_values.append(lower_req)
+
+        if not required_values:
+            continue
+
+        max_needed = max(required_values)
+
+        # Talep 0 ise kapasite zorlamaya gerek yok
+        if max_needed <= 0:
+            continue
+
+        # Bu vardiyayı base seçebilen takımların kapasite terimleri
+        selected_team_capacity_terms = []
+
+        for t in TAKIMLAR:
+            t = str(t).strip()
 
             if (t, wk, v) not in team_week_base:
                 continue
 
-            if solver.Value(team_week_base[(t, wk, v)]) != 1:
-                continue
+            team_size = int(team_size_map.get(t, 0))
 
-            bas, bit = None, None
-
-            for ds in week_days[wk]:
-                if (ds, v) in saat:
-                    bas, bit = saat[(ds, v)]
-                    break
-
-            team_size = sum(
-                1
-                for a in AGENTS
-                if str(agent_team.get(str(a).strip(), "")).strip() == str(t).strip()
+            selected_team_capacity_terms.append(
+                team_size * team_week_base[(t, wk, v)]
             )
 
-            team_base_rows.append({
+        if not selected_team_capacity_terms:
+            team_base_capacity_debug_rows.append({
                 "week": wk,
-                "team": t,
-                "base_shift": v,
-                "start": bas,
-                "end": bit,
-                "team_size": team_size,
-                "is_v01_night": bas == "00:00" and bit == "08:00"
+                "shift": v,
+                "start": None,
+                "end": None,
+                "max_needed": max_needed,
+                "status": "team_week_base_yok"
             })
+            continue
 
-team_base_debug_df = pd.DataFrame(team_base_rows)
+        # Genel kapasite guard
+        model.Add(
+            sum(selected_team_capacity_terms) >= max_needed
+        )
+
+        team_base_capacity_constraints += 1
+
+        # Saat bilgisi
+        start, end = None, None
+        for ds in normal_weekdays:
+            if (ds, v) in saat:
+                start, end = saat[(ds, v)]
+                break
+
+        team_base_capacity_debug_rows.append({
+            "week": wk,
+            "shift": v,
+            "start": start,
+            "end": end,
+            "max_needed": max_needed,
+            "status": "constraint_added"
+        })
+
+team_base_capacity_debug_df = pd.DataFrame(team_base_capacity_debug_rows)
+
+print("Haftalık takım base kapasite guard kısıtı:", team_base_capacity_constraints)
 
 display(
-    team_base_debug_df
-    .groupby(["week", "base_shift", "start", "end"], as_index=False)
-    .agg(
-        team_count=("team", "nunique"),
-        total_team_size=("team_size", "sum")
-    )
-    .sort_values(["week", "start", "end"])
+    team_base_capacity_debug_df
+    .sort_values(["week", "start", "end", "shift"])
 )
-
-

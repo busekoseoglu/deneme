@@ -1,62 +1,38 @@
-# %% KONTROL - EN BÜYÜK HAFTALIK UNDER SAPMALARI
+# %% [HÜCRE] - OVERTIME WEEK DEĞİŞKENLERİ
 
-weekly_deviation_rows = []
+overtime_week = {}
 
-for (a, wk), under_var in weekly_under.items():
+for a in AGENTS:
+    a = str(a).strip()
 
-    under_val = solver.Value(under_var)
-    over_val = solver.Value(weekly_over[(a, wk)])
+    for wk in WEEKS:
+        overtime_week[(a, wk)] = model.NewIntVar(
+            0,
+            MAX_OVERTIME_PER_WEEK,
+            f"overtime_week_{a}_{wk}"
+        )
 
-    if under_val == 0 and over_val == 0:
-        continue
+print("Overtime week değişken sayısı:", len(overtime_week))
+print("Haftalık max mesai:", MAX_OVERTIME_PER_WEEK)
+print("Aylık max mesai:", MAX_OVERTIME_PER_MONTH)
 
-    week_days_list = week_days[wk]
+print("Weekly under toplam:", sum(
+    solver.Value(v)
+    for v in weekly_under.values()
+))
 
-    actual_work_days = sum(
-        solver.Value(work[(a, ds)])
-        for ds in week_days_list
-        if (a, ds) in work
-    )
+print("Weekly over toplam:", sum(
+    solver.Value(v)
+    for v in weekly_over.values()
+))
 
-    overtime_val = (
-        solver.Value(overtime_week[(a, wk)])
-        if (a, wk) in overtime_week
-        else None
-    )
+print("Toplam mesai günü:", sum(
+    solver.Value(v)
+    for v in overtime_week.values()
+))
 
-    weekly_deviation_rows.append({
-        "agent_user_code": a,
-        "week": wk,
-        "actual_work_days": actual_work_days,
-        "overtime_week": overtime_val,
-        "weekly_under": under_val,
-        "weekly_over": over_val,
-    })
-
-weekly_deviation_df = pd.DataFrame(weekly_deviation_rows)
-
-agent_info_cols = [
-    "agent_user_code",
-    "agent_name",
-    "takim",
-    "teamleader_name",
-    "hamile_flg",
-    "sut_izni_flg",
-    "mesaiye_kalamaz_flg",
-    "sabah_calisir_flg"
-]
-
-agent_info = df_tam[agent_info_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-weekly_deviation_df = weekly_deviation_df.merge(
-    agent_info,
-    on="agent_user_code",
-    how="left"
-)
-
-display(
-    weekly_deviation_df
-    .sort_values(["weekly_under", "week", "takim"], ascending=[False, True, True])
-    .head(100)
-)
+print("2 mesai yazılan agent-week sayısı:", sum(
+    1
+    for v in overtime_week.values()
+    if solver.Value(v) == 2
+))

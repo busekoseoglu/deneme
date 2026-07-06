@@ -1,7 +1,13 @@
-# %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ - SOFT DEBUG
+# %% [HÜCRE] - HAFTALIK ÇALIŞMA + MESAİ - SOFT DEBUG / RESMİ TATİL HEDEF DÜZELTMELİ
 # Amaç:
 # Haftalık hedef infeasible yapmasın.
-# Hedef tutmazsa weekly_under / weekly_over değişkenleriyle sapmayı gösterelim.
+# Resmi tatil normal haftalık hedeften düşsün.
+#
+# Mantık:
+# - Normal haftalık hedef = 5 - izin günleri - resmi tatil günleri
+# - Aynı gün hem izin hem resmi tatilse 1 kez düşülür.
+# - Resmi tatilde çalışan kişi ekstra çalışma/mesai gibi davranır.
+# - Hedef tutmazsa weekly_under / weekly_over ile sapmayı gösterir.
 
 if "day_week" not in globals() or "week_days" not in globals() or "WEEKS" not in globals():
 
@@ -31,6 +37,28 @@ mesaiye_kalamaz_agents = set(
 )
 
 
+# -------------------------------------------------
+# Resmi tatil günlerini PLAN_GUNLER formatında al
+# -------------------------------------------------
+
+resmi_tatil_gunleri_for_weekly = set()
+
+if "resmi_tatil_plan_gunleri" in globals():
+    resmi_tatil_gunleri_for_weekly = set(resmi_tatil_plan_gunleri)
+else:
+    if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
+        if "RESMI_TATIL_GUNLERI" in globals():
+            resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
+
+            for ds in PLAN_GUNLER:
+                ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
+
+                if ds_key in resmi_tatil_key_set:
+                    resmi_tatil_gunleri_for_weekly.add(ds)
+
+print("Haftalık hedeften düşülecek resmi tatil günleri:", resmi_tatil_gunleri_for_weekly)
+
+
 weekly_work_constraints = 0
 weekly_overtime_block_constraints = 0
 monthly_overtime_constraints = 0
@@ -56,17 +84,42 @@ for a in AGENTS:
         if not work_vars:
             continue
 
-        izin_count = sum(
-            1
+        # -------------------------------------------------
+        # 1) İzin günleri
+        # -------------------------------------------------
+
+        izin_days_this_week = set(
+            ds
             for ds in week_days_list
             if ds in izin_map.get(a, set())
         )
 
-        normal_target = NORMAL_WORK_DAYS - izin_count
+        # -------------------------------------------------
+        # 2) Resmi tatil günleri
+        # -------------------------------------------------
+
+        resmi_tatil_days_this_week = set(
+            ds
+            for ds in week_days_list
+            if ds in resmi_tatil_gunleri_for_weekly
+        )
+
+        # Aynı gün hem izin hem resmi tatilse 1 kez düş.
+        hedef_dusulecek_gunler = izin_days_this_week | resmi_tatil_days_this_week
+
+        # -------------------------------------------------
+        # 3) Normal haftalık hedef
+        # -------------------------------------------------
+
+        normal_target = NORMAL_WORK_DAYS - len(hedef_dusulecek_gunler)
         normal_target = max(0, normal_target)
 
         # Eksik hafta koruması
         normal_target = min(normal_target, len(work_vars))
+
+        # -------------------------------------------------
+        # 4) Weekly sapma değişkenleri
+        # -------------------------------------------------
 
         weekly_under[(a, wk)] = model.NewIntVar(
             0,
@@ -80,12 +133,6 @@ for a in AGENTS:
             f"weekly_over_{a}_{wk}"
         )
 
-        # ESKİ HARD:
-        # sum(work_vars) == normal_target + overtime_week[(a, wk)]
-        #
-        # YENİ SOFT:
-        # Eğer hedef tutmazsa weekly_under / weekly_over ile sapmayı yakalıyoruz.
-
         model.Add(
             sum(work_vars)
             + weekly_under[(a, wk)]
@@ -96,7 +143,10 @@ for a in AGENTS:
 
         weekly_work_constraints += 1
 
-        # Mesaiye kalamaz agent mesai alamaz.
+        # -------------------------------------------------
+        # 5) Mesaiye kalamaz agent mesai alamaz
+        # -------------------------------------------------
+
         if a in mesaiye_kalamaz_agents:
             model.Add(overtime_week[(a, wk)] == 0)
             weekly_overtime_block_constraints += 1
@@ -106,12 +156,17 @@ for a in AGENTS:
             "week": wk,
             "normal_target": normal_target,
             "work_var_count": len(work_vars),
-            "izin_count": izin_count,
+            "izin_count": len(izin_days_this_week),
+            "resmi_tatil_count": len(resmi_tatil_days_this_week),
+            "hedef_dusulecek_gun_count": len(hedef_dusulecek_gunler),
             "mesaiye_kalamaz": a in mesaiye_kalamaz_agents
         })
 
 
-# Ayda max mesai hard kalsın.
+# -------------------------------------------------
+# 6) Ayda max mesai hard kuralı
+# -------------------------------------------------
+
 for a in AGENTS:
     a = str(a).strip()
 
@@ -134,129 +189,11 @@ print("Aylık max mesai kısıtı:", monthly_overtime_constraints)
 print("weekly_under değişken sayısı:", len(weekly_under))
 print("weekly_over değişken sayısı:", len(weekly_over))
 
+print("Resmi tatil haftası hedef kontrol:")
 display(
-    weekly_target_debug_df
+    weekly_target_debug_df[
+        weekly_target_debug_df["resmi_tatil_count"] > 0
+    ]
     .sort_values(["week", "agent_user_code"])
-    .head(10)
+    .head(100)
 )
-
-
-# -------------------------------------------------
-# HAFTALIK HEDEF SAPMA CEZASI
-# -------------------------------------------------
-
-WEEKLY_UNDER_W = 200000
-WEEKLY_OVER_W = 50000
-
-if "weekly_under" in globals():
-    for (a, wk), var in weekly_under.items():
-        objective_terms.append(WEEKLY_UNDER_W * var)
-
-if "weekly_over" in globals():
-    for (a, wk), var in weekly_over.items():
-        objective_terms.append(WEEKLY_OVER_W * var)
-
-print("WEEKLY_UNDER_W:", WEEKLY_UNDER_W)
-print("WEEKLY_OVER_W:", WEEKLY_OVER_W)
-
-
-# %% KONTROL - HAFTALIK HEDEF SAPMALARI
-
-weekly_deviation_rows = []
-
-for (a, wk), under_var in weekly_under.items():
-
-    under_val = solver.Value(under_var)
-    over_val = solver.Value(weekly_over[(a, wk)])
-
-    if under_val == 0 and over_val == 0:
-        continue
-
-    week_days_list = week_days[wk]
-
-    actual_work_days = sum(
-        solver.Value(work[(a, ds)])
-        for ds in week_days_list
-        if (a, ds) in work
-    )
-
-    overtime_val = (
-        solver.Value(overtime_week[(a, wk)])
-        if (a, wk) in overtime_week
-        else None
-    )
-
-    weekly_deviation_rows.append({
-        "agent_user_code": a,
-        "week": wk,
-        "actual_work_days": actual_work_days,
-        "overtime_week": overtime_val,
-        "weekly_under": under_val,
-        "weekly_over": over_val,
-    })
-
-weekly_deviation_df = pd.DataFrame(weekly_deviation_rows)
-
-agent_info_cols = [
-    "agent_user_code",
-    "agent_name",
-    "takim",
-    "teamleader_name",
-    "hamile_flg",
-    "sut_izni_flg",
-    "mesaiye_kalamaz_flg",
-    "sabah_calisir_flg"
-]
-
-agent_info = df_tam[agent_info_cols].copy()
-agent_info["agent_user_code"] = agent_info["agent_user_code"].astype(str).str.strip()
-
-if len(weekly_deviation_df) > 0:
-    weekly_deviation_df = weekly_deviation_df.merge(
-        agent_info,
-        on="agent_user_code",
-        how="left"
-    )
-
-print("Haftalık hedef sapması olan agent-week sayısı:", len(weekly_deviation_df))
-
-display(
-    weekly_deviation_df
-    .sort_values(["weekly_under", "weekly_over", "week", "takim"], ascending=[False, False, True, True])
-    .head(200)
-)
-
-
-print("Weekly under toplam:", sum(
-    solver.Value(v)
-    for v in weekly_under.values()
-))
-
-print("Weekly over toplam:", sum(
-    solver.Value(v)
-    for v in weekly_over.values()
-))
-
-print("Resmi tatil kısıtlı ihlal toplam:", sum(
-    solver.Value(v)
-    for v in resmi_tatil_kisitli_ihlal.values()
-) if "resmi_tatil_kisitli_ihlal" in globals() else 0)
-
-print("Arife 13 sonrası ihlal kontrolü:")
-arife_ihlal_sayisi = 0
-
-for a in AGENTS:
-    a = str(a).strip()
-    if a not in tatil_kisitli_agents:
-        continue
-
-    for ds in arife_plan_gunleri:
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) not in x:
-                continue
-
-            if arife_kisitli_yasak_vardiya_mi.get((ds, v), False):
-                if solver.Value(x[(a, ds, v)]) == 1:
-                    arife_ihlal_sayisi += 1
-
-print("Arife 13 sonrası ihlal sayısı:", arife_ihlal_sayisi)

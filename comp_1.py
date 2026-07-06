@@ -1,49 +1,63 @@
-# %% [HÜCRE] - İZİN KONTROL HELPER - SAĞLAM VERSİYON
+weekday_team_rows = []
+weekend_team_rows = []
 
-def agent_izinli_mi(a, ds):
-    a = str(a).strip()
+for ds in PLAN_GUNLER:
 
-    izinler = izin_map.get(a, set())
+    # Arife / resmi tatil özel planlanıyor, takım base kontrolünden hariç
+    if "ozel_tatil_plan_gunleri" in globals() and ds in ozel_tatil_plan_gunleri:
+        continue
 
-    # Bool, None, NaN gibi şeyler izin listesi değildir.
-    if izinler is None:
-        return False
+    weekday = pd.to_datetime(ds).weekday()
 
-    if isinstance(izinler, bool):
-        return False
+    for t in TAKIMLAR:
+        t = str(t).strip()
 
-    if isinstance(izinler, float) and pd.isna(izinler):
-        return False
+        team_agents = [
+            str(a).strip()
+            for a in AGENTS
+            if str(agent_team.get(str(a).strip(), "")).strip() == t
+        ]
 
-    # Set/list/tuple değilse tek elemanlı sete çevir.
-    if isinstance(izinler, set):
-        izin_set = izinler
-    elif isinstance(izinler, list):
-        izin_set = set(izinler)
-    elif isinstance(izinler, tuple):
-        izin_set = set(izinler)
-    else:
-        izin_set = {izinler}
+        çalışan_shiftler = []
 
-    ds_str = pd.to_datetime(ds).strftime("%Y-%m-%d")
-    ds_date = pd.to_datetime(ds).date()
+        for a in team_agents:
+            for v in gun_vardiyalari.get(ds, []):
+                if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                    çalışan_shiftler.append(v)
 
-    return (
-        ds in izin_set
-        or ds_str in izin_set
-        or ds_date in izin_set
+        if not çalışan_shiftler:
+            continue
+
+        vardiya_sayisi = len(set(çalışan_shiftler))
+        calisan_agent = len(çalışan_shiftler)
+
+        row = {
+            "hafta": day_week[ds],
+            "tarih": ds,
+            "gun": pd.to_datetime(ds).day_name(),
+            "weekday": weekday,
+            "hafta_ici": weekday in [0, 1, 2, 3, 4],
+            "takim": t,
+            "calisan_agent": calisan_agent,
+            "vardiya_sayisi": vardiya_sayisi,
+        }
+
+        if weekday in [0, 1, 2, 3, 4]:
+            if vardiya_sayisi > 1:
+                weekday_team_rows.append(row)
+        else:
+            if vardiya_sayisi > 1:
+                weekend_team_rows.append(row)
+
+weekday_team_viol = pd.DataFrame(weekday_team_rows)
+weekend_team_split = pd.DataFrame(weekend_team_rows)
+
+print("Özel günler hariç hafta içi bölünen takım-gün sayısı:", len(weekday_team_viol))
+print("Hafta sonu bölünen takım-gün sayısı:", len(weekend_team_split))
+
+if len(weekday_team_viol) > 0:
+    display(
+        weekday_team_viol
+        .sort_values(["hafta", "tarih", "takim"])
+        .head(100)
     )
-    
-    
-    
-# %% TEST - İZİN HELPER ÇALIŞIYOR MU?
-
-test_count = 0
-
-for a in AGENTS[:20]:
-    for ds in PLAN_GUNLER[:5]:
-        sonuc = agent_izinli_mi(a, ds)
-        test_count += 1
-
-print("Test edilen agent-gün:", test_count)
-print("Helper çalıştı.")

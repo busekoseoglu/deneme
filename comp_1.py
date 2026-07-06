@@ -1,137 +1,149 @@
-# %% [HÜCRE] - HAFTALIK TAKIM BASE KAPASİTE KORUMASI - GENEL
-# Amaç:
-# Takım hard kuralı varken, hafta içi talebi olan hiçbir vardiya base seçimsiz kalmasın.
-#
-# Mantık:
-# Bir vardiyanın hafta içi talebi varsa,
-# o hafta o vardiyayı base seçen takımların toplam kişi sayısı,
-# o vardiyanın haftadaki maksimum lower buffer ihtiyacını karşılamalı.
-#
-# Böylece V01 gibi hiçbir vardiya selected_team_count=0 kalmaz.
+# %% KONTROL 6 - HAFTALIK ÇALIŞMA HEDEFİ
 
-team_base_capacity_constraints = 0
-team_base_capacity_debug_rows = []
+weekly_debug_rows = []
 
-# Takım büyüklükleri
-team_size_map = (
-    df_tam
-    .assign(takim=df_tam["takim"].astype(str).str.strip())
-    .groupby("takim")["agent_user_code"]
-    .nunique()
-    .to_dict()
-)
+# Resmi tatil günlerini al
+resmi_tatil_gunleri_for_check = set()
 
-for wk in WEEKS:
+if "resmi_tatil_plan_gunleri" in globals():
+    resmi_tatil_gunleri_for_check = set(resmi_tatil_plan_gunleri)
+else:
+    if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
+        if "RESMI_TATIL_GUNLERI" in globals():
+            resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
 
-    # Bu hafta özel günler hariç hafta içi günler
-    normal_weekdays = []
+            for ds in PLAN_GUNLER:
+                ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
+                if ds_key in resmi_tatil_key_set:
+                    resmi_tatil_gunleri_for_check.add(ds)
 
-    for ds in week_days[wk]:
 
-        if "ozel_tatil_plan_gunleri" in globals() and ds in ozel_tatil_plan_gunleri:
-            continue
+for a in AGENTS:
+    a = str(a).strip()
+    izinli = izin_map.get(a, set())
 
-        weekday = pd.to_datetime(ds).weekday()
+    for wk, days_in_week in week_days.items():
 
-        if weekday in [0, 1, 2, 3, 4]:
-            normal_weekdays.append(ds)
-
-    if not normal_weekdays:
-        continue
-
-    # Bu haftadaki weekday vardiya kodları
-    vardiyalar_this_week = sorted(
-        set(
-            v
-            for ds in normal_weekdays
-            for v in gun_vardiyalari.get(ds, [])
-            if (ds, v) in talep
-            and (ds, v) in saat
-            and v not in arife_ozel_vardiya_kodlari
+        # Bu haftadaki resmi tatil günleri
+        resmi_tatil_days_this_week = set(
+            ds
+            for ds in days_in_week
+            if ds in resmi_tatil_gunleri_for_check
         )
-    )
 
-    for v in vardiyalar_this_week:
+        # Bu haftadaki izin günleri
+        izin_days_this_week = set(
+            ds
+            for ds in days_in_week
+            if pd.to_datetime(ds).date() in izinli or ds in izinli
+        )
 
-        # Bu vardiyanın o hafta hafta içindeki maksimum ihtiyacı
-        required_values = []
+        # Resmi tatil normal hedefe dahil değil.
+        # Aynı gün hem izin hem resmi tatilse iki kere düşmeyelim.
+        izin_normal_days_this_week = izin_days_this_week - resmi_tatil_days_this_week
 
-        for ds in normal_weekdays:
+        # Normal hedef = 5 - resmi tatil - normal izin
+        raw_normal_target = NORMAL_WORK_DAYS - len(resmi_tatil_days_this_week) - len(izin_normal_days_this_week)
+        raw_normal_target = max(0, raw_normal_target)
 
-            if (ds, v) not in talep:
+        # Feasible günler: izin olmayan ve resmi tatil olmayan, en az bir x opsiyonu olan günler
+        feasible_days = []
+
+        for ds in days_in_week:
+
+            if ds in resmi_tatil_days_this_week:
                 continue
 
-            required = int(talep[(ds, v)])
-
-            # Buffer lower varsa onu kullan.
-            # Yoksa required kullan.
-            lower_req = coverage_lower.get((ds, v), required) if "coverage_lower" in globals() else required
-
-            required_values.append(lower_req)
-
-        if not required_values:
-            continue
-
-        max_needed = max(required_values)
-
-        # Talep 0 ise kapasite zorlamaya gerek yok
-        if max_needed <= 0:
-            continue
-
-        # Bu vardiyayı base seçebilen takımların kapasite terimleri
-        selected_team_capacity_terms = []
-
-        for t in TAKIMLAR:
-            t = str(t).strip()
-
-            if (t, wk, v) not in team_week_base:
+            if pd.to_datetime(ds).date() in izinli or ds in izinli:
                 continue
 
-            team_size = int(team_size_map.get(t, 0))
-
-            selected_team_capacity_terms.append(
-                team_size * team_week_base[(t, wk, v)]
+            has_option = any(
+                (a, ds, v) in x
+                for v in gun_vardiyalari.get(ds, [])
             )
 
-        if not selected_team_capacity_terms:
-            team_base_capacity_debug_rows.append({
-                "week": wk,
-                "shift": v,
-                "start": None,
-                "end": None,
-                "max_needed": max_needed,
-                "status": "team_week_base_yok"
-            })
-            continue
+            if has_option:
+                feasible_days.append(ds)
 
-        # Genel kapasite guard
-        model.Add(
-            sum(selected_team_capacity_terms) >= max_needed
+        normal_target = min(raw_normal_target, len(feasible_days))
+
+        # Normal günlerde çalışılan gün sayısı
+        normal_worked_days = sum(
+            solver.Value(work[(a, ds)])
+            for ds in days_in_week
+            if (a, ds) in work
+            and ds not in resmi_tatil_days_this_week
         )
 
-        team_base_capacity_constraints += 1
+        # Resmi tatilde çalışılan gün sayısı
+        resmi_tatil_worked_days = sum(
+            solver.Value(work[(a, ds)])
+            for ds in days_in_week
+            if (a, ds) in work
+            and ds in resmi_tatil_days_this_week
+        )
 
-        # Saat bilgisi
-        start, end = None, None
-        for ds in normal_weekdays:
-            if (ds, v) in saat:
-                start, end = saat[(ds, v)]
-                break
+        overtime_val = (
+            solver.Value(overtime_week[(a, wk)])
+            if (a, wk) in overtime_week
+            else 0
+        )
 
-        team_base_capacity_debug_rows.append({
-            "week": wk,
-            "shift": v,
-            "start": start,
-            "end": end,
-            "max_needed": max_needed,
-            "status": "constraint_added"
+        weekly_under_val = (
+            solver.Value(weekly_under[(a, wk)])
+            if "weekly_under" in globals() and (a, wk) in weekly_under
+            else None
+        )
+
+        weekly_over_val = (
+            solver.Value(weekly_over[(a, wk)])
+            if "weekly_over" in globals() and (a, wk) in weekly_over
+            else None
+        )
+
+        weekly_debug_rows.append({
+            "agent_user_code": a,
+            "hafta": wk,
+            "haftadaki_gun": len(days_in_week),
+            "izin_count_this_week": len(izin_days_this_week),
+            "resmi_tatil_count_this_week": len(resmi_tatil_days_this_week),
+            "raw_normal_target": raw_normal_target,
+            "feasible_day_count": len(feasible_days),
+            "normal_target": normal_target,
+            "normal_worked_days": normal_worked_days,
+            "resmi_tatil_worked_days": resmi_tatil_worked_days,
+            "total_worked_days": normal_worked_days + resmi_tatil_worked_days,
+            "overtime_week": overtime_val,
+            "weekly_under": weekly_under_val,
+            "weekly_over": weekly_over_val,
+            "worked_minus_target": normal_worked_days - normal_target,
+            "normal_haftalik_calisma_ok": normal_worked_days == normal_target + overtime_val,
         })
 
-team_base_capacity_debug_df = pd.DataFrame(team_base_capacity_debug_rows)
 
-print("Haftalık takım base kapasite guard kısıtı:", team_base_capacity_constraints)
+weekly_target_check_df = pd.DataFrame(weekly_debug_rows)
+
+print("Normal çalışma hedef farkı dağılımı:")
+display(
+    weekly_target_check_df["worked_minus_target"]
+    .value_counts()
+    .sort_index()
+)
+
+print("Weekly under toplam:")
+if "weekly_under" in globals():
+    print(sum(solver.Value(v) for v in weekly_under.values()))
+else:
+    print("weekly_under yok")
+
+print("Weekly over toplam:")
+if "weekly_over" in globals():
+    print(sum(solver.Value(v) for v in weekly_over.values()))
+else:
+    print("weekly_over yok")
 
 display(
-    team_base_capacity_debug_df
-    .sort_values(["week", "start", "end", "shift"])
+    weekly_target_check_df
+    .sort_values(["worked_minus_target", "hafta", "agent_user_code"])
+    .head(100)
 )

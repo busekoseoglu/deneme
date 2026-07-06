@@ -1,4 +1,4 @@
-# %% FINAL EXCEL EXPORT - KAPSAMLI VARDİYA PLANI + TÜM KONTROLLER
+# %% FINAL EXCEL EXPORT - KAPSAMLI VARDİYA PLANI + MESAI RENKLİ TAKVİM
 
 import pandas as pd
 import numpy as np
@@ -7,7 +7,7 @@ from datetime import datetime
 
 
 # =================================================
-# 0) GENEL KONTROLLER / HELPERLAR
+# 0) GENEL HELPERLAR
 # =================================================
 
 def ds_key(ds):
@@ -45,10 +45,6 @@ def safe_day_name(ds):
 
 
 def agent_izinli_mi_export(a, ds):
-    """
-    izin_map içinde tarih string/date/timestamp gelebilir.
-    Hepsini güvenli şekilde kontrol eder.
-    """
     a = normalize_agent(a)
     izinler = izin_map.get(a, set())
 
@@ -114,7 +110,6 @@ available_agent_info_cols = [
 
 agent_info_df = df_tam[available_agent_info_cols].copy()
 agent_info_df["agent_user_code"] = agent_info_df["agent_user_code"].astype(str).str.strip()
-
 agent_info_df = agent_info_df.drop_duplicates("agent_user_code")
 
 agent_info_map = (
@@ -169,7 +164,7 @@ if "resmi_tatil_kisitli_ihlal" in globals():
 
 
 # =================================================
-# 3) AGENT GÜNLÜK PLAN
+# 3) AGENT GÜNLÜK PLAN - İLK STATÜLER
 # =================================================
 
 agent_day_rows = []
@@ -263,6 +258,76 @@ agent_day_plan_df = pd.DataFrame(agent_day_rows)
 
 
 # =================================================
+# 3.1) NORMAL MESAİ GÜNLERİNİ TAKVİMDE İŞARETLE
+# =================================================
+# overtime_week haftalık normal mesai bilgisidir.
+# Hangi günün mesai olduğunu göstermek için:
+# - resmi tatil ve arife mesaisi hariç tutulur
+# - öncelik hafta sonu çalışan güne verilir
+# - hafta sonu yoksa haftadaki son normal WORK günü seçilir
+
+normal_mesai_day_set = set()
+
+for a in AGENTS:
+    a = normalize_agent(a)
+
+    for wk in WEEKS:
+
+        if (a, wk) not in overtime_week:
+            continue
+
+        overtime_val = safe_solver_value(overtime_week[(a, wk)])
+
+        if overtime_val <= 0:
+            continue
+
+        worked_normal_days = agent_day_plan_df[
+            (agent_day_plan_df["agent_user_code"] == a) &
+            (agent_day_plan_df["week"] == wk) &
+            (agent_day_plan_df["assigned"] == 1) &
+            (agent_day_plan_df["is_resmi_tatil"] == False) &
+            (agent_day_plan_df["is_arife"] == False) &
+            (agent_day_plan_df["status"] == "WORK")
+        ].copy()
+
+        if worked_normal_days.empty:
+            continue
+
+        weekend_worked = worked_normal_days[
+            worked_normal_days["weekday"].isin([5, 6])
+        ].copy()
+
+        if not weekend_worked.empty:
+            selected_rows = weekend_worked.sort_values("date").tail(int(overtime_val))
+        else:
+            selected_rows = worked_normal_days.sort_values("date").tail(int(overtime_val))
+
+        for _, r in selected_rows.iterrows():
+            normal_mesai_day_set.add(
+                (
+                    r["agent_user_code"],
+                    r["date"],
+                    r["assigned_shift"],
+                )
+            )
+
+agent_day_plan_df["is_normal_mesai"] = agent_day_plan_df.apply(
+    lambda r: (
+        r["agent_user_code"],
+        r["date"],
+        r["assigned_shift"],
+    ) in normal_mesai_day_set,
+    axis=1,
+)
+
+agent_day_plan_df.loc[
+    (agent_day_plan_df["is_normal_mesai"] == True) &
+    (agent_day_plan_df["status"] == "WORK"),
+    "status"
+] = "NORMAL_MESAI"
+
+
+# =================================================
 # 4) TAKVİM SHEETLERİ
 # =================================================
 
@@ -277,6 +342,8 @@ calendar_value_df = agent_day_plan_df.copy()
 
 calendar_value_df["calendar_value"] = np.where(
     calendar_value_df["assigned"] == 1,
+    calendar_value_df["status"].fillna("") +
+    " | " +
     calendar_value_df["assigned_shift"].fillna("") +
     " (" +
     calendar_value_df["shift_start"].fillna("") +
@@ -293,7 +360,6 @@ calendar_shift_df = calendar_value_df.pivot_table(
     aggfunc="first"
 ).reset_index()
 
-# Excel başlıkları tarih/numara diye bozmasın
 calendar_status_df.columns = [str(c) for c in calendar_status_df.columns]
 calendar_shift_df.columns = [str(c) for c in calendar_shift_df.columns]
 
@@ -506,6 +572,12 @@ for a in AGENTS:
         if "overtime_week" in globals() and (a, wk) in overtime_week
     )
 
+    normal_mesai_marked_day_count = sum(
+        1
+        for (aa, dd, vv) in normal_mesai_day_set
+        if aa == a
+    )
+
     arife_mesai_count = sum(
         1 for (aa, ds, v) in arife_mesai_assignments
         if aa == a
@@ -537,6 +609,7 @@ for a in AGENTS:
         "takim": info.get("takim"),
         "teamleader_name": info.get("teamleader_name"),
         "normal_mesai_count": normal_mesai_count,
+        "normal_mesai_marked_day_count": normal_mesai_marked_day_count,
         "arife_mesai_count": arife_mesai_count,
         "resmi_tatil_mesai_count": resmi_tatil_mesai_count,
         "resmi_tatil_kisitli_ihlal_count": resmi_tatil_ihlal_count,
@@ -654,7 +727,7 @@ special_team_split_df = pd.DataFrame(special_team_rows)
 
 
 # =================================================
-# 11) TAKIM BASE SEÇİMİ KONTROL
+# 11) TAKIM BASE SEÇİMİ
 # =================================================
 
 team_base_rows = []
@@ -780,6 +853,7 @@ agent_monthly_df = (
         izin_days=("is_leave", "sum"),
         arife_flag_days=("is_arife", "sum"),
         resmi_tatil_flag_days=("is_resmi_tatil", "sum"),
+        normal_mesai_days=("is_normal_mesai", "sum"),
     )
 )
 
@@ -808,6 +882,7 @@ agent_monthly_df = agent_monthly_df.merge(
         [
             "agent_user_code",
             "normal_mesai_count",
+            "normal_mesai_marked_day_count",
             "arife_mesai_count",
             "resmi_tatil_mesai_count",
             "resmi_tatil_kisitli_ihlal_count",
@@ -859,6 +934,7 @@ summary_rows = [
     {"metric": "Weekly under agent-week sayısı", "value": (weekly_target_check_df["weekly_under"] > 0).sum()},
     {"metric": "Weekly over agent-week sayısı", "value": (weekly_target_check_df["weekly_over"] > 0).sum()},
     {"metric": "Normal mesai toplam", "value": mesai_summary_df["normal_mesai_count"].sum()},
+    {"metric": "Normal mesai takvimde işaretli gün", "value": mesai_summary_df["normal_mesai_marked_day_count"].sum()},
     {"metric": "Arife mesai toplam", "value": mesai_summary_df["arife_mesai_count"].sum()},
     {"metric": "Resmi tatil mesai toplam", "value": mesai_summary_df["resmi_tatil_mesai_count"].sum()},
     {"metric": "Resmi tatil kısıtlı ihlal toplam", "value": mesai_summary_df["resmi_tatil_kisitli_ihlal_count"].sum()},
@@ -903,16 +979,16 @@ debug_params_df = pd.DataFrame(
 optional_sheets = {}
 
 if "team_base_capacity_debug_df" in globals():
-    optional_sheets["17_Base_Kapasite_Guard"] = df_or_empty(team_base_capacity_debug_df)
+    optional_sheets["22_Base_Kapasite_Guard"] = df_or_empty(team_base_capacity_debug_df)
 
 if "weekly_equation_check_df" in globals():
-    optional_sheets["18_Weekly_Equation"] = df_or_empty(weekly_equation_check_df)
+    optional_sheets["23_Weekly_Equation"] = df_or_empty(weekly_equation_check_df)
 
 if "fazla_atama_kontrol" in globals():
-    optional_sheets["19_Fazla_Atama_Kontrol"] = df_or_empty(fazla_atama_kontrol)
+    optional_sheets["24_Fazla_Atama_Kontrol"] = df_or_empty(fazla_atama_kontrol)
 
 if "arife_cap_relax_df" in globals():
-    optional_sheets["20_Arife_Cap_Relax"] = df_or_empty(arife_cap_relax_df)
+    optional_sheets["25_Arife_Cap_Relax"] = df_or_empty(arife_cap_relax_df)
 
 
 # =================================================
@@ -946,7 +1022,6 @@ sheet_df_map = {
     "21_Parametreler": debug_params_df,
 }
 
-# Optional sheetleri sonlara ekle
 sheet_df_map.update(optional_sheets)
 
 with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
@@ -992,19 +1067,39 @@ with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
         "font_color": "#666666",
     })
 
-    mesai_format = workbook.add_format({
-        "bg_color": "#F4CCCC",
-        "font_color": "#990000",
+    work_format = workbook.add_format({
+        "bg_color": "#FFFFFF",
+        "font_color": "#000000",
     })
 
-    arife_format = workbook.add_format({
-        "bg_color": "#D9EAD3",
-        "font_color": "#274E13",
+    normal_mesai_format = workbook.add_format({
+        "bg_color": "#FCE4D6",
+        "font_color": "#9C5700",
+        "bold": True,
     })
 
-    resmi_tatil_format = workbook.add_format({
-        "bg_color": "#CFE2F3",
-        "font_color": "#073763",
+    arife_0913_format = workbook.add_format({
+        "bg_color": "#E2F0D9",
+        "font_color": "#375623",
+        "bold": True,
+    })
+
+    arife_mesai_format = workbook.add_format({
+        "bg_color": "#FFF2CC",
+        "font_color": "#7F6000",
+        "bold": True,
+    })
+
+    resmi_tatil_mesai_format = workbook.add_format({
+        "bg_color": "#BDD7EE",
+        "font_color": "#1F4E78",
+        "bold": True,
+    })
+
+    ihlal_format = workbook.add_format({
+        "bg_color": "#FF0000",
+        "font_color": "#FFFFFF",
+        "bold": True,
     })
 
     # Header + genişlik + filtre
@@ -1040,19 +1135,19 @@ with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
                 worksheet.set_column(col_num, col_num, 14)
 
             elif col_name_str in ["vardiyalar", "calendar_value"]:
-                worksheet.set_column(col_num, col_num, 28)
+                worksheet.set_column(col_num, col_num, 32)
 
             elif safe_sheet_name in ["02_Takvim_Vardiya", "03_Takvim_Status"] and col_num >= 4:
-                worksheet.set_column(col_num, col_num, 16)
+                worksheet.set_column(col_num, col_num, 22)
 
             elif col_name_str in ["metric", "parameter"]:
-                worksheet.set_column(col_num, col_num, 42)
+                worksheet.set_column(col_num, col_num, 46)
 
             else:
                 worksheet.set_column(col_num, col_num, 15)
 
     # =================================================
-    # Conditional formatting
+    # CONDITIONAL FORMATTING
     # =================================================
 
     # Coverage
@@ -1132,13 +1227,7 @@ with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
             max_rows = len(df_calendar) + 1
             max_cols = len(df_calendar.columns) - 1
 
-            ws.conditional_format(1, 4, max_rows, max_cols, {
-                "type": "text",
-                "criteria": "containing",
-                "value": "İZİN",
-                "format": izin_format,
-            })
-
+            # Önce genel durumlar
             ws.conditional_format(1, 4, max_rows, max_cols, {
                 "type": "text",
                 "criteria": "containing",
@@ -1149,25 +1238,47 @@ with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
             ws.conditional_format(1, 4, max_rows, max_cols, {
                 "type": "text",
                 "criteria": "containing",
-                "value": "MESAI",
-                "format": mesai_format,
+                "value": "İZİN",
+                "format": izin_format,
+            })
+
+            # En kritik / özel olanlar
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "RESMI_TATIL_KISITLI_IHLAL",
+                "format": ihlal_format,
+            })
+
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "RESMI_TATIL_MESAI",
+                "format": resmi_tatil_mesai_format,
+            })
+
+            ws.conditional_format(1, 4, max_rows, max_cols, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "ARIFE_MESAI",
+                "format": arife_mesai_format,
             })
 
             ws.conditional_format(1, 4, max_rows, max_cols, {
                 "type": "text",
                 "criteria": "containing",
                 "value": "ARIFE_09_13",
-                "format": arife_format,
+                "format": arife_0913_format,
             })
 
             ws.conditional_format(1, 4, max_rows, max_cols, {
                 "type": "text",
                 "criteria": "containing",
-                "value": "RESMI_TATIL",
-                "format": resmi_tatil_format,
+                "value": "NORMAL_MESAI",
+                "format": normal_mesai_format,
             })
 
-    # Özel gün
+    # Özel gün sheet
     ws_special = writer.sheets["07_Ozel_Gun_Calisan"]
 
     if len(special_day_df) > 0 and "status" in special_day_df.columns:
@@ -1177,21 +1288,35 @@ with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
         ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
             "type": "text",
             "criteria": "containing",
-            "value": "MESAI",
-            "format": mesai_format,
+            "value": "NORMAL_MESAI",
+            "format": normal_mesai_format,
+        })
+
+        ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
+            "type": "text",
+            "criteria": "containing",
+            "value": "ARIFE_MESAI",
+            "format": arife_mesai_format,
+        })
+
+        ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
+            "type": "text",
+            "criteria": "containing",
+            "value": "RESMI_TATIL_MESAI",
+            "format": resmi_tatil_mesai_format,
         })
 
         ws_special.conditional_format(1, col_idx, special_rows, col_idx, {
             "type": "text",
             "criteria": "containing",
             "value": "IHLAL",
-            "format": warning_format,
+            "format": ihlal_format,
         })
 
     # Özet sheet genişlik
     ws_summary = writer.sheets["00_Ozet"]
-    ws_summary.set_column(0, 0, 46)
-    ws_summary.set_column(1, 1, 18)
+    ws_summary.set_column(0, 0, 48)
+    ws_summary.set_column(1, 1, 20)
 
 print("Excel oluşturuldu:", os.path.abspath(output_file))
 print("Sheet sayısı:", len(sheet_df_map))

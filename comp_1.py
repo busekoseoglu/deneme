@@ -1,149 +1,78 @@
-# %% KONTROL 6 - HAFTALIK ÇALIŞMA HEDEFİ
+# %% DEBUG - WEEKLY_UNDER MODEL EŞİTLİĞİ TUTUYOR MU?
 
-weekly_debug_rows = []
+weekly_equation_check_rows = []
 
-# Resmi tatil günlerini al
-resmi_tatil_gunleri_for_check = set()
-
-if "resmi_tatil_plan_gunleri" in globals():
-    resmi_tatil_gunleri_for_check = set(resmi_tatil_plan_gunleri)
-else:
-    if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
-        if "RESMI_TATIL_GUNLERI" in globals():
-            resmi_tatil_key_set = set(RESMI_TATIL_GUNLERI)
-
-            for ds in PLAN_GUNLER:
-                ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
-                if ds_key in resmi_tatil_key_set:
-                    resmi_tatil_gunleri_for_check.add(ds)
-
-
-for a in AGENTS:
+for (a, wk), under_var in weekly_under.items():
     a = str(a).strip()
-    izinli = izin_map.get(a, set())
 
-    for wk, days_in_week in week_days.items():
+    if (a, wk) not in weekly_over:
+        continue
 
-        # Bu haftadaki resmi tatil günleri
-        resmi_tatil_days_this_week = set(
-            ds
-            for ds in days_in_week
-            if ds in resmi_tatil_gunleri_for_check
-        )
+    days_in_week = week_days[wk]
 
-        # Bu haftadaki izin günleri
-        izin_days_this_week = set(
-            ds
-            for ds in days_in_week
-            if pd.to_datetime(ds).date() in izinli or ds in izinli
-        )
+    # Model haftalık hücresindeki gibi resmi tatil günlerini çıkar
+    resmi_tatil_days_this_week = set(
+        ds for ds in days_in_week
+        if "resmi_tatil_plan_gunleri" in globals()
+        and ds in set(resmi_tatil_plan_gunleri)
+    )
 
-        # Resmi tatil normal hedefe dahil değil.
-        # Aynı gün hem izin hem resmi tatilse iki kere düşmeyelim.
-        izin_normal_days_this_week = izin_days_this_week - resmi_tatil_days_this_week
+    izin_days_this_week = set(
+        ds for ds in days_in_week
+        if ds in izin_map.get(a, set())
+        or pd.to_datetime(ds).date() in izin_map.get(a, set())
+    )
 
-        # Normal hedef = 5 - resmi tatil - normal izin
-        raw_normal_target = NORMAL_WORK_DAYS - len(resmi_tatil_days_this_week) - len(izin_normal_days_this_week)
-        raw_normal_target = max(0, raw_normal_target)
+    izin_normal_days_this_week = izin_days_this_week - resmi_tatil_days_this_week
 
-        # Feasible günler: izin olmayan ve resmi tatil olmayan, en az bir x opsiyonu olan günler
-        feasible_days = []
+    normal_work_vars_days = [
+        ds for ds in days_in_week
+        if (a, ds) in work
+        and ds not in resmi_tatil_days_this_week
+    ]
 
-        for ds in days_in_week:
+    normal_worked_days = sum(
+        solver.Value(work[(a, ds)])
+        for ds in normal_work_vars_days
+    )
 
-            if ds in resmi_tatil_days_this_week:
-                continue
+    normal_target_check = NORMAL_WORK_DAYS
+    normal_target_check -= len(resmi_tatil_days_this_week)
+    normal_target_check -= len(izin_normal_days_this_week)
+    normal_target_check = max(0, normal_target_check)
+    normal_target_check = min(normal_target_check, len(normal_work_vars_days))
 
-            if pd.to_datetime(ds).date() in izinli or ds in izinli:
-                continue
+    overtime_val = solver.Value(overtime_week[(a, wk)]) if (a, wk) in overtime_week else 0
+    under_val = solver.Value(under_var)
+    over_val = solver.Value(weekly_over[(a, wk)])
 
-            has_option = any(
-                (a, ds, v) in x
-                for v in gun_vardiyalari.get(ds, [])
-            )
+    lhs = normal_worked_days + under_val - over_val
+    rhs = normal_target_check + overtime_val
 
-            if has_option:
-                feasible_days.append(ds)
+    weekly_equation_check_rows.append({
+        "agent_user_code": a,
+        "week": wk,
+        "normal_worked_days": normal_worked_days,
+        "normal_target_check": normal_target_check,
+        "overtime_week": overtime_val,
+        "weekly_under": under_val,
+        "weekly_over": over_val,
+        "lhs": lhs,
+        "rhs": rhs,
+        "equation_ok": lhs == rhs,
+        "worked_minus_target": normal_worked_days - normal_target_check,
+        "resmi_tatil_count": len(resmi_tatil_days_this_week),
+        "izin_normal_count": len(izin_normal_days_this_week),
+    })
 
-        normal_target = min(raw_normal_target, len(feasible_days))
+weekly_equation_check_df = pd.DataFrame(weekly_equation_check_rows)
 
-        # Normal günlerde çalışılan gün sayısı
-        normal_worked_days = sum(
-            solver.Value(work[(a, ds)])
-            for ds in days_in_week
-            if (a, ds) in work
-            and ds not in resmi_tatil_days_this_week
-        )
-
-        # Resmi tatilde çalışılan gün sayısı
-        resmi_tatil_worked_days = sum(
-            solver.Value(work[(a, ds)])
-            for ds in days_in_week
-            if (a, ds) in work
-            and ds in resmi_tatil_days_this_week
-        )
-
-        overtime_val = (
-            solver.Value(overtime_week[(a, wk)])
-            if (a, wk) in overtime_week
-            else 0
-        )
-
-        weekly_under_val = (
-            solver.Value(weekly_under[(a, wk)])
-            if "weekly_under" in globals() and (a, wk) in weekly_under
-            else None
-        )
-
-        weekly_over_val = (
-            solver.Value(weekly_over[(a, wk)])
-            if "weekly_over" in globals() and (a, wk) in weekly_over
-            else None
-        )
-
-        weekly_debug_rows.append({
-            "agent_user_code": a,
-            "hafta": wk,
-            "haftadaki_gun": len(days_in_week),
-            "izin_count_this_week": len(izin_days_this_week),
-            "resmi_tatil_count_this_week": len(resmi_tatil_days_this_week),
-            "raw_normal_target": raw_normal_target,
-            "feasible_day_count": len(feasible_days),
-            "normal_target": normal_target,
-            "normal_worked_days": normal_worked_days,
-            "resmi_tatil_worked_days": resmi_tatil_worked_days,
-            "total_worked_days": normal_worked_days + resmi_tatil_worked_days,
-            "overtime_week": overtime_val,
-            "weekly_under": weekly_under_val,
-            "weekly_over": weekly_over_val,
-            "worked_minus_target": normal_worked_days - normal_target,
-            "normal_haftalik_calisma_ok": normal_worked_days == normal_target + overtime_val,
-        })
-
-
-weekly_target_check_df = pd.DataFrame(weekly_debug_rows)
-
-print("Normal çalışma hedef farkı dağılımı:")
-display(
-    weekly_target_check_df["worked_minus_target"]
-    .value_counts()
-    .sort_index()
-)
-
-print("Weekly under toplam:")
-if "weekly_under" in globals():
-    print(sum(solver.Value(v) for v in weekly_under.values()))
-else:
-    print("weekly_under yok")
-
-print("Weekly over toplam:")
-if "weekly_over" in globals():
-    print(sum(solver.Value(v) for v in weekly_over.values()))
-else:
-    print("weekly_over yok")
+print("Equation bozuk satır sayısı:", (~weekly_equation_check_df["equation_ok"]).sum())
+print("Weekly under toplam:", weekly_equation_check_df["weekly_under"].sum())
+print("Weekly over toplam:", weekly_equation_check_df["weekly_over"].sum())
 
 display(
-    weekly_target_check_df
-    .sort_values(["worked_minus_target", "hafta", "agent_user_code"])
+    weekly_equation_check_df
+    .sort_values(["weekly_under", "weekly_over"], ascending=False)
     .head(100)
 )

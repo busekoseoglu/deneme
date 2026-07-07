@@ -1,46 +1,92 @@
-# Vardiya Planlama Optimizasyon Modeli
+# Resmi tatil olan haftaları bul
+resmi_tatil_set = set()
 
-Bu notebook, çağrı merkezi agentları için aylık vardiya planı üretmek amacıyla hazırlanmıştır. Model, günlük vardiya taleplerini karşılamaya çalışırken agent bazlı izin, mesai, özel gün, takım ve çalışma kurallarını birlikte dikkate alır.
+if "RESMI_TATIL_GUNLERI" in globals():
+    for x in RESMI_TATIL_GUNLERI:
+        try:
+            resmi_tatil_set.add(pd.to_datetime(x).date())
+        except Exception:
+            pass
 
-## Amaç
+# Her plan gününün haftasında resmi tatil var mı?
+haftada_resmi_tatil_var = {}
 
-Her gün ve vardiya için gerekli kişi sayısına mümkün olduğunca yakın atama yapmak, aynı zamanda operasyonel kurallara uygun ve kontrol edilebilir bir aylık plan üretmektir.
+for d in GUN_SET:
+    d_date = pd.to_datetime(d).date()
+    iso = d_date.isocalendar()
+    
+    ayni_hafta_gunleri = {
+        pd.to_datetime(g).date()
+        for g in GUN_SET
+        if pd.to_datetime(g).date().isocalendar().year == iso.year
+        and pd.to_datetime(g).date().isocalendar().week == iso.week
+    }
+    
+    haftada_resmi_tatil_var[d_date] = any(
+        g in resmi_tatil_set for g in ayni_hafta_gunleri
+    )
 
-## Modelde Dikkate Alınan Ana Kurallar
 
-- Her agent bir günde en fazla bir vardiyada çalışabilir.
-- İzinli günlerde agent’a vardiya atanmaz.
-- Haftalık çalışma hedefi, izin ve resmi tatil günleri dikkate alınarak hesaplanır.
-- Normal mesai ayda en fazla 2 kez olacak şekilde sınırlandırılır.
-- Resmi tatil mesaisi normal mesai limitinden ayrı değerlendirilir.
-- Agent en fazla 6 gün üst üste çalışabilir.
-- Vardiyalar arasında minimum 11 saat dinlenme kuralı uygulanır.
-- Her agent için ayda en az bir Cumartesi-Pazar peş peşe OFF günü hedeflenir.
-- Hamile, süt izni olan veya mesaiye kalamayan agentlar için özel kısıtlar uygulanır.
-- Arife gününde kısıtlı agentlar özel 09:00–13:00 vardiyasına yönlendirilir.
-- Resmi tatilde kısıtlı agentların çalışmaması sağlanır.
-- Takımların hafta içi aynı vardiyada kalması hedeflenir; arife, resmi tatil ve hafta sonu günleri bu kuraldan ayrı değerlendirilir.
-- Vardiya taleplerinde belirli toleranslar kullanılarak eksik/fazla atamalar minimize edilir.
 
-## Özel Gün Mantığı
 
-Arife ve resmi tatil günleri normal günlerden ayrı ele alınmıştır.  
-Arife gününde kısıtlı agentlar için 09:00–13:00 özel vardiyası tanımlanmıştır.  
-Resmi tatilde çalışan agentlar `RESMI_TATIL_MESAI` olarak ayrıca işaretlenir ve bu mesai normal aylık mesai limitine dahil edilmez.
+sut_izni_mi = _b(row, "sut_izni_flg")
 
-## Çıktılar
+if _b(row, "pazartesi_izinli_flg"):
+    if sut_izni_mi:
+        izin |= {
+            d for d in mondays
+            if not haftada_resmi_tatil_var.get(pd.to_datetime(d).date(), False)
+        }
+    else:
+        izin |= mondays
 
-Model sonucunda sadeleştirilmiş bir Excel çıktısı oluşturulur. Bu dosyada:
+if _b(row, "cuma_izinli_flg"):
+    if sut_izni_mi:
+        izin |= {
+            d for d in fridays
+            if not haftada_resmi_tatil_var.get(pd.to_datetime(d).date(), False)
+        }
+    else:
+        izin |= fridays
 
-- Genel kontrol özeti
-- Agent bilgileri
-- OFF günleri
-- Vardiya talep tablosu
-- Aylık agent takvimi
-- Coverage kontrolü
-- Vardiya özetleri
-- Agent aylık çalışma özeti
 
-yer alır.
 
-Takvim çıktısında normal çalışma, normal mesai, arife mesaisi, resmi tatil mesaisi, izin ve OFF günleri ayrı statülerle gösterilir.
+sut_izni_resmi_tatil_debug = []
+
+for _, row in df_tam.iterrows():
+    a = str(row["agent_user_code"]).strip()
+    sut_izni_mi = _b(row, "sut_izni_flg")
+    
+    if not sut_izni_mi:
+        continue
+    
+    if _b(row, "pazartesi_izinli_flg"):
+        for d in mondays:
+            d_date = pd.to_datetime(d).date()
+            if haftada_resmi_tatil_var.get(d_date, False):
+                sut_izni_resmi_tatil_debug.append({
+                    "agent_user_code": a,
+                    "gun": d_date,
+                    "normalde_izin_tipi": "pazartesi_izinli_flg",
+                    "haftada_resmi_tatil_var": 1,
+                    "aksiyon": "pazartesi_izni_uygulanmadi"
+                })
+    
+    if _b(row, "cuma_izinli_flg"):
+        for d in fridays:
+            d_date = pd.to_datetime(d).date()
+            if haftada_resmi_tatil_var.get(d_date, False):
+                sut_izni_resmi_tatil_debug.append({
+                    "agent_user_code": a,
+                    "gun": d_date,
+                    "normalde_izin_tipi": "cuma_izinli_flg",
+                    "haftada_resmi_tatil_var": 1,
+                    "aksiyon": "cuma_izni_uygulanmadi"
+                })
+
+df_sut_izni_resmi_tatil_debug = pd.DataFrame(sut_izni_resmi_tatil_debug)
+
+print("Süt izni resmi tatil nedeniyle uygulanmayan Pzt/Cuma izin sayısı:", len(df_sut_izni_resmi_tatil_debug))
+
+if len(df_sut_izni_resmi_tatil_debug) > 0:
+    display(df_sut_izni_resmi_tatil_debug.head(20))

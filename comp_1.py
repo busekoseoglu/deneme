@@ -1,92 +1,53 @@
-# Resmi tatil olan haftaları bul
-resmi_tatil_set = set()
-
-if "RESMI_TATIL_GUNLERI" in globals():
-    for x in RESMI_TATIL_GUNLERI:
-        try:
-            resmi_tatil_set.add(pd.to_datetime(x).date())
-        except Exception:
-            pass
-
-# Her plan gününün haftasında resmi tatil var mı?
-haftada_resmi_tatil_var = {}
-
-for d in GUN_SET:
-    d_date = pd.to_datetime(d).date()
-    iso = d_date.isocalendar()
-    
-    ayni_hafta_gunleri = {
-        pd.to_datetime(g).date()
-        for g in GUN_SET
-        if pd.to_datetime(g).date().isocalendar().year == iso.year
-        and pd.to_datetime(g).date().isocalendar().week == iso.week
-    }
-    
-    haftada_resmi_tatil_var[d_date] = any(
-        g in resmi_tatil_set for g in ayni_hafta_gunleri
+# Günlük fazla atama dağılımı
+daily_excess_debug_df = (
+    coverage_check_df
+    .assign(
+        gap=lambda d: d["assigned"] - d["required"],
+        positive_gap=lambda d: (d["assigned"] - d["required"]).clip(lower=0)
     )
+    .groupby(["date", "week", "gun", "weekday", "is_weekend"], as_index=False)
+    .agg(
+        toplam_required=("required", "sum"),
+        toplam_assigned=("assigned", "sum"),
+        toplam_gap=("gap", "sum"),
+        toplam_fazla=("positive_gap", "sum"),
+        fazla_olan_vardiya_sayisi=("positive_gap", lambda x: (x > 0).sum())
+    )
+    .sort_values(["date"])
+)
+
+display(daily_excess_debug_df)
 
 
+# Haftalık fazla atama dağılımı
+weekly_excess_debug_df = (
+    daily_excess_debug_df
+    .groupby("week", as_index=False)
+    .agg(
+        plan_gun_sayisi=("date", "nunique"),
+        toplam_required=("toplam_required", "sum"),
+        toplam_assigned=("toplam_assigned", "sum"),
+        toplam_fazla=("toplam_fazla", "sum"),
+        ortalama_gunluk_fazla=("toplam_fazla", "mean"),
+        max_gunluk_fazla=("toplam_fazla", "max")
+    )
+    .sort_values("week")
+)
+
+display(weekly_excess_debug_df)
 
 
-sut_izni_mi = _b(row, "sut_izni_flg")
+# Fazla atama olan gün-vardiya detayları
+excess_shift_debug_df = (
+    coverage_check_df
+    .assign(
+        gap=lambda d: d["assigned"] - d["required"],
+        positive_gap=lambda d: (d["assigned"] - d["required"]).clip(lower=0)
+    )
+    .query("positive_gap > 0")
+    .sort_values(["date", "positive_gap"], ascending=[True, False])
+)
 
-if _b(row, "pazartesi_izinli_flg"):
-    if sut_izni_mi:
-        izin |= {
-            d for d in mondays
-            if not haftada_resmi_tatil_var.get(pd.to_datetime(d).date(), False)
-        }
-    else:
-        izin |= mondays
-
-if _b(row, "cuma_izinli_flg"):
-    if sut_izni_mi:
-        izin |= {
-            d for d in fridays
-            if not haftada_resmi_tatil_var.get(pd.to_datetime(d).date(), False)
-        }
-    else:
-        izin |= fridays
+display(excess_shift_debug_df)
 
 
-
-sut_izni_resmi_tatil_debug = []
-
-for _, row in df_tam.iterrows():
-    a = str(row["agent_user_code"]).strip()
-    sut_izni_mi = _b(row, "sut_izni_flg")
-    
-    if not sut_izni_mi:
-        continue
-    
-    if _b(row, "pazartesi_izinli_flg"):
-        for d in mondays:
-            d_date = pd.to_datetime(d).date()
-            if haftada_resmi_tatil_var.get(d_date, False):
-                sut_izni_resmi_tatil_debug.append({
-                    "agent_user_code": a,
-                    "gun": d_date,
-                    "normalde_izin_tipi": "pazartesi_izinli_flg",
-                    "haftada_resmi_tatil_var": 1,
-                    "aksiyon": "pazartesi_izni_uygulanmadi"
-                })
-    
-    if _b(row, "cuma_izinli_flg"):
-        for d in fridays:
-            d_date = pd.to_datetime(d).date()
-            if haftada_resmi_tatil_var.get(d_date, False):
-                sut_izni_resmi_tatil_debug.append({
-                    "agent_user_code": a,
-                    "gun": d_date,
-                    "normalde_izin_tipi": "cuma_izinli_flg",
-                    "haftada_resmi_tatil_var": 1,
-                    "aksiyon": "cuma_izni_uygulanmadi"
-                })
-
-df_sut_izni_resmi_tatil_debug = pd.DataFrame(sut_izni_resmi_tatil_debug)
-
-print("Süt izni resmi tatil nedeniyle uygulanmayan Pzt/Cuma izin sayısı:", len(df_sut_izni_resmi_tatil_debug))
-
-if len(df_sut_izni_resmi_tatil_debug) > 0:
-    display(df_sut_izni_resmi_tatil_debug.head(20))

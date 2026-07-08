@@ -130,6 +130,32 @@ agent_month_control_export_df = (
     },
 
 
+---------
+
+    {
+        "kontrol": "Hafta sonu 5 ve üzeri çalışan agent",
+        "deger": weekend_work_agent_df["hafta_sonu_5_ve_uzeri_mi"].sum(),
+        "beklenen": "mümkün olduğunca düşük / 0 tercih",
+    },
+    {
+        "kontrol": "Partial week sayısı",
+        "deger": len(partial_weeks) if "partial_weeks" in globals() else 0,
+        "beklenen": "ay başı/ay sonuna göre değişebilir",
+    },
+    {
+        "kontrol": "Weekly target debug partial skip satırı",
+        "deger": (
+            weekly_target_debug_export_df[
+                weekly_target_debug_export_df.get("partial_week", False) == True
+            ].shape[0]
+            if not weekly_target_debug_export_df.empty
+            and "partial_week" in weekly_target_debug_export_df.columns
+            else 0
+        ),
+        "beklenen": "partial week varsa agent sayısı kadar olabilir",
+    },
+
+
 sheet_df_map = {
     "00_Ozet": summary_df,
     "01_df_tam": df_tam.copy(),

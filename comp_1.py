@@ -1,126 +1,160 @@
-    # --------------------------------------------------
-    # GÜNLÜK FAZLA ATAMA DENGE PARAMETRELERİ
-    # --------------------------------------------------
-    # Amaç:
-    # Model fazla atamaları ayın sonundaki yarım haftaya veya tek bir güne yığmasın.
-    #
-    # Örn:
-    # Bir gün toplam fazla atama 39 ise ve DAILY_EXCESS_SOFT_LIMIT = 10 ise
-    # 29 kişilik kısım ekstra cezaya girer.
-    #
-    # Bu hard kural değildir. Gerekirse model yine fazla atama yapabilir,
-    # ama bunu tek güne yığmak pahalı hale gelir.
-    "DAILY_EXCESS_SOFT_LIMIT": 10,
-    "DAILY_EXCESS_OVER_W": 20000,
-
-
-DAILY_EXCESS_SOFT_LIMIT = CONFIG["DAILY_EXCESS_SOFT_LIMIT"]
-DAILY_EXCESS_OVER_W = CONFIG["DAILY_EXCESS_OVER_W"]
-
-
-# %% [HÜCRE] - GÜNLÜK FAZLA ATAMA DENGE DEĞİŞKENİ
+# --------------------------------------------------
+# PARTIAL WEEK FAZLA ATAMA PARAMETRELERİ
+# --------------------------------------------------
 # Amaç:
-# Model fazla atamaları tek bir güne veya ay sonundaki yarım haftaya yığmasın.
+# Ay başı / ay sonu yarım haftalarda model fazla kişileri bu günlere yığmasın.
 #
-# Mevcut durumda excess_to_required[(ds, v)] değişkeni:
-# - Her gün-vardiya için talebin üstünde kalan kişi sayısını tutuyor.
+# Örn:
+# Haziran 2026'da 2026-W27 sadece 29-30 Haziran olarak görünüyor.
+# Bu hafta aslında Temmuz ile devam ettiği için Haziran modelinde
+# bu iki güne fazla kişi yığılmamalı.
 #
-# Bu hücrede:
-# - Her gün için toplam fazla atama hesaplanır.
-# - Belirlenen günlük soft limit aşılırsa daily_excess_over değişkeni pozitif olur.
-# - Bu değişken objective içinde cezalandırılır.
+# 0 seçersek:
+# partial week günlerinde assigned <= required olur.
+#
+# Eğer model infeasible olursa 1 veya 2 denenebilir.
+"PARTIAL_WEEK_MAX_FAZLA_ATAMA": 0,
+
+
+PARTIAL_WEEK_MAX_FAZLA_ATAMA = CONFIG["PARTIAL_WEEK_MAX_FAZLA_ATAMA"]
+
+
+# %% [HÜCRE] - PARTIAL WEEK HELPER
+# Amaç:
+# Ay başı veya ay sonunda modelin sadece bir kısmını gördüğü haftaları bulmak.
 #
 # Örnek:
-# Günlük limit = 10
-# Bir gün toplam fazla atama = 39
-# daily_excess_over = 29 olur.
+# Haziran 2026:
+# 2026-W27 haftası sadece 29-30 Haziran olarak modelde var.
+# Bu yüzden partial week kabul edilir.
 #
-# Not:
-# Bu hard kural değildir. Model gerekirse yine fazla atama yapabilir.
-# Ama fazla atamayı tek güne yığmak daha pahalı hale gelir.
+# Bu haftalarda:
+# - Haftalık hedef skip edilir.
+# - Fazla atama üst limiti sıkılaştırılır.
+# - Coverage yine çalışır.
 
-daily_excess_over = {}
-daily_excess_debug_rows = []
+partial_weeks = set()
+week_normal_weekday_count = {}
 
-daily_excess_balance_constraints = 0
-
-for ds in PLAN_GUNLER:
+for wk in WEEKS:
     
-    # --------------------------------------------------
-    # 1) O günün tüm vardiyalarındaki fazla atamaları topla
-    # --------------------------------------------------
-    # excess_to_required[(ds, v)]:
-    # assigned > required ise aradaki farkı temsil eder.
-    # assigned <= required ise 0 kalır.
+    week_days_list = week_days[wk]
     
-    daily_excess_terms = [
-        excess_to_required[(ds, v)]
-        for v in gun_vardiyalari.get(ds, [])
-        if (ds, v) in excess_to_required
+    normal_weekdays_this_week = [
+        ds
+        for ds in week_days_list
+        if pd.to_datetime(ds).weekday() in [0, 1, 2, 3, 4]
     ]
     
-    # Eğer o gün için hiç vardiya yoksa devam et
-    if not daily_excess_terms:
-        continue
+    week_normal_weekday_count[wk] = len(normal_weekdays_this_week)
     
-    daily_excess_total = sum(daily_excess_terms)
-    
-    # --------------------------------------------------
-    # 2) Günlük soft limit üstü fazla atama değişkeni
-    # --------------------------------------------------
-    # daily_excess_over[ds] şu anlama gelir:
-    # O gün toplam fazla atama DAILY_EXCESS_SOFT_LIMIT değerini ne kadar aştı?
-    
-    daily_excess_over[ds] = model.NewIntVar(
-        0,
-        MAX_AGENT,
-        f"daily_excess_over_{ds}"
-    )
-    
-    model.Add(
-        daily_excess_over[ds] >= daily_excess_total - DAILY_EXCESS_SOFT_LIMIT
-    )
-    
-    daily_excess_balance_constraints += 1
-    
-    # Debug için satır tutuyoruz
-    daily_excess_debug_rows.append({
-        "date": ds,
-        "daily_excess_soft_limit": DAILY_EXCESS_SOFT_LIMIT,
-        "daily_excess_over_var": f"daily_excess_over_{ds}"
-    })
+    if len(normal_weekdays_this_week) < FULL_WEEKDAY_COUNT:
+        partial_weeks.add(wk)
 
-daily_excess_balance_debug_df = pd.DataFrame(daily_excess_debug_rows)
+print("Partial week sayısı:", len(partial_weeks))
+print("Partial weeks:", sorted(partial_weeks))
 
-print("Günlük fazla atama denge kısıtı:", daily_excess_balance_constraints)
-print("Günlük fazla atama soft limit:", DAILY_EXCESS_SOFT_LIMIT)
-print("Günlük fazla atama aşım cezası:", DAILY_EXCESS_OVER_W)
+partial_week_debug_df = pd.DataFrame([
+    {
+        "week": wk,
+        "normal_weekday_count": week_normal_weekday_count[wk],
+        "is_partial_week": wk in partial_weeks
+    }
+    for wk in WEEKS
+])
 
-display(daily_excess_balance_debug_df.head(10))
+display(partial_week_debug_df)
 
 
-# --------------------------------------------------
-# GÜNLÜK FAZLA ATAMA YIĞILMA CEZASI
-# --------------------------------------------------
+
+# %% [HÜCRE] - FAZLA ATAMA ÜST LİMİTİ
 # Amaç:
-# Fazla atamalar tek bir güne, özellikle ay sonundaki yarım haftaya yığılmasın.
+# Her gün-vardiya için talebin üstüne en fazla kaç kişi çıkılabilir?
 #
-# daily_excess_over[ds]:
-# O gün toplam fazla atamanın günlük soft limit üzerindeki kısmıdır.
-#
-# Örnek:
-# Limit = 10
-# Toplam fazla = 39
-# Ceza değişkeni = 29
-#
-# Bu değişken objective'e eklenerek model fazla atamaları mümkün olduğunca
-# ay içine daha dengeli dağıtmaya çalışır.
+# Yeni ek:
+# Partial week günlerinde fazla atama limiti sıkılaştırılır.
+# Böylece model ay sonundaki yarım haftaya fazla kişileri yığamaz.
 
-if "daily_excess_over" in globals():
-    for ds, var in daily_excess_over.items():
-        objective_terms.append(
-            DAILY_EXCESS_OVER_W * var
+fazla_atama_cap_constraints = 0
+arife_cap_relax_rows = []
+
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        
+        required = int(talep[(ds, v)])
+        
+        assigned = sum(
+            x[(a, ds, v)]
+            for a in AGENTS
+            if (a, ds, v) in x
         )
+        
+        # --------------------------------------------------
+        # Normal / partial week fazla atama limiti
+        # --------------------------------------------------
+        # Normal haftada mevcut fazla_atama_ust_limit kullanılır.
+        # Partial week'te ise limit daha sıkıdır.
+        
+        wk = day_week[ds]
+        
+        if wk in partial_weeks:
+            max_fazla = PARTIAL_WEEK_MAX_FAZLA_ATAMA
+        else:
+            max_fazla = fazla_atama_ust_limit.get((ds, v), GENEL_MAX_FAZLA_ATAMA)
+        
+        # --------------------------------------------------
+        # ARİFE ÖZEL 09-13 VARDİYASI
+        # --------------------------------------------------
+        # Arife özel vardiyasında kısıtlı agentlar zorunlu atanabildiği için
+        # max_fazla gerektiğinde esnetilir.
+        
+        if (ds, v) in arife_ozel_vardiyalar:
+            
+            forced_count = 0
+            
+            for a in tatil_kisitli_agents:
+                a = str(a).strip()
+                
+                if ds in izin_map.get(a, set()):
+                    continue
+                
+                if (a, ds, v) in x:
+                    forced_count += 1
+            
+            min_needed_extra = max(0, forced_count - required)
+            
+            if min_needed_extra > max_fazla:
+                arife_cap_relax_rows.append({
+                    "date": ds,
+                    "shift": v,
+                    "required": required,
+                    "old_max_fazla": max_fazla,
+                    "forced_count": forced_count,
+                    "new_max_fazla": min_needed_extra
+                })
+                
+                max_fazla = min_needed_extra
+        
+        # --------------------------------------------------
+        # Fazla atama üst limit constraint
+        # --------------------------------------------------
+        # assigned <= required + max_fazla
+        #
+        # Partial week için max_fazla genelde 0 olduğu için:
+        # assigned <= required olur.
+        
+        model.Add(
+            assigned <= required + max_fazla
+        )
+        
+        fazla_atama_cap_constraints += 1
 
-print("DAILY_EXCESS_SOFT_LIMIT:", DAILY_EXCESS_SOFT_LIMIT)
-print("DAILY_EXCESS_OVER_W:", DAILY_EXCESS_OVER_W)
+print("Fazla atama üst limit kısıtı:", fazla_atama_cap_constraints)
+print("Genel max fazla atama:", GENEL_MAX_FAZLA_ATAMA)
+print("Gece/akşam max fazla atama:", GECE_MAX_FAZLA_ATAMA)
+print("Partial week max fazla atama:", PARTIAL_WEEK_MAX_FAZLA_ATAMA)
+
+if arife_cap_relax_rows:
+    arife_cap_relax_df = pd.DataFrame(arife_cap_relax_rows)
+    print("Arife özel 09-13 cap esnetilen satır sayısı:", len(arife_cap_relax_df))
+    display(arife_cap_relax_df)

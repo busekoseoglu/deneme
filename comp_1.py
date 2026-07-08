@@ -1,62 +1,30 @@
-# %% [KONTROL] - AGENT AYLIK GÜN KIRILIMI KONTROLÜ
+# %% [KONTROL] - AGENT HAFTA SONU ÇALIŞMA SAYISI
 # Amaç:
-# Her agent için plan ayındaki bütün günlerin tek bir ana kategoriye düşüp düşmediğini kontrol etmek.
+# Her agent'ın plan ayı içinde kaç hafta sonu günü çalıştığını görmek.
 #
-# Ana kategori mantığı:
-# Bir agent için her gün sadece 1 ana kategoriye yazılır:
-#
-# 1) Çalıştı
-# 2) İzinli
-# 3) Resmi tatil çalışmadı
-# 4) Arife çalışmadı
-# 5) Hafta sonu off
-# 6) Normal off
-#
-# Bu ana kategorilerin toplamı AY_GUN_SAYISI etmeli.
-#
-# Ek bilgi:
-# Resmi tatilde çalıştıysa "çalıştı" ana kategorisine girer.
-# Ayrıca resmi_tatil_calisti_gun sayacı artar.
-#
-# Arifede çalıştıysa "çalıştı" ana kategorisine girer.
-# Ayrıca arife_calisti_gun sayacı artar.
-#
-# Yani resmi_tatil_calisti_gun ve arife_calisti_gun toplam hesaba ayrıca eklenmez.
-# Bunlar bilgi kolonudur.
+# Mantık:
+# - PLAN_GUNLER içinden Cumartesi/Pazar günleri alınır.
+# - work[(agent, gün)] solver sonucunda 1 ise agent o hafta sonu günü çalışmıştır.
+# - Agent bazında toplam hafta sonu çalışma günü hesaplanır.
+# - Sonra "kaç kişi 0 gün, kaç kişi 1 gün, kaç kişi 5 gün..." şeklinde dağılım çıkarılır.
 
-agent_month_control_rows = []
+weekend_work_rows = []
 
 # --------------------------------------------------
-# 1) Plan ayındaki gün sayısı
+# 1) Plan ayındaki hafta sonu günleri
 # --------------------------------------------------
-# Date aralığı üretmiyoruz.
-# Model hangi günleri planladıysa onu kullanıyoruz.
 
-AY_GUN_SAYISI = len(PLAN_GUNLER)
+weekend_days = [
+    ds
+    for ds in PLAN_GUNLER
+    if pd.to_datetime(ds).weekday() in [5, 6]
+]
 
-# --------------------------------------------------
-# 2) Resmi tatil ve arife gün setleri
-# --------------------------------------------------
-# CONFIG içindeki tarihleri date formatına çeviriyoruz.
-# PLAN_GUNLER zaten modelin planladığı günleri temsil ediyor.
-
-resmi_tatil_set = set()
-arife_set = set()
-
-if "RESMI_TATIL_GUNLERI" in globals():
-    resmi_tatil_set = set(
-        pd.to_datetime(d).date()
-        for d in RESMI_TATIL_GUNLERI
-    )
-
-if "ARIFE_GUNLERI" in globals():
-    arife_set = set(
-        pd.to_datetime(d).date()
-        for d in ARIFE_GUNLERI
-    )
+print("Plan ayındaki hafta sonu günleri:", weekend_days)
+print("Hafta sonu gün sayısı:", len(weekend_days))
 
 # --------------------------------------------------
-# 3) Agent bazlı gün kırılımı
+# 2) Agent bazında hafta sonu çalışma sayısı
 # --------------------------------------------------
 
 for _, row in df_tam.iterrows():
@@ -68,178 +36,76 @@ for _, row in df_tam.iterrows():
     working_main_group = row.get("working_main_group", None)
     line_based_main_group = row.get("line_based_main_group", None)
 
-    # Ana gün kategorileri
-    calistigi_gun = 0
-    izinli_gun = 0
-    resmi_tatil_calismadi_gun = 0
-    arife_calismadi_gun = 0
+    hafta_sonu_calistigi_gun = 0
     hafta_sonu_off_gun = 0
-    normal_off_gun = 0
 
-    # Ek bilgi kolonları
-    resmi_tatil_calisti_gun = 0
-    arife_calisti_gun = 0
+    worked_weekend_dates = []
+    off_weekend_dates = []
 
-    # Debug için hangi gün hangi kategoriye düştü görmek istersek
-    gun_detaylari = []
-
-    for ds in PLAN_GUNLER:
-
-        ds_date = pd.to_datetime(ds).date()
-        weekday = pd.to_datetime(ds).weekday()
-
-        is_weekend = weekday in [5, 6]
-        is_resmi_tatil = ds_date in resmi_tatil_set
-        is_arife = ds_date in arife_set
-
-        # --------------------------------------------------
-        # Agent o gün çalıştı mı?
-        # --------------------------------------------------
-        # work[(a, ds)] varsa solver sonucundan bakıyoruz.
-        # Yoksa 0 kabul ediyoruz.
+    for ds in weekend_days:
 
         worked = 0
 
         if (a, ds) in work:
             worked = int(solver.Value(work[(a, ds)]))
 
-        # --------------------------------------------------
-        # Agent o gün izinli mi?
-        # --------------------------------------------------
-        # Öncelik agent_izinli_mi helper'ında.
-        # Çünkü bu helper hem izin_map format farklarını hem de set/list/string
-        # gibi durumları daha sağlam yönetiyor.
-        #
-        # Eğer helper yoksa direkt izin_map üzerinden kontrol ediyoruz.
-
-        if "agent_izinli_mi" in globals():
-            izinli = bool(agent_izinli_mi(a, ds))
-        else:
-            izinli = ds in izin_map.get(a, set())
-
-        # --------------------------------------------------
-        # Gün kategorisi
-        # --------------------------------------------------
-        # Öncelik sırası önemli:
-        #
-        # 1) Çalıştıysa ana kategori "çalıştı"
-        # 2) Çalışmadıysa ve izinliyse "izinli"
-        # 3) Çalışmadıysa ve resmi tatilse "resmi tatil çalışmadı"
-        # 4) Çalışmadıysa ve arifeyse "arife çalışmadı"
-        # 5) Çalışmadıysa ve hafta sonuysa "hafta sonu off"
-        # 6) Kalan çalışılmayan günler "normal off"
-
         if worked == 1:
-
-            calistigi_gun += 1
-            ana_kategori = "calisti"
-
-            if is_resmi_tatil:
-                resmi_tatil_calisti_gun += 1
-
-            if is_arife:
-                arife_calisti_gun += 1
-
+            hafta_sonu_calistigi_gun += 1
+            worked_weekend_dates.append(ds)
         else:
+            hafta_sonu_off_gun += 1
+            off_weekend_dates.append(ds)
 
-            if izinli:
-                izinli_gun += 1
-                ana_kategori = "izinli"
-
-            elif is_resmi_tatil:
-                resmi_tatil_calismadi_gun += 1
-                ana_kategori = "resmi_tatil_calismadi"
-
-            elif is_arife:
-                arife_calismadi_gun += 1
-                ana_kategori = "arife_calismadi"
-
-            elif is_weekend:
-                hafta_sonu_off_gun += 1
-                ana_kategori = "hafta_sonu_off"
-
-            else:
-                normal_off_gun += 1
-                ana_kategori = "normal_off"
-
-        gun_detaylari.append({
-            "agent_user_code": a,
-            "date": ds,
-            "weekday": weekday,
-            "worked": worked,
-            "izinli": izinli,
-            "is_resmi_tatil": is_resmi_tatil,
-            "is_arife": is_arife,
-            "is_weekend": is_weekend,
-            "ana_kategori": ana_kategori
-        })
-
-    # --------------------------------------------------
-    # 4) Toplam kontrol
-    # --------------------------------------------------
-    # Ek bilgi kolonları toplam hesaba eklenmez.
-    # Çünkü resmi tatilde/arifede çalıştıysa zaten calistigi_gun içinde sayıldı.
-
-    toplam_aciklanan_gun = (
-        calistigi_gun
-        + izinli_gun
-        + resmi_tatil_calismadi_gun
-        + arife_calismadi_gun
-        + hafta_sonu_off_gun
-        + normal_off_gun
-    )
-
-    kontrol_farki = AY_GUN_SAYISI - toplam_aciklanan_gun
-
-    agent_month_control_rows.append({
+    weekend_work_rows.append({
         "agent_user_code": a,
         "agent_name": agent_name,
         "teamleader_name": teamleader_name,
         "working_main_group": working_main_group,
         "line_based_main_group": line_based_main_group,
-
-        "ay_gun_sayisi": AY_GUN_SAYISI,
-
-        # Ana gün kırılımı
-        "calistigi_gun": calistigi_gun,
-        "izinli_gun": izinli_gun,
-        "resmi_tatil_calismadi_gun": resmi_tatil_calismadi_gun,
-        "arife_calismadi_gun": arife_calismadi_gun,
+        "hafta_sonu_toplam_gun": len(weekend_days),
+        "hafta_sonu_calistigi_gun": hafta_sonu_calistigi_gun,
         "hafta_sonu_off_gun": hafta_sonu_off_gun,
-        "normal_off_gun": normal_off_gun,
-
-        # Ek bilgi
-        "resmi_tatil_calisti_gun": resmi_tatil_calisti_gun,
-        "arife_calisti_gun": arife_calisti_gun,
-
-        # Kontrol
-        "toplam_aciklanan_gun": toplam_aciklanan_gun,
-        "kontrol_farki": kontrol_farki,
-        "kontrol_ok": toplam_aciklanan_gun == AY_GUN_SAYISI
+        "hafta_sonu_calistigi_tarihler": worked_weekend_dates,
+        "hafta_sonu_off_tarihler": off_weekend_dates
     })
 
-agent_month_control_df = pd.DataFrame(agent_month_control_rows)
+weekend_work_agent_df = pd.DataFrame(weekend_work_rows)
 
-print("Agent aylık gün kontrolü oluşturuldu.")
-print("Ay gün sayısı:", AY_GUN_SAYISI)
-print("Agent sayısı:", len(agent_month_control_df))
-print("Kontrol hatalı agent sayısı:", (~agent_month_control_df["kontrol_ok"]).sum())
+print("Agent hafta sonu çalışma kontrolü oluşturuldu.")
+print("Agent sayısı:", len(weekend_work_agent_df))
 
 display(
-    agent_month_control_df
-    .sort_values(["kontrol_ok", "agent_user_code"])
-    .head(20)
+    weekend_work_agent_df
+    .sort_values(["hafta_sonu_calistigi_gun", "agent_user_code"], ascending=[False, True])
+    .head(30)
 )
 
-# --------------------------------------------------
-# 5) Hatalı agentlar
-# --------------------------------------------------
 
-agent_month_control_error_df = (
-    agent_month_control_df[
-        agent_month_control_df["kontrol_ok"] == False
+
+# %% [KONTROL] - 5 HAFTA SONU GÜNÜ ÇALIŞAN AGENTLAR
+
+display(
+    weekend_work_agent_df[
+        weekend_work_agent_df["hafta_sonu_calistigi_gun"] == 5
     ]
-    .sort_values(["kontrol_farki", "agent_user_code"])
+    .sort_values(["teamleader_name", "agent_user_code"])
 )
 
-display(agent_month_control_error_df)
+
+# %% [KONTROL] - HAFTA SONU ÇALIŞMA LİMİT İHLALİ
+# Mevcut iş kuralı:
+# 4 güne kadar sorun yok.
+# 5 ve üzeri hafta sonu çalışma ceza/ihlal gibi değerlendiriliyor.
+
+HAFTA_SONU_LIMIT = 4
+
+weekend_work_violation_df = (
+    weekend_work_agent_df[
+        weekend_work_agent_df["hafta_sonu_calistigi_gun"] > HAFTA_SONU_LIMIT
+    ]
+    .sort_values(["hafta_sonu_calistigi_gun", "agent_user_code"], ascending=[False, True])
+)
+
+print("Hafta sonu çalışma limitini aşan agent sayısı:", len(weekend_work_violation_df))
+
+display(weekend_work_violation_df)

@@ -1,308 +1,529 @@
-# %% [KONTROL] - PARTIAL END HAMİLE/SÜT KURALI SONUÇ KONTROLÜ
-# Amaç:
-# partial_end hafta içi günlerde çalışmaya zorlanan hamile/süt izni agentlar
-# gerçekten çalışmış mı ve hangi vardiyaya atanmış görmek.
+# %% [KISIT] - HAFTALIK ÇALIŞMA + NORMAL MESAİ - HARD TARGET
+# Mantık:
+# - Agent haftalık hedefin altında da kalamaz, üstüne de çıkamaz.
+# - weekly_under / weekly_over artık yok.
+# - Haftalık çalışma hedefi hard eşitlik olarak kurulur.
 #
-# Beklenen:
-# - kontrol_ok = True
-# - worked = 1
-# - assigned_shift dolu
-# - shift_start / shift_end dolu olmalı.
+# Normal haftalık hedef:
+# NORMAL_WORK_DAYS
+# - resmi tatil gün sayısı
+# - izin gün sayısı
 #
-# Not:
-# shift_start / shift_end None gelirse bu genelde model hatası değil,
-# saat dict'indeki date formatı ile kontrol kodundaki date formatı uyuşmadığı içindir.
-# Bu kontrol kodu onu daha sağlam yakalar.
+# Resmi tatil günleri normal haftalık hedefe dahil değildir.
+# Resmi tatilde çalışma ayrıca takip edilir.
+#
+# Partial week'lerde haftalık hedef kurulmaz.
+# Çünkü model haftanın tamamını görmez.
+#
+# İzinli haftada normal mesai verilmez.
+# Çünkü izin aldıysa hedef düşer ve bu hedef tekrar overtime ile yukarı çekilmemelidir.
 
 # --------------------------------------------------
-# 0) Yardımcı fonksiyonlar
+# 0) MESAIYE KALAMAZ AGENT SETİ
 # --------------------------------------------------
 
-def _to_date_str(ds):
-    return pd.to_datetime(ds).strftime("%Y-%m-%d")
-
-
-def _find_plan_day_by_str(ds_str):
-    for d in PLAN_GUNLER:
-        if _to_date_str(d) == ds_str:
-            return d
-    return None
-
-
-def _safe_solver_value(var, default=0):
-    try:
-        return int(solver.Value(var))
-    except Exception:
-        return default
-
-
-def get_shift_time_for_control(ds_obj, ds_str, v, agent_user_code=None):
-    """
-    Vardiya saatini birkaç farklı kaynaktan sağlam şekilde bulur.
-
-    Öncelik:
-    1) saat dict
-    2) vardiya_talep_df
-    3) coverage_simple_df
-    4) agent_day_plan_df
-    """
-
-    v = str(v).strip() if v is not None else v
-
-    # -------------------------------
-    # 1) saat dict üzerinden dene
-    # -------------------------------
-    if "saat" in globals() and isinstance(saat, dict):
-
-        ds_ts = pd.to_datetime(ds_str)
-        ds_date = ds_ts.date()
-
-        possible_ds_keys = [
-            ds_obj,
-            ds_str,
-            ds_date,
-            ds_ts,
-        ]
-
-        possible_v_keys = [
-            v,
-            str(v).strip() if v is not None else v,
-        ]
-
-        for d_key in possible_ds_keys:
-            for v_key in possible_v_keys:
-                key = (d_key, v_key)
-
-                if key in saat:
-                    val = saat[key]
-
-                    if isinstance(val, (list, tuple)) and len(val) >= 2:
-                        return val[0], val[1], "saat_dict"
-
-    # -------------------------------
-    # 2) vardiya_talep_df üzerinden dene
-    # -------------------------------
-    if "vardiya_talep_df" in globals() and isinstance(vardiya_talep_df, pd.DataFrame):
-        if {"date", "shift", "shift_start", "shift_end"}.issubset(vardiya_talep_df.columns):
-
-            tmp = vardiya_talep_df[
-                (vardiya_talep_df["date"].astype(str) == ds_str) &
-                (vardiya_talep_df["shift"].astype(str).str.strip() == str(v).strip())
-            ]
-
-            if len(tmp) > 0:
-                return (
-                    tmp["shift_start"].iloc[0],
-                    tmp["shift_end"].iloc[0],
-                    "vardiya_talep_df"
-                )
-
-    # -------------------------------
-    # 3) coverage_simple_df üzerinden dene
-    # -------------------------------
-    if "coverage_simple_df" in globals() and isinstance(coverage_simple_df, pd.DataFrame):
-        if {"date", "shift", "shift_start", "shift_end"}.issubset(coverage_simple_df.columns):
-
-            tmp = coverage_simple_df[
-                (coverage_simple_df["date"].astype(str) == ds_str) &
-                (coverage_simple_df["shift"].astype(str).str.strip() == str(v).strip())
-            ]
-
-            if len(tmp) > 0:
-                return (
-                    tmp["shift_start"].iloc[0],
-                    tmp["shift_end"].iloc[0],
-                    "coverage_simple_df"
-                )
-
-    # -------------------------------
-    # 4) agent_day_plan_df üzerinden dene
-    # -------------------------------
-    if "agent_day_plan_df" in globals() and isinstance(agent_day_plan_df, pd.DataFrame):
-        needed_cols = {
-            "agent_user_code",
-            "date",
-            "assigned_shift",
-            "shift_start",
-            "shift_end"
-        }
-
-        if needed_cols.issubset(agent_day_plan_df.columns) and agent_user_code is not None:
-
-            tmp = agent_day_plan_df[
-                (agent_day_plan_df["agent_user_code"].astype(str).str.strip() == str(agent_user_code).strip()) &
-                (agent_day_plan_df["date"].astype(str) == ds_str) &
-                (agent_day_plan_df["assigned_shift"].astype(str).str.strip() == str(v).strip())
-            ]
-
-            if len(tmp) > 0:
-                return (
-                    tmp["shift_start"].iloc[0],
-                    tmp["shift_end"].iloc[0],
-                    "agent_day_plan_df"
-                )
-
-    return None, None, "bulunamadi"
-
+mesaiye_kalamaz_agents = set(
+    df_tam[
+        pd.to_numeric(
+            df_tam["mesaiye_kalamaz_flg"],
+            errors="coerce"
+        )
+        .fillna(0)
+        .astype(int) == 1
+    ]["agent_user_code"]
+    .astype(str)
+    .str.strip()
+)
 
 # --------------------------------------------------
-# 1) Debug dataframe var mı kontrol et
+# 1) RESMİ TATİL GÜNLERİNİ PLAN_GUNLER FORMATINDA AL
 # --------------------------------------------------
 
-if (
-    "partial_end_hamile_sut_work_debug_df" not in globals()
-    or not isinstance(partial_end_hamile_sut_work_debug_df, pd.DataFrame)
-    or partial_end_hamile_sut_work_debug_df.empty
-):
-    raise ValueError(
-        "partial_end_hamile_sut_work_debug_df bulunamadı veya boş. "
-        "Önce constraint hücresini solve'dan önce çalıştırmalısın."
-    )
+resmi_tatil_gunleri_for_weekly = set()
 
+if "resmi_tatil_plan_gunleri" in globals():
+    resmi_tatil_gunleri_for_weekly = set(resmi_tatil_plan_gunleri)
 
-# --------------------------------------------------
-# 2) Sadece constraint_added=True olan satırları kontrol et
-# --------------------------------------------------
+else:
+    if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
+        if "RESMI_TATIL_GUNLERI" in globals():
 
-partial_end_hamile_sut_result_rows = []
-
-forced_rows = partial_end_hamile_sut_work_debug_df[
-    partial_end_hamile_sut_work_debug_df["constraint_added"] == True
-].copy()
-
-for _, r in forced_rows.iterrows():
-
-    a = str(r["agent_user_code"]).strip()
-    ds_str = str(r["date"])
-    wk = r["week"]
-
-    ds_obj = _find_plan_day_by_str(ds_str)
-
-    if ds_obj is None:
-        partial_end_hamile_sut_result_rows.append({
-            "agent_user_code": a,
-            "date": ds_str,
-            "week": wk,
-            "worked": None,
-            "assigned_shift": None,
-            "shift_start": None,
-            "shift_end": None,
-            "shift_time_source": None,
-            "kontrol_ok": False,
-            "saat_ok": False,
-            "problem": "PLAN_GUNLER içinde tarih bulunamadı"
-        })
-        continue
-
-    # --------------------------------------------------
-    # 2.1) work sonucu
-    # --------------------------------------------------
-
-    worked = 0
-
-    if (a, ds_obj) in work:
-        worked = _safe_solver_value(work[(a, ds_obj)])
-    else:
-        worked = 0
-
-    # --------------------------------------------------
-    # 2.2) Atanan vardiyayı bul
-    # --------------------------------------------------
-
-    assigned_shift = None
-    shift_start = None
-    shift_end = None
-    shift_time_source = None
-
-    for v in gun_vardiyalari.get(ds_obj, []):
-
-        if (a, ds_obj, v) not in x:
-            continue
-
-        if _safe_solver_value(x[(a, ds_obj, v)]) == 1:
-            assigned_shift = v
-
-            shift_start, shift_end, shift_time_source = get_shift_time_for_control(
-                ds_obj=ds_obj,
-                ds_str=ds_str,
-                v=v,
-                agent_user_code=a
+            resmi_tatil_key_set = set(
+                pd.to_datetime(d).strftime("%Y-%m-%d")
+                for d in RESMI_TATIL_GUNLERI
             )
 
-            break
+            for ds in PLAN_GUNLER:
+                ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
 
-    kontrol_ok = (
-        worked == 1
-        and assigned_shift is not None
+                if ds_key in resmi_tatil_key_set:
+                    resmi_tatil_gunleri_for_weekly.add(ds)
+
+print(
+    "Normal haftalık çalışmadan ayrı tutulacak resmi tatil günleri:",
+    resmi_tatil_gunleri_for_weekly
+)
+
+# --------------------------------------------------
+# 2) PARTIAL WEEK DEFAULT KONTROLLERİ
+# --------------------------------------------------
+
+if "SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS" not in globals():
+    SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS = True
+
+if "partial_weeks" not in globals():
+    partial_weeks = set()
+
+if "partial_end_weeks" not in globals():
+    partial_end_weeks = set()
+
+# --------------------------------------------------
+# 3) KISIT SAYAÇLARI VE SÖZLÜKLER
+# --------------------------------------------------
+
+weekly_work_constraints = 0
+weekly_overtime_block_constraints = 0
+leave_week_overtime_block_constraints = 0
+monthly_overtime_constraints = 0
+partial_week_skip_constraints = 0
+resmi_tatil_work_week_constraints = 0
+
+# DİKKAT:
+# weekly_under / weekly_over artık kullanılmıyor.
+# Ama eski objective / summary hücreleri patlamasın diye boş dict bırakıyoruz.
+weekly_under = {}
+weekly_over = {}
+
+# Resmi tatil çalışmasını ayrı takip etmek için kalıyor.
+resmi_tatil_work_week = {}
+
+weekly_target_debug_rows = []
+
+# --------------------------------------------------
+# 4) HAFTALIK NORMAL ÇALIŞMA HEDEFİ - HARD
+# --------------------------------------------------
+
+for a in AGENTS:
+
+    a = str(a).strip()
+
+    for wk in WEEKS:
+
+        week_days_list = week_days[wk]
+        wk_str = str(wk).strip()
+
+        # --------------------------------------------------
+        # 4.1) PARTIAL WEEK KONTROLÜ
+        # --------------------------------------------------
+        # Partial week'lerde haftalık hedef kurulmaz.
+        # Çünkü model haftanın tamamını görmez.
+        #
+        # Örnek:
+        # Haziran 2026 W27 sadece 29-30 Haziran'dır.
+        # Bu hafta Temmuz ile tamamlanacağı için Haziran modelinde
+        # weekly target kurulmaz.
+        #
+        # Bu haftada normal mesai de kapatılır:
+        # overtime_week = 0
+
+        if "week_boundary_df" in globals():
+            wk_boundary_row = week_boundary_df[
+                week_boundary_df["week"].astype(str).str.strip() == wk_str
+            ]
+
+            wk_is_partial = (
+                len(wk_boundary_row) > 0
+                and bool(wk_boundary_row["is_partial_week"].iloc[0])
+            )
+
+            wk_partial_type = (
+                wk_boundary_row["partial_type"].iloc[0]
+                if len(wk_boundary_row) > 0
+                else None
+            )
+
+        else:
+            wk_is_partial = wk in partial_weeks
+            wk_partial_type = "partial_week" if wk_is_partial else "full_week"
+
+        if SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS and wk_is_partial:
+
+            if (a, wk) in overtime_week:
+                model.Add(overtime_week[(a, wk)] == 0)
+                partial_week_skip_constraints += 1
+
+            weekly_target_debug_rows.append({
+                "agent_user_code": a,
+                "week": wk,
+                "normal_target": None,
+                "normal_work_var_count": None,
+                "resmi_tatil_work_var_count": None,
+                "izin_normal_count": None,
+                "resmi_tatil_count": None,
+                "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
+                "partial_week": True,
+                "partial_type": wk_partial_type,
+                "partial_week_reason": "weekly_target_skip",
+                "hard_weekly_target": False,
+                "overtime_forced_zero_reason": "partial_week"
+            })
+
+            continue
+
+        # --------------------------------------------------
+        # 4.2) OVERTIME WEEK DEĞİŞKENİ VAR MI?
+        # --------------------------------------------------
+
+        if (a, wk) not in overtime_week:
+            continue
+
+        # --------------------------------------------------
+        # 4.3) BU HAFTANIN RESMİ TATİL GÜNLERİ
+        # --------------------------------------------------
+
+        resmi_tatil_days_this_week = set(
+            ds
+            for ds in week_days_list
+            if ds in resmi_tatil_gunleri_for_weekly
+        )
+
+        # --------------------------------------------------
+        # 4.4) BU HAFTANIN İZİN GÜNLERİ
+        # --------------------------------------------------
+        # Burada hafta sonu izni de sayılır.
+        #
+        # Örnek:
+        # Agent Cumartesi-Pazar izin aldıysa:
+        # izin_normal_count = 2
+        # normal_target = 5 - 2 = 3
+        #
+        # Böylece bu agent hafta içinde 5 gün çalışamaz.
+        # Tam 3 normal gün çalışmak zorunda kalır.
+
+        izin_days_this_week = set(
+            ds
+            for ds in week_days_list
+            if agent_izinli_mi(a, ds)
+        )
+
+        # Resmi tatil günleri normal hedeften ayrıca düşüldüğü için,
+        # resmi tatilde izin varsa iki kere düşmemesi adına çıkarıyoruz.
+
+        izin_normal_days_this_week = (
+            izin_days_this_week
+            - resmi_tatil_days_this_week
+        )
+
+        # --------------------------------------------------
+        # 4.5) NORMAL GÜNLERDEKİ WORK DEĞİŞKENLERİ
+        # --------------------------------------------------
+        # Resmi tatil günleri burada yok.
+        # Yani resmi tatil çalışması haftalık normal çalışma hedefine girmez.
+
+        normal_work_vars = [
+            work[(a, ds)]
+            for ds in week_days_list
+            if (a, ds) in work
+            and ds not in resmi_tatil_days_this_week
+        ]
+
+        if not normal_work_vars:
+
+            weekly_target_debug_rows.append({
+                "agent_user_code": a,
+                "week": wk,
+                "normal_target": None,
+                "normal_work_var_count": 0,
+                "resmi_tatil_work_var_count": None,
+                "izin_normal_count": len(izin_normal_days_this_week),
+                "resmi_tatil_count": len(resmi_tatil_days_this_week),
+                "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
+                "partial_week": False,
+                "partial_type": wk_partial_type,
+                "partial_week_reason": "normal_work_var_yok",
+                "hard_weekly_target": False,
+                "overtime_forced_zero_reason": None
+            })
+
+            continue
+
+        # --------------------------------------------------
+        # 4.6) RESMİ TATİL WORK DEĞİŞKENLERİ
+        # --------------------------------------------------
+        # Resmi tatilde çalışılan günler ayrı takip edilir.
+        # Bunlar normal weekly target içine girmez.
+
+        resmi_tatil_work_vars = [
+            work[(a, ds)]
+            for ds in week_days_list
+            if (a, ds) in work
+            and ds in resmi_tatil_days_this_week
+        ]
+
+        if resmi_tatil_work_vars:
+
+            resmi_tatil_work_week[(a, wk)] = model.NewIntVar(
+                0,
+                len(resmi_tatil_work_vars),
+                f"resmi_tatil_work_week_{a}_{wk}"
+            )
+
+            model.Add(
+                resmi_tatil_work_week[(a, wk)]
+                == sum(resmi_tatil_work_vars)
+            )
+
+            resmi_tatil_work_week_constraints += 1
+
+        # --------------------------------------------------
+        # 4.7) NORMAL HAFTALIK HEDEF
+        # --------------------------------------------------
+
+        normal_target = NORMAL_WORK_DAYS
+        normal_target -= len(resmi_tatil_days_this_week)
+        normal_target -= len(izin_normal_days_this_week)
+
+        normal_target = max(0, normal_target)
+        normal_target = min(normal_target, len(normal_work_vars))
+
+        # --------------------------------------------------
+        # 4.8) İZİNLİ HAFTADA NORMAL MESAİ KAPAT
+        # --------------------------------------------------
+        # Agent o hafta izin aldıysa, haftalık hedef zaten düşer.
+        # Bu hedef overtime ile tekrar yukarı çekilmemeli.
+        #
+        # Örnek:
+        # Cumartesi-Pazar izin aldıysa:
+        # normal_target = 3
+        #
+        # overtime_week = 1 olursa 4 gün çalışabilir.
+        # Bu istenmiyor.
+        #
+        # Bu yüzden izinli haftada overtime_week = 0.
+
+        overtime_forced_zero_reason = None
+
+        if len(izin_normal_days_this_week) > 0:
+            model.Add(overtime_week[(a, wk)] == 0)
+            leave_week_overtime_block_constraints += 1
+            overtime_forced_zero_reason = "izinli_hafta"
+
+        # --------------------------------------------------
+        # 4.9) MESAİYE KALAMAZ AGENT NORMAL MESAİ ALAMAZ
+        # --------------------------------------------------
+
+        if a in mesaiye_kalamaz_agents:
+            model.Add(overtime_week[(a, wk)] == 0)
+            weekly_overtime_block_constraints += 1
+
+            if overtime_forced_zero_reason is None:
+                overtime_forced_zero_reason = "mesaiye_kalamaz"
+            else:
+                overtime_forced_zero_reason += "+mesaiye_kalamaz"
+
+        # --------------------------------------------------
+        # 4.10) HAFTALIK NORMAL ÇALIŞMA EŞİTLİĞİ - HARD
+        # --------------------------------------------------
+        # DİKKAT:
+        # Artık weekly_under / weekly_over yok.
+        #
+        # Agent haftalık hedefin altında da kalamaz, üstüne de çıkamaz.
+        #
+        # Eğer overtime_week = 0 ise:
+        # sum(normal_work_vars) == normal_target
+        #
+        # Eğer overtime_week = 1 ise:
+        # sum(normal_work_vars) == normal_target + 1
+
+        model.Add(
+            sum(normal_work_vars)
+            ==
+            normal_target + overtime_week[(a, wk)]
+        )
+
+        weekly_work_constraints += 1
+
+        # --------------------------------------------------
+        # 4.11) DEBUG SATIRI
+        # --------------------------------------------------
+
+        weekly_target_debug_rows.append({
+            "agent_user_code": a,
+            "week": wk,
+            "normal_target": normal_target,
+            "normal_work_var_count": len(normal_work_vars),
+            "resmi_tatil_work_var_count": len(resmi_tatil_work_vars),
+            "izin_normal_count": len(izin_normal_days_this_week),
+            "resmi_tatil_count": len(resmi_tatil_days_this_week),
+            "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
+            "partial_week": False,
+            "partial_type": wk_partial_type,
+            "partial_week_reason": None,
+            "hard_weekly_target": True,
+            "overtime_forced_zero_reason": overtime_forced_zero_reason
+        })
+
+# --------------------------------------------------
+# 5) AYDA MAX NORMAL MESAİ HARD KURALI
+# --------------------------------------------------
+# Resmi tatil mesaisi bu limite dahil değildir.
+# Sadece overtime_week değişkenleri sayılır.
+#
+# Partial week'lerde overtime_week yukarıda 0'a sabitlendiği için
+# ay sınırı haftaları normal mesai limitini tüketmez.
+
+for a in AGENTS:
+
+    a = str(a).strip()
+
+    model.Add(
+        sum(
+            overtime_week[(a, wk)]
+            for wk in WEEKS
+            if (a, wk) in overtime_week
+        )
+        <= MAX_OVERTIME_PER_MONTH
     )
 
-    saat_ok = (
-        shift_start is not None
-        and shift_end is not None
-    )
+    monthly_overtime_constraints += 1
 
-    if not kontrol_ok:
-        problem = "Çalışması zorlandı ama worked=1 veya assigned_shift bulunamadı"
-    elif not saat_ok:
-        problem = "Atama doğru; sadece vardiya saati bulunamadı"
-    else:
-        problem = None
+# --------------------------------------------------
+# 6) DEBUG DATAFRAME
+# --------------------------------------------------
 
-    partial_end_hamile_sut_result_rows.append({
-        "agent_user_code": a,
-        "date": ds_str,
-        "week": wk,
-        "worked": worked,
-        "assigned_shift": assigned_shift,
-        "shift_start": shift_start,
-        "shift_end": shift_end,
-        "shift_time_source": shift_time_source,
-        "kontrol_ok": kontrol_ok,
-        "saat_ok": saat_ok,
-        "problem": problem
-    })
+weekly_target_debug_df = pd.DataFrame(weekly_target_debug_rows)
 
+print("Haftalık hard çalışma kısıtı:", weekly_work_constraints)
+print("Mesaiye kalamaz overtime kapatma kısıtı:", weekly_overtime_block_constraints)
+print("İzinli haftada overtime kapatma kısıtı:", leave_week_overtime_block_constraints)
+print("Partial week skip/overtime kapatma kısıtı:", partial_week_skip_constraints)
+print("Aylık max normal mesai kısıtı:", monthly_overtime_constraints)
+print("Resmi tatil work week takip kısıtı:", resmi_tatil_work_week_constraints)
+print("weekly_under değişken sayısı:", len(weekly_under))
+print("weekly_over değişken sayısı:", len(weekly_over))
+print("resmi_tatil_work_week değişken sayısı:", len(resmi_tatil_work_week))
 
-partial_end_hamile_sut_result_df = pd.DataFrame(
-    partial_end_hamile_sut_result_rows
+print("Partial week kontrol özeti:")
+display(
+    weekly_target_debug_df[
+        weekly_target_debug_df["partial_week"] == True
+    ]
+    .sort_values(["week", "agent_user_code"])
+    .head(20)
+)
+
+print("Resmi tatil haftası hedef kontrolü:")
+display(
+    weekly_target_debug_df[
+        pd.to_numeric(
+            weekly_target_debug_df["resmi_tatil_count"],
+            errors="coerce"
+        ).fillna(0) > 0
+    ]
+    .sort_values(["week", "agent_user_code"])
+    .head(10)
+)
+
+print("İzinli hafta hedef kontrolü:")
+display(
+    weekly_target_debug_df[
+        pd.to_numeric(
+            weekly_target_debug_df["izin_normal_count"],
+            errors="coerce"
+        ).fillna(0) > 0
+    ]
+    .sort_values(["week", "agent_user_code"])
+    .head(20)
 )
 
 
-# --------------------------------------------------
-# 3) Özet çıktılar
-# --------------------------------------------------
 
-print("Partial end hamile/süt kontrol edilen satır sayısı:", len(partial_end_hamile_sut_result_df))
+# %% [KONTROL] - HAFTALIK HARD TARGET SONUÇ KONTROLÜ
+# Amaç:
+# weekly_under / weekly_over kaldırıldıktan sonra
+# her agent-week için gerçek çalışma sayısı hedefe eşit mi kontrol etmek.
 
-if len(partial_end_hamile_sut_result_df) > 0:
+weekly_hard_target_result_rows = []
 
-    print(
-        "Kural ihlal sayısı:",
-        (partial_end_hamile_sut_result_df["kontrol_ok"] == False).sum()
+for _, r in weekly_target_debug_df.iterrows():
+
+    if bool(r.get("partial_week", False)) == True:
+        continue
+
+    if bool(r.get("hard_weekly_target", False)) != True:
+        continue
+
+    a = str(r["agent_user_code"]).strip()
+    wk = str(r["week"]).strip()
+
+    week_days_list = week_days[wk]
+
+    resmi_tatil_days_this_week = set(
+        ds
+        for ds in week_days_list
+        if ds in resmi_tatil_gunleri_for_weekly
     )
 
-    print(
-        "Saat bilgisi eksik satır sayısı:",
-        (partial_end_hamile_sut_result_df["saat_ok"] == False).sum()
+    normal_worked = sum(
+        int(solver.Value(work[(a, ds)]))
+        for ds in week_days_list
+        if (a, ds) in work
+        and ds not in resmi_tatil_days_this_week
     )
 
-    print("\nKontrol dağılımı:")
-    display(
-        partial_end_hamile_sut_result_df[
-            ["kontrol_ok", "saat_ok"]
-        ]
-        .value_counts()
-        .reset_index(name="satir_sayisi")
+    overtime_val = (
+        int(solver.Value(overtime_week[(a, wk)]))
+        if (a, wk) in overtime_week
+        else 0
     )
 
-    print("\nDetay:")
-    display(
-        partial_end_hamile_sut_result_df
-        .sort_values(
-            ["kontrol_ok", "saat_ok", "date", "agent_user_code"],
-            ascending=[True, True, True, True]
+    normal_target = int(r["normal_target"])
+    expected_work = normal_target + overtime_val
+
+    izin_normal_count = int(
+        pd.to_numeric(
+            r.get("izin_normal_count", 0),
+            errors="coerce"
         )
     )
 
-else:
-    print("Bu ay için partial_end hamile/süt constraint_added=True satırı yok.")
+    weekly_hard_target_result_rows.append({
+        "agent_user_code": a,
+        "week": wk,
+        "normal_target": normal_target,
+        "overtime_week": overtime_val,
+        "expected_work": expected_work,
+        "actual_normal_worked": normal_worked,
+        "izin_normal_count": izin_normal_count,
+        "overtime_forced_zero_reason": r.get("overtime_forced_zero_reason"),
+        "target_ok": normal_worked == expected_work,
+        "izinli_haftada_overtime_ok": (
+            overtime_val == 0
+            if izin_normal_count > 0
+            else True
+        )
+    })
+
+weekly_hard_target_result_df = pd.DataFrame(weekly_hard_target_result_rows)
+
+print(
+    "Haftalık hard target ihlal sayısı:",
+    (
+        weekly_hard_target_result_df["target_ok"] == False
+    ).sum()
+)
+
+print(
+    "İzinli haftada overtime ihlal sayısı:",
+    (
+        weekly_hard_target_result_df["izinli_haftada_overtime_ok"] == False
+    ).sum()
+)
+
+display(
+    weekly_hard_target_result_df[
+        (weekly_hard_target_result_df["target_ok"] == False)
+        |
+        (weekly_hard_target_result_df["izinli_haftada_overtime_ok"] == False)
+    ]
+)

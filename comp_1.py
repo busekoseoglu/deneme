@@ -1,304 +1,308 @@
-# %% [KISIT] - PARTIAL END HAFTA İÇİ HAMİLE / SÜT İZNİ ÇALIŞMA ZORUNLULUĞU
-# Amaç:
-# Ay sonu partial week hafta içi günlerde bitiyorsa,
-# hamile veya süt izni olan agentlar o görünen hafta içi günlerde OFF bırakılmasın.
-#
-# Örnek:
-# Haziran 2026:
-# 2026-06-29 Pazartesi
-# 2026-06-30 Salı
-# Bu günler 2026-W27 partial_end haftasına denk geliyor.
-#
-# Hamile / süt izni olan kişiler hafta sonu çalışamadığı için,
-# bu görünen hafta içi günlerde izinli değillerse çalıştırılmalı.
-#
-# DİKKAT:
-# - izin_map'e dokunmuyoruz.
-# - Pazartesi/Cuma izin flag'i varsa agent_izinli_mi(a, ds) True döner ve kişi zorlanmaz.
-# - Yıllık izin / doğum izni / idari izin varsa kişi zorlanmaz.
-# - Resmi tatil günleri zorlanmaz.
-# - Sadece izinli olmayan hamile/süt izni agentlar için work[(a, ds)] = 1 kurulur.
-
-# --------------------------------------------------
-# 1) Partial end week setini garantiye al
-# --------------------------------------------------
-
-if "partial_end_weeks" not in globals():
-
-    if "week_boundary_df" in globals() and isinstance(week_boundary_df, pd.DataFrame):
-        partial_end_weeks = set(
-            week_boundary_df.loc[
-                week_boundary_df["partial_type"] == "partial_end",
-                "week"
-            ].astype(str).str.strip()
-        )
-    else:
-        partial_end_weeks = set()
-
-else:
-    partial_end_weeks = set(str(w).strip() for w in partial_end_weeks)
-
-print("Partial end haftalar:", partial_end_weeks)
-
-
-# --------------------------------------------------
-# 2) Hamile veya süt izni olan agent seti
-# --------------------------------------------------
-
-hamile_sut_agents = set(
-    df_tam.loc[
-        (
-            pd.to_numeric(df_tam["hamile_flg"], errors="coerce")
-            .fillna(0)
-            .astype(int) == 1
-        )
-        |
-        (
-            pd.to_numeric(df_tam["sut_izni_flg"], errors="coerce")
-            .fillna(0)
-            .astype(int) == 1
-        ),
-        "agent_user_code"
-    ]
-    .astype(str)
-    .str.strip()
-)
-
-print("Hamile / süt izni agent sayısı:", len(hamile_sut_agents))
-
-
-# --------------------------------------------------
-# 3) Resmi tatil gün seti
-# --------------------------------------------------
-
-resmi_tatil_days_for_partial_end = set()
-
-if "resmi_tatil_plan_gunleri" in globals():
-    resmi_tatil_days_for_partial_end = set(resmi_tatil_plan_gunleri)
-
-elif "RESMI_TATIL_GUNLERI" in globals():
-    resmi_tatil_key_set = set(
-        pd.to_datetime(d).strftime("%Y-%m-%d")
-        for d in RESMI_TATIL_GUNLERI
-    )
-
-    for ds in PLAN_GUNLER:
-        if pd.to_datetime(ds).strftime("%Y-%m-%d") in resmi_tatil_key_set:
-            resmi_tatil_days_for_partial_end.add(ds)
-
-print("Partial end kuralında hariç tutulacak resmi tatil günleri:", resmi_tatil_days_for_partial_end)
-
-
-# --------------------------------------------------
-# 4) Ön kontrol
-# --------------------------------------------------
-# Bu kontrol sadece uyarı verir.
-# Eğer bir partial_end gününde çalışması zorlanan hamile/süt agent sayısı,
-# o günün toplam required sayısından fazlaysa model infeasible olabilir.
-#
-# Çünkü partial week fazla atama limiti 0 ise:
-# assigned <= required
-# olduğu için herkesi çalıştıracak yer olmayabilir.
-
-partial_end_hamile_sut_precheck_rows = []
-
-for ds in PLAN_GUNLER:
-
-    wk = str(day_week.get(ds)).strip() if "day_week" in globals() else None
-    weekday = pd.to_datetime(ds).weekday()
-
-    if wk not in partial_end_weeks:
-        continue
-
-    if weekday not in [0, 1, 2, 3, 4]:
-        continue
-
-    if ds in resmi_tatil_days_for_partial_end:
-        continue
-
-    forced_candidate_agents = []
-
-    for a in hamile_sut_agents:
-
-        if agent_izinli_mi(a, ds):
-            continue
-
-        if (a, ds) not in work:
-            continue
-
-        forced_candidate_agents.append(a)
-
-    total_required_this_day = sum(
-        int(talep[(ds, v)])
-        for v in gun_vardiyalari.get(ds, [])
-        if (ds, v) in talep
-    )
-
-    partial_end_hamile_sut_precheck_rows.append({
-        "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-        "week": wk,
-        "gun": safe_day_name(ds) if "safe_day_name" in globals() else pd.to_datetime(ds).day_name(),
-        "forced_candidate_agent_count": len(forced_candidate_agents),
-        "total_required_this_day": total_required_this_day,
-        "risk_infeasible": len(forced_candidate_agents) > total_required_this_day,
-    })
-
-partial_end_hamile_sut_precheck_df = pd.DataFrame(partial_end_hamile_sut_precheck_rows)
-
-print("Partial end hamile/süt ön kontrol:")
-display(partial_end_hamile_sut_precheck_df)
-
-
-# --------------------------------------------------
-# 5) Hard constraint
-# --------------------------------------------------
-# Partial end hafta içi günlerde:
-# hamile/süt izni agent
-# + resmi tatil değil
-# + izinli değil
-# => çalışmak zorunda.
-
-partial_end_hamile_sut_work_constraints = 0
-partial_end_hamile_sut_work_debug_rows = []
-
-for a in hamile_sut_agents:
-
-    a = str(a).strip()
-
-    for ds in PLAN_GUNLER:
-
-        wk = str(day_week.get(ds)).strip() if "day_week" in globals() else None
-        weekday = pd.to_datetime(ds).weekday()
-
-        if wk not in partial_end_weeks:
-            continue
-
-        if weekday not in [0, 1, 2, 3, 4]:
-            continue
-
-        if ds in resmi_tatil_days_for_partial_end:
-            partial_end_hamile_sut_work_debug_rows.append({
-                "agent_user_code": a,
-                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                "week": wk,
-                "constraint_added": False,
-                "reason": "resmi_tatil"
-            })
-            continue
-
-        if agent_izinli_mi(a, ds):
-            partial_end_hamile_sut_work_debug_rows.append({
-                "agent_user_code": a,
-                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                "week": wk,
-                "constraint_added": False,
-                "reason": "izinli"
-            })
-            continue
-
-        if (a, ds) not in work:
-            partial_end_hamile_sut_work_debug_rows.append({
-                "agent_user_code": a,
-                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                "week": wk,
-                "constraint_added": False,
-                "reason": "work_variable_yok"
-            })
-            continue
-
-        model.Add(work[(a, ds)] == 1)
-
-        partial_end_hamile_sut_work_constraints += 1
-
-        partial_end_hamile_sut_work_debug_rows.append({
-            "agent_user_code": a,
-            "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-            "week": wk,
-            "constraint_added": True,
-            "reason": "partial_end_weekday_force_work"
-        })
-
-partial_end_hamile_sut_work_debug_df = pd.DataFrame(
-    partial_end_hamile_sut_work_debug_rows
-)
-
-print(
-    "Partial end hafta içi hamile/süt izni çalışma zorunluluğu kısıt sayısı:",
-    partial_end_hamile_sut_work_constraints
-)
-
-display(
-    partial_end_hamile_sut_work_debug_df
-    .sort_values(["date", "agent_user_code"])
-    .head(30)
-)
-
-
-
 # %% [KONTROL] - PARTIAL END HAMİLE/SÜT KURALI SONUÇ KONTROLÜ
 # Amaç:
-# Constraint eklenen agent-günlerde gerçekten çalışmış mı görmek.
+# partial_end hafta içi günlerde çalışmaya zorlanan hamile/süt izni agentlar
+# gerçekten çalışmış mı ve hangi vardiyaya atanmış görmek.
+#
+# Beklenen:
+# - kontrol_ok = True
+# - worked = 1
+# - assigned_shift dolu
+# - shift_start / shift_end dolu olmalı.
+#
+# Not:
+# shift_start / shift_end None gelirse bu genelde model hatası değil,
+# saat dict'indeki date formatı ile kontrol kodundaki date formatı uyuşmadığı içindir.
+# Bu kontrol kodu onu daha sağlam yakalar.
+
+# --------------------------------------------------
+# 0) Yardımcı fonksiyonlar
+# --------------------------------------------------
+
+def _to_date_str(ds):
+    return pd.to_datetime(ds).strftime("%Y-%m-%d")
+
+
+def _find_plan_day_by_str(ds_str):
+    for d in PLAN_GUNLER:
+        if _to_date_str(d) == ds_str:
+            return d
+    return None
+
+
+def _safe_solver_value(var, default=0):
+    try:
+        return int(solver.Value(var))
+    except Exception:
+        return default
+
+
+def get_shift_time_for_control(ds_obj, ds_str, v, agent_user_code=None):
+    """
+    Vardiya saatini birkaç farklı kaynaktan sağlam şekilde bulur.
+
+    Öncelik:
+    1) saat dict
+    2) vardiya_talep_df
+    3) coverage_simple_df
+    4) agent_day_plan_df
+    """
+
+    v = str(v).strip() if v is not None else v
+
+    # -------------------------------
+    # 1) saat dict üzerinden dene
+    # -------------------------------
+    if "saat" in globals() and isinstance(saat, dict):
+
+        ds_ts = pd.to_datetime(ds_str)
+        ds_date = ds_ts.date()
+
+        possible_ds_keys = [
+            ds_obj,
+            ds_str,
+            ds_date,
+            ds_ts,
+        ]
+
+        possible_v_keys = [
+            v,
+            str(v).strip() if v is not None else v,
+        ]
+
+        for d_key in possible_ds_keys:
+            for v_key in possible_v_keys:
+                key = (d_key, v_key)
+
+                if key in saat:
+                    val = saat[key]
+
+                    if isinstance(val, (list, tuple)) and len(val) >= 2:
+                        return val[0], val[1], "saat_dict"
+
+    # -------------------------------
+    # 2) vardiya_talep_df üzerinden dene
+    # -------------------------------
+    if "vardiya_talep_df" in globals() and isinstance(vardiya_talep_df, pd.DataFrame):
+        if {"date", "shift", "shift_start", "shift_end"}.issubset(vardiya_talep_df.columns):
+
+            tmp = vardiya_talep_df[
+                (vardiya_talep_df["date"].astype(str) == ds_str) &
+                (vardiya_talep_df["shift"].astype(str).str.strip() == str(v).strip())
+            ]
+
+            if len(tmp) > 0:
+                return (
+                    tmp["shift_start"].iloc[0],
+                    tmp["shift_end"].iloc[0],
+                    "vardiya_talep_df"
+                )
+
+    # -------------------------------
+    # 3) coverage_simple_df üzerinden dene
+    # -------------------------------
+    if "coverage_simple_df" in globals() and isinstance(coverage_simple_df, pd.DataFrame):
+        if {"date", "shift", "shift_start", "shift_end"}.issubset(coverage_simple_df.columns):
+
+            tmp = coverage_simple_df[
+                (coverage_simple_df["date"].astype(str) == ds_str) &
+                (coverage_simple_df["shift"].astype(str).str.strip() == str(v).strip())
+            ]
+
+            if len(tmp) > 0:
+                return (
+                    tmp["shift_start"].iloc[0],
+                    tmp["shift_end"].iloc[0],
+                    "coverage_simple_df"
+                )
+
+    # -------------------------------
+    # 4) agent_day_plan_df üzerinden dene
+    # -------------------------------
+    if "agent_day_plan_df" in globals() and isinstance(agent_day_plan_df, pd.DataFrame):
+        needed_cols = {
+            "agent_user_code",
+            "date",
+            "assigned_shift",
+            "shift_start",
+            "shift_end"
+        }
+
+        if needed_cols.issubset(agent_day_plan_df.columns) and agent_user_code is not None:
+
+            tmp = agent_day_plan_df[
+                (agent_day_plan_df["agent_user_code"].astype(str).str.strip() == str(agent_user_code).strip()) &
+                (agent_day_plan_df["date"].astype(str) == ds_str) &
+                (agent_day_plan_df["assigned_shift"].astype(str).str.strip() == str(v).strip())
+            ]
+
+            if len(tmp) > 0:
+                return (
+                    tmp["shift_start"].iloc[0],
+                    tmp["shift_end"].iloc[0],
+                    "agent_day_plan_df"
+                )
+
+    return None, None, "bulunamadi"
+
+
+# --------------------------------------------------
+# 1) Debug dataframe var mı kontrol et
+# --------------------------------------------------
+
+if (
+    "partial_end_hamile_sut_work_debug_df" not in globals()
+    or not isinstance(partial_end_hamile_sut_work_debug_df, pd.DataFrame)
+    or partial_end_hamile_sut_work_debug_df.empty
+):
+    raise ValueError(
+        "partial_end_hamile_sut_work_debug_df bulunamadı veya boş. "
+        "Önce constraint hücresini solve'dan önce çalıştırmalısın."
+    )
+
+
+# --------------------------------------------------
+# 2) Sadece constraint_added=True olan satırları kontrol et
+# --------------------------------------------------
 
 partial_end_hamile_sut_result_rows = []
 
-for _, r in partial_end_hamile_sut_work_debug_df.iterrows():
+forced_rows = partial_end_hamile_sut_work_debug_df[
+    partial_end_hamile_sut_work_debug_df["constraint_added"] == True
+].copy()
 
-    if r["constraint_added"] != True:
-        continue
+for _, r in forced_rows.iterrows():
 
     a = str(r["agent_user_code"]).strip()
-    ds = r["date"]
+    ds_str = str(r["date"])
+    wk = r["week"]
 
-    # PLAN_GUNLER içindeki gerçek ds objesini bul
-    ds_obj = None
-    for d in PLAN_GUNLER:
-        if pd.to_datetime(d).strftime("%Y-%m-%d") == ds:
-            ds_obj = d
-            break
+    ds_obj = _find_plan_day_by_str(ds_str)
 
     if ds_obj is None:
+        partial_end_hamile_sut_result_rows.append({
+            "agent_user_code": a,
+            "date": ds_str,
+            "week": wk,
+            "worked": None,
+            "assigned_shift": None,
+            "shift_start": None,
+            "shift_end": None,
+            "shift_time_source": None,
+            "kontrol_ok": False,
+            "saat_ok": False,
+            "problem": "PLAN_GUNLER içinde tarih bulunamadı"
+        })
         continue
+
+    # --------------------------------------------------
+    # 2.1) work sonucu
+    # --------------------------------------------------
 
     worked = 0
 
     if (a, ds_obj) in work:
-        worked = int(solver.Value(work[(a, ds_obj)]))
+        worked = _safe_solver_value(work[(a, ds_obj)])
+    else:
+        worked = 0
+
+    # --------------------------------------------------
+    # 2.2) Atanan vardiyayı bul
+    # --------------------------------------------------
 
     assigned_shift = None
     shift_start = None
     shift_end = None
+    shift_time_source = None
 
     for v in gun_vardiyalari.get(ds_obj, []):
-        if (a, ds_obj, v) in x and int(solver.Value(x[(a, ds_obj, v)])) == 1:
+
+        if (a, ds_obj, v) not in x:
+            continue
+
+        if _safe_solver_value(x[(a, ds_obj, v)]) == 1:
             assigned_shift = v
-            shift_start, shift_end = get_shift_time(ds_obj, v) if "get_shift_time" in globals() else (None, None)
+
+            shift_start, shift_end, shift_time_source = get_shift_time_for_control(
+                ds_obj=ds_obj,
+                ds_str=ds_str,
+                v=v,
+                agent_user_code=a
+            )
+
             break
+
+    kontrol_ok = (
+        worked == 1
+        and assigned_shift is not None
+    )
+
+    saat_ok = (
+        shift_start is not None
+        and shift_end is not None
+    )
+
+    if not kontrol_ok:
+        problem = "Çalışması zorlandı ama worked=1 veya assigned_shift bulunamadı"
+    elif not saat_ok:
+        problem = "Atama doğru; sadece vardiya saati bulunamadı"
+    else:
+        problem = None
 
     partial_end_hamile_sut_result_rows.append({
         "agent_user_code": a,
-        "date": ds,
-        "week": r["week"],
+        "date": ds_str,
+        "week": wk,
         "worked": worked,
         "assigned_shift": assigned_shift,
         "shift_start": shift_start,
         "shift_end": shift_end,
-        "kontrol_ok": worked == 1,
+        "shift_time_source": shift_time_source,
+        "kontrol_ok": kontrol_ok,
+        "saat_ok": saat_ok,
+        "problem": problem
     })
+
 
 partial_end_hamile_sut_result_df = pd.DataFrame(
     partial_end_hamile_sut_result_rows
 )
 
-print(
-    "Partial end hamile/süt kuralı ihlal sayısı:",
-    (
-        partial_end_hamile_sut_result_df["kontrol_ok"] == False
-    ).sum()
-    if not partial_end_hamile_sut_result_df.empty
-    else 0
-)
 
-display(
-    partial_end_hamile_sut_result_df
-    .sort_values(["kontrol_ok", "date", "agent_user_code"])
-)
+# --------------------------------------------------
+# 3) Özet çıktılar
+# --------------------------------------------------
+
+print("Partial end hamile/süt kontrol edilen satır sayısı:", len(partial_end_hamile_sut_result_df))
+
+if len(partial_end_hamile_sut_result_df) > 0:
+
+    print(
+        "Kural ihlal sayısı:",
+        (partial_end_hamile_sut_result_df["kontrol_ok"] == False).sum()
+    )
+
+    print(
+        "Saat bilgisi eksik satır sayısı:",
+        (partial_end_hamile_sut_result_df["saat_ok"] == False).sum()
+    )
+
+    print("\nKontrol dağılımı:")
+    display(
+        partial_end_hamile_sut_result_df[
+            ["kontrol_ok", "saat_ok"]
+        ]
+        .value_counts()
+        .reset_index(name="satir_sayisi")
+    )
+
+    print("\nDetay:")
+    display(
+        partial_end_hamile_sut_result_df
+        .sort_values(
+            ["kontrol_ok", "saat_ok", "date", "agent_user_code"],
+            ascending=[True, True, True, True]
+        )
+    )
+
+else:
+    print("Bu ay için partial_end hamile/süt constraint_added=True satırı yok.")

@@ -1,37 +1,18 @@
-# =================================================
-# LOKASYON AKŞAM / GECE DAĞILIM KURALI
-# =================================================
-
-ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI = True
-
-# Akşam/gece vardiya kapsamı:
-# 15:00 girişli vardiyadan 00:00 girişli vardiyaya kadar.
-AKSAM_GECE_SHIFT_START_MIN = "15:00"
-AKSAM_GECE_0000_DAHIL = True
-
-# Oranlar iş biriminin Excel'inden alınır.
-# Model bu oranları hesaplamaz.
-LOKASYON_AKSAM_GECE_ORANLARI = {
-    "izmir": 0.30,
-    "gebze": 0.35,
-    "samsun": 0.35,
-}
-
-# Sapma cezası
-LOKASYON_AKSAM_GECE_ORAN_SAPMA_W = 25000
-
-
 # %% [KISIT] - AKŞAM / GECE VARDİYALARINDA LOKASYON ORANLI DAĞILIM
 # Amaç:
 # 15:00 girişli vardiyadan 00:00 girişli vardiyaya kadar olan vardiyalarda
-# İzmir / Gebze / Samsun lokasyonlarının iş biriminin verdiği oranlara
+# izmir / gebze / samsun lokasyonlarının config'te verilen oranlara
 # yakın çalışmasını sağlamak.
 #
-# Bu kural SOFT constraint'tir.
+# Bu kural soft constraint'tir.
 # Sapmalar objective içinde cezalandırılır.
 #
-# Ankara bu oran kuralına dahil değildir ama gece/akşam vardiyasına yazılabilir.
-# Hatay/Adıyaman/Maraş zaten sabah_calisir_flg=1 kuralı ile geç vardiyalara yazılmamalıdır.
+# Notlar:
+# - Oran model içinde hesaplanmaz, config'ten alınır.
+# - Sadece LOKASYON_AKSAM_GECE_ORANLARI içinde yazan lokasyonlar için çalışır.
+# - Ankara config'te olmadığı sürece bu oran hesabına girmez ama geceye yazılabilir.
+# - Hatay/Adıyaman/Maraş config'te olmadığı sürece oran hesabına girmez.
+# - df_tam içinde lokasyon kolonu kullanılmaktadır.
 
 # --------------------------------------------------
 # 0) DEFAULTLAR
@@ -75,11 +56,14 @@ aksam_gece_shift_keys = []
 # 2) HELPERLAR
 # --------------------------------------------------
 
-def _time_to_min_for_loc_rule(t):
-    if t is None:
+def _clean_loc_for_aksam_gece(val):
+    if pd.isna(val):
         return None
+    return str(val).strip().lower()
 
-    if pd.isna(t):
+
+def _time_to_min_for_aksam_gece(t):
+    if t is None or pd.isna(t):
         return None
 
     t = str(t).strip()
@@ -95,60 +79,10 @@ def _time_to_min_for_loc_rule(t):
     return None
 
 
-def _normalize_location_for_rule(val):
-    if val is None:
-        return None
-
-    if pd.isna(val):
-        return None
-
-    val = str(val).strip().lower()
-
-    tr_map = str.maketrans({
-        "ı": "i",
-        "İ": "i",
-        "ğ": "g",
-        "Ğ": "g",
-        "ü": "u",
-        "Ü": "u",
-        "ş": "s",
-        "Ş": "s",
-        "ö": "o",
-        "Ö": "o",
-        "ç": "c",
-        "Ç": "c",
-    })
-
-    val = val.translate(tr_map)
-
-    if "izmir" in val:
-        return "izmir"
-
-    if "gebze" in val:
-        return "gebze"
-
-    if "samsun" in val:
-        return "samsun"
-
-    if "ankara" in val:
-        return "ankara"
-
-    if (
-        "hatay" in val
-        or "hata" in val
-        or "adiyaman" in val
-        or "maras" in val
-        or "kahramanmaras" in val
-    ):
-        return "hatay_adiyaman_maras"
-
-    return val
-
-
-def _get_shift_time_for_loc_rule(ds, v):
+def _get_shift_time_for_aksam_gece(ds, v):
     """
-    saat dict'inde ds farklı formatlarda tutulmuş olabilir.
-    Bu yüzden birkaç formatla dener.
+    saat dict'inde ds bazen farklı formatta tutulabildiği için
+    birkaç farklı key ile dener.
     """
 
     if "saat" not in globals() or not isinstance(saat, dict):
@@ -158,46 +92,42 @@ def _get_shift_time_for_loc_rule(ds, v):
     ds_str = ds_ts.strftime("%Y-%m-%d")
     ds_date = ds_ts.date()
 
-    possible_ds_keys = [
-        ds,
-        ds_str,
-        ds_date,
-        ds_ts,
+    possible_keys = [
+        (ds, v),
+        (ds_str, v),
+        (ds_date, v),
+        (ds_ts, v),
+        (ds, str(v).strip()),
+        (ds_str, str(v).strip()),
+        (ds_date, str(v).strip()),
+        (ds_ts, str(v).strip()),
     ]
 
-    possible_v_keys = [
-        v,
-        str(v).strip(),
-    ]
+    for key in possible_keys:
+        if key in saat:
+            val = saat[key]
 
-    for d_key in possible_ds_keys:
-        for v_key in possible_v_keys:
-            key = (d_key, v_key)
-
-            if key in saat:
-                val = saat[key]
-
-                if isinstance(val, (list, tuple)) and len(val) >= 2:
-                    return val[0], val[1]
+            if isinstance(val, (list, tuple)) and len(val) >= 2:
+                return val[0], val[1]
 
     return None, None
 
 
-def _is_aksam_gece_shift_for_loc_rule(ds, v):
+def _is_aksam_gece_shift(ds, v):
     """
     Akşam/gece vardiyası:
     - 15:00 ve sonrası başlayan vardiyalar
     - 00:00 başlayan vardiya
     """
 
-    shift_start, shift_end = _get_shift_time_for_loc_rule(ds, v)
+    shift_start, shift_end = _get_shift_time_for_aksam_gece(ds, v)
 
-    start_min = _time_to_min_for_loc_rule(shift_start)
+    start_min = _time_to_min_for_aksam_gece(shift_start)
 
     if start_min is None:
         return False
 
-    limit_min = _time_to_min_for_loc_rule(AKSAM_GECE_SHIFT_START_MIN)
+    limit_min = _time_to_min_for_aksam_gece(AKSAM_GECE_SHIFT_START_MIN)
 
     if limit_min is None:
         limit_min = 15 * 60
@@ -209,57 +139,50 @@ def _is_aksam_gece_shift_for_loc_rule(ds, v):
 
 
 # --------------------------------------------------
-# 3) KURAL AKTİFSE MODEL KISITLARINI KUR
+# 3) KURAL AKTİFSE KISITLARI KUR
 # --------------------------------------------------
 
 if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
 
+    if "lokasyon" not in df_tam.columns:
+        raise ValueError("df_tam içinde 'lokasyon' kolonu yok. Lokasyon oran kuralı çalışamaz.")
+
     # --------------------------------------------------
-    # 3.1) Config lokasyonlarını normalize et
+    # 3.1) Config lokasyon oranlarını hazırla
     # --------------------------------------------------
+    # Burada oran hesaplamıyoruz.
+    # İş biriminin verdiği oranı config'ten direkt okuyoruz.
 
-    lokasyon_oranlari_normalized = {}
+    lokasyon_oranlari = {
+        _clean_loc_for_aksam_gece(loc): float(oran)
+        for loc, oran in LOKASYON_AKSAM_GECE_ORANLARI.items()
+    }
 
-    for loc, oran in LOKASYON_AKSAM_GECE_ORANLARI.items():
-        loc_norm = _normalize_location_for_rule(loc)
-        lokasyon_oranlari_normalized[loc_norm] = float(oran)
+    oran_lokasyonlari = list(lokasyon_oranlari.keys())
+    oran_toplami = sum(lokasyon_oranlari.values())
 
-    oran_lokasyonlari = list(lokasyon_oranlari_normalized.keys())
-
-    oran_toplami = sum(lokasyon_oranlari_normalized.values())
-
-    print("Lokasyon oran kuralı aktif.")
-    print("Config lokasyon oranları:", lokasyon_oranlari_normalized)
+    print("Lokasyon akşam/gece oran kuralı aktif.")
+    print("Config lokasyon oranları:", lokasyon_oranlari)
     print("Oran toplamı:", oran_toplami)
 
     if oran_toplami > 1.0001:
-        print("UYARI: Lokasyon oran toplamı 1'den büyük. Hedef toplam talebi aşabilir.")
+        print("UYARI: Lokasyon oran toplamı 1'den büyük. Hedef toplam required'ı aşabilir.")
 
     # --------------------------------------------------
     # 3.2) Agent lokasyon map'i
     # --------------------------------------------------
-    # Öncelik df_tam["lokasyon"].
-    # Eğer yoksa fallback olarak working_main_group kullanılır.
 
     for _, r in df_tam.iterrows():
 
         a = str(r["agent_user_code"]).strip()
+        loc = _clean_loc_for_aksam_gece(r["lokasyon"])
 
-        if "lokasyon" in df_tam.columns:
-            raw_loc = r.get("lokasyon")
-
-        elif "working_main_group" in df_tam.columns:
-            raw_loc = r.get("working_main_group")
-
-        else:
-            raw_loc = None
-
-        agent_location_map[a] = _normalize_location_for_rule(raw_loc)
+        agent_location_map[a] = loc
 
     agent_location_debug_df = pd.DataFrame([
         {
             "agent_user_code": a,
-            "lokasyon_normalized": loc
+            "lokasyon": loc
         }
         for a, loc in agent_location_map.items()
     ])
@@ -267,13 +190,13 @@ if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
     print("Agent lokasyon dağılımı:")
     display(
         agent_location_debug_df
-        .groupby("lokasyon_normalized", as_index=False)
+        .groupby("lokasyon", as_index=False)
         .agg(agent_sayisi=("agent_user_code", "nunique"))
         .sort_values("agent_sayisi", ascending=False)
     )
 
     # --------------------------------------------------
-    # 3.3) Akşam/gece vardiya key'lerini bul
+    # 3.3) Akşam/gece vardiyalarını bul
     # --------------------------------------------------
 
     for ds in PLAN_GUNLER:
@@ -283,10 +206,10 @@ if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
             if (ds, v) not in talep:
                 continue
 
-            if not _is_aksam_gece_shift_for_loc_rule(ds, v):
+            if not _is_aksam_gece_shift(ds, v):
                 continue
 
-            shift_start, shift_end = _get_shift_time_for_loc_rule(ds, v)
+            shift_start, shift_end = _get_shift_time_for_aksam_gece(ds, v)
 
             aksam_gece_shift_keys.append((ds, v))
 
@@ -315,10 +238,13 @@ if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
     display(lokasyon_aksam_gece_shift_df.head(20))
 
     # --------------------------------------------------
-    # 3.4) Lokasyon bazlı gerçek atama değişkenlerini say
+    # 3.4) Lokasyon bazlı gerçek atama count değişkenleri
     # --------------------------------------------------
-    # Sadece config içindeki lokasyonlar için count oluşturulur.
-    # Ankara bu count'a dahil değildir.
+    # Sadece config içinde verilen lokasyonlar için count oluşturuyoruz.
+    # Örn: izmir, gebze, samsun.
+    #
+    # Ankara config'te yoksa burada sayılmaz.
+    # Ama model Ankara'yı gece/akşam vardiyasına atayabilir.
 
     for loc in oran_lokasyonlari:
 
@@ -356,16 +282,18 @@ if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
             )
 
     # --------------------------------------------------
-    # 3.5) Config oranına göre hedefleri ve sapmaları oluştur
+    # 3.5) Config oranına göre hedef ve sapma değişkenleri
     # --------------------------------------------------
     # target = toplam akşam/gece required * config oran
     #
-    # Oran burada hesaplanmaz.
-    # İş birimi oranı config'ten gelir.
+    # Örnek:
+    # total required = 180
+    # izmir oran = 0.30
+    # izmir hedef = 54
 
     for loc in oran_lokasyonlari:
 
-        oran = float(lokasyon_oranlari_normalized[loc])
+        oran = float(lokasyon_oranlari[loc])
 
         target = int(round(total_aksam_gece_required * oran))
 
@@ -421,8 +349,8 @@ if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
             "toplam_aksam_gece_required": total_aksam_gece_required,
             "hedef_atama": target,
             "max_possible_var_count": max_possible,
+            "sapma_weight": LOKASYON_AKSAM_GECE_ORAN_SAPMA_W,
             "kural_tipi": "soft_abs_diff_penalty",
-            "penalty_weight": LOKASYON_AKSAM_GECE_ORAN_SAPMA_W,
         })
 
     lokasyon_aksam_gece_debug_df = pd.DataFrame(
@@ -440,71 +368,3 @@ else:
     agent_location_debug_df = pd.DataFrame()
 
     print("Lokasyon akşam/gece oran kuralı kapalı.")
-
-
-
-# Lokasyon akşam/gece oran sapma cezası
-if (
-    "ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI" in globals()
-    and ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI
-    and "lokasyon_aksam_gece_sapma_terms" in globals()
-):
-    obj_terms.extend(lokasyon_aksam_gece_sapma_terms)
-
-
-# %% [KONTROL] - AKŞAM / GECE LOKASYON ORAN SONUÇ KONTROLÜ
-# Amaç:
-# İzmir / Gebze / Samsun için akşam/gece atama sayıları
-# config hedeflerine yakın mı görmek.
-
-lokasyon_aksam_gece_result_rows = []
-
-if (
-    "ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI" in globals()
-    and ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI
-):
-
-    for loc in LOKASYON_AKSAM_GECE_ORANLARI.keys():
-
-        actual = int(
-            solver.Value(lokasyon_aksam_gece_count[loc])
-        )
-
-        target = int(lokasyon_aksam_gece_target[loc])
-
-        diff = actual - target
-
-        abs_diff = abs(diff)
-
-        lokasyon_aksam_gece_result_rows.append({
-            "lokasyon": loc,
-            "config_oran": float(LOKASYON_AKSAM_GECE_ORANLARI[loc]),
-            "toplam_aksam_gece_required": sum(
-                int(talep[(ds, v)])
-                for ds, v in aksam_gece_shift_keys
-                if (ds, v) in talep
-            ),
-            "hedef_atama": target,
-            "gercek_atama": actual,
-            "fark": diff,
-            "mutlak_fark": abs_diff,
-            "gercek_oran": (
-                actual
-                /
-                sum(
-                    int(talep[(ds, v)])
-                    for ds, v in aksam_gece_shift_keys
-                    if (ds, v) in talep
-                )
-                if len(aksam_gece_shift_keys) > 0
-                else 0
-            ),
-        })
-
-lokasyon_aksam_gece_result_df = pd.DataFrame(
-    lokasyon_aksam_gece_result_rows
-)
-
-display(lokasyon_aksam_gece_result_df)
-
-

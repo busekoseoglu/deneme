@@ -1,6 +1,27 @@
-# Lokasyon akşam/gece oran kuralı
-ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI = CONFIG["ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI"]
-AKSAM_GECE_SHIFT_START_MIN = CONFIG["AKSAM_GECE_SHIFT_START_MIN"]
-AKSAM_GECE_0000_DAHIL = CONFIG["AKSAM_GECE_0000_DAHIL"]
-LOKASYON_AKSAM_GECE_ORANLARI = CONFIG["LOKASYON_AKSAM_GECE_ORANLARI"]
-LOKASYON_AKSAM_GECE_ORAN_SAPMA_W = CONFIG["LOKASYON_AKSAM_GECE_ORAN_SAPMA_W"]
+# %% [DEBUG] - MODEL VALIDATION VE BOYUT KONTROLÜ
+
+validation = model.Validate()
+
+if validation:
+    print("MODEL VALIDATION HATASI:")
+    print(validation)
+    raise ValueError(validation)
+
+print("Model validation OK.")
+
+model_proto = model.Proto()
+
+print("Değişken sayısı:", len(model_proto.variables))
+print("Constraint sayısı:", len(model_proto.constraints))
+
+if model_proto.HasField("objective"):
+    print("Objective term sayısı:", len(model_proto.objective.vars))
+
+if "lokasyon_aksam_gece_sapma_terms" in globals():
+    print("Lokasyon sapma term sayısı:", len(lokasyon_aksam_gece_sapma_terms))
+
+if "lokasyon_aksam_gece_debug_df" in globals():
+    display(lokasyon_aksam_gece_debug_df)
+
+if "lokasyon_aksam_gece_shift_df" in globals():
+    print("Akşam/gece shift satır sayısı:", len(lokasyon_aksam_gece_shift_df))

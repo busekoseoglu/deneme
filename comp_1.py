@@ -1,529 +1,510 @@
-# %% [KISIT] - HAFTALIK ÇALIŞMA + NORMAL MESAİ - HARD TARGET
-# Mantık:
-# - Agent haftalık hedefin altında da kalamaz, üstüne de çıkamaz.
-# - weekly_under / weekly_over artık yok.
-# - Haftalık çalışma hedefi hard eşitlik olarak kurulur.
-#
-# Normal haftalık hedef:
-# NORMAL_WORK_DAYS
-# - resmi tatil gün sayısı
-# - izin gün sayısı
-#
-# Resmi tatil günleri normal haftalık hedefe dahil değildir.
-# Resmi tatilde çalışma ayrıca takip edilir.
-#
-# Partial week'lerde haftalık hedef kurulmaz.
-# Çünkü model haftanın tamamını görmez.
-#
-# İzinli haftada normal mesai verilmez.
-# Çünkü izin aldıysa hedef düşer ve bu hedef tekrar overtime ile yukarı çekilmemelidir.
+# =================================================
+# LOKASYON AKŞAM / GECE DAĞILIM KURALI
+# =================================================
 
-# --------------------------------------------------
-# 0) MESAIYE KALAMAZ AGENT SETİ
-# --------------------------------------------------
+ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI = True
 
-mesaiye_kalamaz_agents = set(
-    df_tam[
-        pd.to_numeric(
-            df_tam["mesaiye_kalamaz_flg"],
-            errors="coerce"
-        )
-        .fillna(0)
-        .astype(int) == 1
-    ]["agent_user_code"]
-    .astype(str)
-    .str.strip()
-)
+# Akşam/gece vardiya kapsamı:
+# 15:00 girişli vardiyadan 00:00 girişli vardiyaya kadar.
+AKSAM_GECE_SHIFT_START_MIN = "15:00"
+AKSAM_GECE_0000_DAHIL = True
 
-# --------------------------------------------------
-# 1) RESMİ TATİL GÜNLERİNİ PLAN_GUNLER FORMATINDA AL
-# --------------------------------------------------
+# Oranlar iş biriminin Excel'inden alınır.
+# Model bu oranları hesaplamaz.
+LOKASYON_AKSAM_GECE_ORANLARI = {
+    "izmir": 0.30,
+    "gebze": 0.35,
+    "samsun": 0.35,
+}
 
-resmi_tatil_gunleri_for_weekly = set()
+# Sapma cezası
+LOKASYON_AKSAM_GECE_ORAN_SAPMA_W = 25000
 
-if "resmi_tatil_plan_gunleri" in globals():
-    resmi_tatil_gunleri_for_weekly = set(resmi_tatil_plan_gunleri)
 
-else:
-    if "ENABLE_RESMI_TATIL_KURALI" in globals() and ENABLE_RESMI_TATIL_KURALI:
-        if "RESMI_TATIL_GUNLERI" in globals():
-
-            resmi_tatil_key_set = set(
-                pd.to_datetime(d).strftime("%Y-%m-%d")
-                for d in RESMI_TATIL_GUNLERI
-            )
-
-            for ds in PLAN_GUNLER:
-                ds_key = pd.to_datetime(ds).strftime("%Y-%m-%d")
-
-                if ds_key in resmi_tatil_key_set:
-                    resmi_tatil_gunleri_for_weekly.add(ds)
-
-print(
-    "Normal haftalık çalışmadan ayrı tutulacak resmi tatil günleri:",
-    resmi_tatil_gunleri_for_weekly
-)
-
-# --------------------------------------------------
-# 2) PARTIAL WEEK DEFAULT KONTROLLERİ
-# --------------------------------------------------
-
-if "SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS" not in globals():
-    SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS = True
-
-if "partial_weeks" not in globals():
-    partial_weeks = set()
-
-if "partial_end_weeks" not in globals():
-    partial_end_weeks = set()
-
-# --------------------------------------------------
-# 3) KISIT SAYAÇLARI VE SÖZLÜKLER
-# --------------------------------------------------
-
-weekly_work_constraints = 0
-weekly_overtime_block_constraints = 0
-leave_week_overtime_block_constraints = 0
-monthly_overtime_constraints = 0
-partial_week_skip_constraints = 0
-resmi_tatil_work_week_constraints = 0
-
-# DİKKAT:
-# weekly_under / weekly_over artık kullanılmıyor.
-# Ama eski objective / summary hücreleri patlamasın diye boş dict bırakıyoruz.
-weekly_under = {}
-weekly_over = {}
-
-# Resmi tatil çalışmasını ayrı takip etmek için kalıyor.
-resmi_tatil_work_week = {}
-
-weekly_target_debug_rows = []
-
-# --------------------------------------------------
-# 4) HAFTALIK NORMAL ÇALIŞMA HEDEFİ - HARD
-# --------------------------------------------------
-
-for a in AGENTS:
-
-    a = str(a).strip()
-
-    for wk in WEEKS:
-
-        week_days_list = week_days[wk]
-        wk_str = str(wk).strip()
-
-        # --------------------------------------------------
-        # 4.1) PARTIAL WEEK KONTROLÜ
-        # --------------------------------------------------
-        # Partial week'lerde haftalık hedef kurulmaz.
-        # Çünkü model haftanın tamamını görmez.
-        #
-        # Örnek:
-        # Haziran 2026 W27 sadece 29-30 Haziran'dır.
-        # Bu hafta Temmuz ile tamamlanacağı için Haziran modelinde
-        # weekly target kurulmaz.
-        #
-        # Bu haftada normal mesai de kapatılır:
-        # overtime_week = 0
-
-        if "week_boundary_df" in globals():
-            wk_boundary_row = week_boundary_df[
-                week_boundary_df["week"].astype(str).str.strip() == wk_str
-            ]
-
-            wk_is_partial = (
-                len(wk_boundary_row) > 0
-                and bool(wk_boundary_row["is_partial_week"].iloc[0])
-            )
-
-            wk_partial_type = (
-                wk_boundary_row["partial_type"].iloc[0]
-                if len(wk_boundary_row) > 0
-                else None
-            )
-
-        else:
-            wk_is_partial = wk in partial_weeks
-            wk_partial_type = "partial_week" if wk_is_partial else "full_week"
-
-        if SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS and wk_is_partial:
-
-            if (a, wk) in overtime_week:
-                model.Add(overtime_week[(a, wk)] == 0)
-                partial_week_skip_constraints += 1
-
-            weekly_target_debug_rows.append({
-                "agent_user_code": a,
-                "week": wk,
-                "normal_target": None,
-                "normal_work_var_count": None,
-                "resmi_tatil_work_var_count": None,
-                "izin_normal_count": None,
-                "resmi_tatil_count": None,
-                "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
-                "partial_week": True,
-                "partial_type": wk_partial_type,
-                "partial_week_reason": "weekly_target_skip",
-                "hard_weekly_target": False,
-                "overtime_forced_zero_reason": "partial_week"
-            })
-
-            continue
-
-        # --------------------------------------------------
-        # 4.2) OVERTIME WEEK DEĞİŞKENİ VAR MI?
-        # --------------------------------------------------
-
-        if (a, wk) not in overtime_week:
-            continue
-
-        # --------------------------------------------------
-        # 4.3) BU HAFTANIN RESMİ TATİL GÜNLERİ
-        # --------------------------------------------------
-
-        resmi_tatil_days_this_week = set(
-            ds
-            for ds in week_days_list
-            if ds in resmi_tatil_gunleri_for_weekly
-        )
-
-        # --------------------------------------------------
-        # 4.4) BU HAFTANIN İZİN GÜNLERİ
-        # --------------------------------------------------
-        # Burada hafta sonu izni de sayılır.
-        #
-        # Örnek:
-        # Agent Cumartesi-Pazar izin aldıysa:
-        # izin_normal_count = 2
-        # normal_target = 5 - 2 = 3
-        #
-        # Böylece bu agent hafta içinde 5 gün çalışamaz.
-        # Tam 3 normal gün çalışmak zorunda kalır.
-
-        izin_days_this_week = set(
-            ds
-            for ds in week_days_list
-            if agent_izinli_mi(a, ds)
-        )
-
-        # Resmi tatil günleri normal hedeften ayrıca düşüldüğü için,
-        # resmi tatilde izin varsa iki kere düşmemesi adına çıkarıyoruz.
-
-        izin_normal_days_this_week = (
-            izin_days_this_week
-            - resmi_tatil_days_this_week
-        )
-
-        # --------------------------------------------------
-        # 4.5) NORMAL GÜNLERDEKİ WORK DEĞİŞKENLERİ
-        # --------------------------------------------------
-        # Resmi tatil günleri burada yok.
-        # Yani resmi tatil çalışması haftalık normal çalışma hedefine girmez.
-
-        normal_work_vars = [
-            work[(a, ds)]
-            for ds in week_days_list
-            if (a, ds) in work
-            and ds not in resmi_tatil_days_this_week
-        ]
-
-        if not normal_work_vars:
-
-            weekly_target_debug_rows.append({
-                "agent_user_code": a,
-                "week": wk,
-                "normal_target": None,
-                "normal_work_var_count": 0,
-                "resmi_tatil_work_var_count": None,
-                "izin_normal_count": len(izin_normal_days_this_week),
-                "resmi_tatil_count": len(resmi_tatil_days_this_week),
-                "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
-                "partial_week": False,
-                "partial_type": wk_partial_type,
-                "partial_week_reason": "normal_work_var_yok",
-                "hard_weekly_target": False,
-                "overtime_forced_zero_reason": None
-            })
-
-            continue
-
-        # --------------------------------------------------
-        # 4.6) RESMİ TATİL WORK DEĞİŞKENLERİ
-        # --------------------------------------------------
-        # Resmi tatilde çalışılan günler ayrı takip edilir.
-        # Bunlar normal weekly target içine girmez.
-
-        resmi_tatil_work_vars = [
-            work[(a, ds)]
-            for ds in week_days_list
-            if (a, ds) in work
-            and ds in resmi_tatil_days_this_week
-        ]
-
-        if resmi_tatil_work_vars:
-
-            resmi_tatil_work_week[(a, wk)] = model.NewIntVar(
-                0,
-                len(resmi_tatil_work_vars),
-                f"resmi_tatil_work_week_{a}_{wk}"
-            )
-
-            model.Add(
-                resmi_tatil_work_week[(a, wk)]
-                == sum(resmi_tatil_work_vars)
-            )
-
-            resmi_tatil_work_week_constraints += 1
-
-        # --------------------------------------------------
-        # 4.7) NORMAL HAFTALIK HEDEF
-        # --------------------------------------------------
-
-        normal_target = NORMAL_WORK_DAYS
-        normal_target -= len(resmi_tatil_days_this_week)
-        normal_target -= len(izin_normal_days_this_week)
-
-        normal_target = max(0, normal_target)
-        normal_target = min(normal_target, len(normal_work_vars))
-
-        # --------------------------------------------------
-        # 4.8) İZİNLİ HAFTADA NORMAL MESAİ KAPAT
-        # --------------------------------------------------
-        # Agent o hafta izin aldıysa, haftalık hedef zaten düşer.
-        # Bu hedef overtime ile tekrar yukarı çekilmemeli.
-        #
-        # Örnek:
-        # Cumartesi-Pazar izin aldıysa:
-        # normal_target = 3
-        #
-        # overtime_week = 1 olursa 4 gün çalışabilir.
-        # Bu istenmiyor.
-        #
-        # Bu yüzden izinli haftada overtime_week = 0.
-
-        overtime_forced_zero_reason = None
-
-        if len(izin_normal_days_this_week) > 0:
-            model.Add(overtime_week[(a, wk)] == 0)
-            leave_week_overtime_block_constraints += 1
-            overtime_forced_zero_reason = "izinli_hafta"
-
-        # --------------------------------------------------
-        # 4.9) MESAİYE KALAMAZ AGENT NORMAL MESAİ ALAMAZ
-        # --------------------------------------------------
-
-        if a in mesaiye_kalamaz_agents:
-            model.Add(overtime_week[(a, wk)] == 0)
-            weekly_overtime_block_constraints += 1
-
-            if overtime_forced_zero_reason is None:
-                overtime_forced_zero_reason = "mesaiye_kalamaz"
-            else:
-                overtime_forced_zero_reason += "+mesaiye_kalamaz"
-
-        # --------------------------------------------------
-        # 4.10) HAFTALIK NORMAL ÇALIŞMA EŞİTLİĞİ - HARD
-        # --------------------------------------------------
-        # DİKKAT:
-        # Artık weekly_under / weekly_over yok.
-        #
-        # Agent haftalık hedefin altında da kalamaz, üstüne de çıkamaz.
-        #
-        # Eğer overtime_week = 0 ise:
-        # sum(normal_work_vars) == normal_target
-        #
-        # Eğer overtime_week = 1 ise:
-        # sum(normal_work_vars) == normal_target + 1
-
-        model.Add(
-            sum(normal_work_vars)
-            ==
-            normal_target + overtime_week[(a, wk)]
-        )
-
-        weekly_work_constraints += 1
-
-        # --------------------------------------------------
-        # 4.11) DEBUG SATIRI
-        # --------------------------------------------------
-
-        weekly_target_debug_rows.append({
-            "agent_user_code": a,
-            "week": wk,
-            "normal_target": normal_target,
-            "normal_work_var_count": len(normal_work_vars),
-            "resmi_tatil_work_var_count": len(resmi_tatil_work_vars),
-            "izin_normal_count": len(izin_normal_days_this_week),
-            "resmi_tatil_count": len(resmi_tatil_days_this_week),
-            "mesaiye_kalamaz": a in mesaiye_kalamaz_agents,
-            "partial_week": False,
-            "partial_type": wk_partial_type,
-            "partial_week_reason": None,
-            "hard_weekly_target": True,
-            "overtime_forced_zero_reason": overtime_forced_zero_reason
-        })
-
-# --------------------------------------------------
-# 5) AYDA MAX NORMAL MESAİ HARD KURALI
-# --------------------------------------------------
-# Resmi tatil mesaisi bu limite dahil değildir.
-# Sadece overtime_week değişkenleri sayılır.
-#
-# Partial week'lerde overtime_week yukarıda 0'a sabitlendiği için
-# ay sınırı haftaları normal mesai limitini tüketmez.
-
-for a in AGENTS:
-
-    a = str(a).strip()
-
-    model.Add(
-        sum(
-            overtime_week[(a, wk)]
-            for wk in WEEKS
-            if (a, wk) in overtime_week
-        )
-        <= MAX_OVERTIME_PER_MONTH
-    )
-
-    monthly_overtime_constraints += 1
-
-# --------------------------------------------------
-# 6) DEBUG DATAFRAME
-# --------------------------------------------------
-
-weekly_target_debug_df = pd.DataFrame(weekly_target_debug_rows)
-
-print("Haftalık hard çalışma kısıtı:", weekly_work_constraints)
-print("Mesaiye kalamaz overtime kapatma kısıtı:", weekly_overtime_block_constraints)
-print("İzinli haftada overtime kapatma kısıtı:", leave_week_overtime_block_constraints)
-print("Partial week skip/overtime kapatma kısıtı:", partial_week_skip_constraints)
-print("Aylık max normal mesai kısıtı:", monthly_overtime_constraints)
-print("Resmi tatil work week takip kısıtı:", resmi_tatil_work_week_constraints)
-print("weekly_under değişken sayısı:", len(weekly_under))
-print("weekly_over değişken sayısı:", len(weekly_over))
-print("resmi_tatil_work_week değişken sayısı:", len(resmi_tatil_work_week))
-
-print("Partial week kontrol özeti:")
-display(
-    weekly_target_debug_df[
-        weekly_target_debug_df["partial_week"] == True
-    ]
-    .sort_values(["week", "agent_user_code"])
-    .head(20)
-)
-
-print("Resmi tatil haftası hedef kontrolü:")
-display(
-    weekly_target_debug_df[
-        pd.to_numeric(
-            weekly_target_debug_df["resmi_tatil_count"],
-            errors="coerce"
-        ).fillna(0) > 0
-    ]
-    .sort_values(["week", "agent_user_code"])
-    .head(10)
-)
-
-print("İzinli hafta hedef kontrolü:")
-display(
-    weekly_target_debug_df[
-        pd.to_numeric(
-            weekly_target_debug_df["izin_normal_count"],
-            errors="coerce"
-        ).fillna(0) > 0
-    ]
-    .sort_values(["week", "agent_user_code"])
-    .head(20)
-)
-
-
-
-# %% [KONTROL] - HAFTALIK HARD TARGET SONUÇ KONTROLÜ
+# %% [KISIT] - AKŞAM / GECE VARDİYALARINDA LOKASYON ORANLI DAĞILIM
 # Amaç:
-# weekly_under / weekly_over kaldırıldıktan sonra
-# her agent-week için gerçek çalışma sayısı hedefe eşit mi kontrol etmek.
+# 15:00 girişli vardiyadan 00:00 girişli vardiyaya kadar olan vardiyalarda
+# İzmir / Gebze / Samsun lokasyonlarının iş biriminin verdiği oranlara
+# yakın çalışmasını sağlamak.
+#
+# Bu kural SOFT constraint'tir.
+# Sapmalar objective içinde cezalandırılır.
+#
+# Ankara bu oran kuralına dahil değildir ama gece/akşam vardiyasına yazılabilir.
+# Hatay/Adıyaman/Maraş zaten sabah_calisir_flg=1 kuralı ile geç vardiyalara yazılmamalıdır.
 
-weekly_hard_target_result_rows = []
+# --------------------------------------------------
+# 0) DEFAULTLAR
+# --------------------------------------------------
 
-for _, r in weekly_target_debug_df.iterrows():
+if "ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI" not in globals():
+    ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI = False
 
-    if bool(r.get("partial_week", False)) == True:
-        continue
+if "LOKASYON_AKSAM_GECE_ORANLARI" not in globals():
+    LOKASYON_AKSAM_GECE_ORANLARI = {}
 
-    if bool(r.get("hard_weekly_target", False)) != True:
-        continue
+if "LOKASYON_AKSAM_GECE_ORAN_SAPMA_W" not in globals():
+    LOKASYON_AKSAM_GECE_ORAN_SAPMA_W = 25000
 
-    a = str(r["agent_user_code"]).strip()
-    wk = str(r["week"]).strip()
+if "AKSAM_GECE_SHIFT_START_MIN" not in globals():
+    AKSAM_GECE_SHIFT_START_MIN = "15:00"
 
-    week_days_list = week_days[wk]
+if "AKSAM_GECE_0000_DAHIL" not in globals():
+    AKSAM_GECE_0000_DAHIL = True
 
-    resmi_tatil_days_this_week = set(
-        ds
-        for ds in week_days_list
-        if ds in resmi_tatil_gunleri_for_weekly
-    )
 
-    normal_worked = sum(
-        int(solver.Value(work[(a, ds)]))
-        for ds in week_days_list
-        if (a, ds) in work
-        and ds not in resmi_tatil_days_this_week
-    )
+# --------------------------------------------------
+# 1) ÇIKTI / DEĞİŞKEN SÖZLÜKLERİ
+# --------------------------------------------------
 
-    overtime_val = (
-        int(solver.Value(overtime_week[(a, wk)]))
-        if (a, wk) in overtime_week
-        else 0
-    )
+lokasyon_aksam_gece_sapma_terms = []
 
-    normal_target = int(r["normal_target"])
-    expected_work = normal_target + overtime_val
+lokasyon_aksam_gece_count = {}
+lokasyon_aksam_gece_target = {}
+lokasyon_aksam_gece_diff = {}
+lokasyon_aksam_gece_abs_diff = {}
 
-    izin_normal_count = int(
-        pd.to_numeric(
-            r.get("izin_normal_count", 0),
-            errors="coerce"
-        )
-    )
+lokasyon_aksam_gece_debug_rows = []
+lokasyon_aksam_gece_shift_rows = []
 
-    weekly_hard_target_result_rows.append({
-        "agent_user_code": a,
-        "week": wk,
-        "normal_target": normal_target,
-        "overtime_week": overtime_val,
-        "expected_work": expected_work,
-        "actual_normal_worked": normal_worked,
-        "izin_normal_count": izin_normal_count,
-        "overtime_forced_zero_reason": r.get("overtime_forced_zero_reason"),
-        "target_ok": normal_worked == expected_work,
-        "izinli_haftada_overtime_ok": (
-            overtime_val == 0
-            if izin_normal_count > 0
-            else True
-        )
+agent_location_map = {}
+aksam_gece_shift_keys = []
+
+
+# --------------------------------------------------
+# 2) HELPERLAR
+# --------------------------------------------------
+
+def _time_to_min_for_loc_rule(t):
+    if t is None:
+        return None
+
+    if pd.isna(t):
+        return None
+
+    t = str(t).strip()
+
+    if len(t) == 5 and ":" in t:
+        hh, mm = t.split(":")
+        return int(hh) * 60 + int(mm)
+
+    if len(t) == 8 and ":" in t:
+        hh, mm, ss = t.split(":")
+        return int(hh) * 60 + int(mm)
+
+    return None
+
+
+def _normalize_location_for_rule(val):
+    if val is None:
+        return None
+
+    if pd.isna(val):
+        return None
+
+    val = str(val).strip().lower()
+
+    tr_map = str.maketrans({
+        "ı": "i",
+        "İ": "i",
+        "ğ": "g",
+        "Ğ": "g",
+        "ü": "u",
+        "Ü": "u",
+        "ş": "s",
+        "Ş": "s",
+        "ö": "o",
+        "Ö": "o",
+        "ç": "c",
+        "Ç": "c",
     })
 
-weekly_hard_target_result_df = pd.DataFrame(weekly_hard_target_result_rows)
+    val = val.translate(tr_map)
 
-print(
-    "Haftalık hard target ihlal sayısı:",
-    (
-        weekly_hard_target_result_df["target_ok"] == False
-    ).sum()
-)
+    if "izmir" in val:
+        return "izmir"
 
-print(
-    "İzinli haftada overtime ihlal sayısı:",
-    (
-        weekly_hard_target_result_df["izinli_haftada_overtime_ok"] == False
-    ).sum()
-)
+    if "gebze" in val:
+        return "gebze"
 
-display(
-    weekly_hard_target_result_df[
-        (weekly_hard_target_result_df["target_ok"] == False)
-        |
-        (weekly_hard_target_result_df["izinli_haftada_overtime_ok"] == False)
+    if "samsun" in val:
+        return "samsun"
+
+    if "ankara" in val:
+        return "ankara"
+
+    if (
+        "hatay" in val
+        or "hata" in val
+        or "adiyaman" in val
+        or "maras" in val
+        or "kahramanmaras" in val
+    ):
+        return "hatay_adiyaman_maras"
+
+    return val
+
+
+def _get_shift_time_for_loc_rule(ds, v):
+    """
+    saat dict'inde ds farklı formatlarda tutulmuş olabilir.
+    Bu yüzden birkaç formatla dener.
+    """
+
+    if "saat" not in globals() or not isinstance(saat, dict):
+        return None, None
+
+    ds_ts = pd.to_datetime(ds)
+    ds_str = ds_ts.strftime("%Y-%m-%d")
+    ds_date = ds_ts.date()
+
+    possible_ds_keys = [
+        ds,
+        ds_str,
+        ds_date,
+        ds_ts,
     ]
+
+    possible_v_keys = [
+        v,
+        str(v).strip(),
+    ]
+
+    for d_key in possible_ds_keys:
+        for v_key in possible_v_keys:
+            key = (d_key, v_key)
+
+            if key in saat:
+                val = saat[key]
+
+                if isinstance(val, (list, tuple)) and len(val) >= 2:
+                    return val[0], val[1]
+
+    return None, None
+
+
+def _is_aksam_gece_shift_for_loc_rule(ds, v):
+    """
+    Akşam/gece vardiyası:
+    - 15:00 ve sonrası başlayan vardiyalar
+    - 00:00 başlayan vardiya
+    """
+
+    shift_start, shift_end = _get_shift_time_for_loc_rule(ds, v)
+
+    start_min = _time_to_min_for_loc_rule(shift_start)
+
+    if start_min is None:
+        return False
+
+    limit_min = _time_to_min_for_loc_rule(AKSAM_GECE_SHIFT_START_MIN)
+
+    if limit_min is None:
+        limit_min = 15 * 60
+
+    if AKSAM_GECE_0000_DAHIL and start_min == 0:
+        return True
+
+    return start_min >= limit_min
+
+
+# --------------------------------------------------
+# 3) KURAL AKTİFSE MODEL KISITLARINI KUR
+# --------------------------------------------------
+
+if ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI:
+
+    # --------------------------------------------------
+    # 3.1) Config lokasyonlarını normalize et
+    # --------------------------------------------------
+
+    lokasyon_oranlari_normalized = {}
+
+    for loc, oran in LOKASYON_AKSAM_GECE_ORANLARI.items():
+        loc_norm = _normalize_location_for_rule(loc)
+        lokasyon_oranlari_normalized[loc_norm] = float(oran)
+
+    oran_lokasyonlari = list(lokasyon_oranlari_normalized.keys())
+
+    oran_toplami = sum(lokasyon_oranlari_normalized.values())
+
+    print("Lokasyon oran kuralı aktif.")
+    print("Config lokasyon oranları:", lokasyon_oranlari_normalized)
+    print("Oran toplamı:", oran_toplami)
+
+    if oran_toplami > 1.0001:
+        print("UYARI: Lokasyon oran toplamı 1'den büyük. Hedef toplam talebi aşabilir.")
+
+    # --------------------------------------------------
+    # 3.2) Agent lokasyon map'i
+    # --------------------------------------------------
+    # Öncelik df_tam["lokasyon"].
+    # Eğer yoksa fallback olarak working_main_group kullanılır.
+
+    for _, r in df_tam.iterrows():
+
+        a = str(r["agent_user_code"]).strip()
+
+        if "lokasyon" in df_tam.columns:
+            raw_loc = r.get("lokasyon")
+
+        elif "working_main_group" in df_tam.columns:
+            raw_loc = r.get("working_main_group")
+
+        else:
+            raw_loc = None
+
+        agent_location_map[a] = _normalize_location_for_rule(raw_loc)
+
+    agent_location_debug_df = pd.DataFrame([
+        {
+            "agent_user_code": a,
+            "lokasyon_normalized": loc
+        }
+        for a, loc in agent_location_map.items()
+    ])
+
+    print("Agent lokasyon dağılımı:")
+    display(
+        agent_location_debug_df
+        .groupby("lokasyon_normalized", as_index=False)
+        .agg(agent_sayisi=("agent_user_code", "nunique"))
+        .sort_values("agent_sayisi", ascending=False)
+    )
+
+    # --------------------------------------------------
+    # 3.3) Akşam/gece vardiya key'lerini bul
+    # --------------------------------------------------
+
+    for ds in PLAN_GUNLER:
+
+        for v in gun_vardiyalari.get(ds, []):
+
+            if (ds, v) not in talep:
+                continue
+
+            if not _is_aksam_gece_shift_for_loc_rule(ds, v):
+                continue
+
+            shift_start, shift_end = _get_shift_time_for_loc_rule(ds, v)
+
+            aksam_gece_shift_keys.append((ds, v))
+
+            lokasyon_aksam_gece_shift_rows.append({
+                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "week": day_week.get(ds) if "day_week" in globals() else None,
+                "shift": v,
+                "shift_start": shift_start,
+                "shift_end": shift_end,
+                "required": int(talep[(ds, v)]),
+            })
+
+    lokasyon_aksam_gece_shift_df = pd.DataFrame(
+        lokasyon_aksam_gece_shift_rows
+    )
+
+    total_aksam_gece_required = sum(
+        int(talep[(ds, v)])
+        for ds, v in aksam_gece_shift_keys
+        if (ds, v) in talep
+    )
+
+    print("Akşam/gece vardiya satır sayısı:", len(aksam_gece_shift_keys))
+    print("Toplam akşam/gece required:", total_aksam_gece_required)
+
+    display(lokasyon_aksam_gece_shift_df.head(20))
+
+    # --------------------------------------------------
+    # 3.4) Lokasyon bazlı gerçek atama değişkenlerini say
+    # --------------------------------------------------
+    # Sadece config içindeki lokasyonlar için count oluşturulur.
+    # Ankara bu count'a dahil değildir.
+
+    for loc in oran_lokasyonlari:
+
+        loc_agents = [
+            str(a).strip()
+            for a in AGENTS
+            if agent_location_map.get(str(a).strip()) == loc
+        ]
+
+        loc_assignment_vars = []
+
+        for a in loc_agents:
+
+            for ds, v in aksam_gece_shift_keys:
+
+                if (a, ds, v) in x:
+                    loc_assignment_vars.append(x[(a, ds, v)])
+
+        max_possible = len(loc_assignment_vars)
+
+        lokasyon_aksam_gece_count[loc] = model.NewIntVar(
+            0,
+            max_possible,
+            f"lokasyon_aksam_gece_count_{loc}"
+        )
+
+        if loc_assignment_vars:
+            model.Add(
+                lokasyon_aksam_gece_count[loc]
+                == sum(loc_assignment_vars)
+            )
+        else:
+            model.Add(
+                lokasyon_aksam_gece_count[loc] == 0
+            )
+
+    # --------------------------------------------------
+    # 3.5) Config oranına göre hedefleri ve sapmaları oluştur
+    # --------------------------------------------------
+    # target = toplam akşam/gece required * config oran
+    #
+    # Oran burada hesaplanmaz.
+    # İş birimi oranı config'ten gelir.
+
+    for loc in oran_lokasyonlari:
+
+        oran = float(lokasyon_oranlari_normalized[loc])
+
+        target = int(round(total_aksam_gece_required * oran))
+
+        lokasyon_aksam_gece_target[loc] = target
+
+        count_var = lokasyon_aksam_gece_count[loc]
+
+        max_possible = count_var.Proto().domain[-1]
+
+        diff_lb = -target
+        diff_ub = max_possible - target
+
+        lokasyon_aksam_gece_diff[loc] = model.NewIntVar(
+            diff_lb,
+            diff_ub,
+            f"lokasyon_aksam_gece_diff_{loc}"
+        )
+
+        max_abs_diff = max(abs(diff_lb), abs(diff_ub))
+
+        lokasyon_aksam_gece_abs_diff[loc] = model.NewIntVar(
+            0,
+            max_abs_diff,
+            f"lokasyon_aksam_gece_abs_diff_{loc}"
+        )
+
+        model.Add(
+            lokasyon_aksam_gece_diff[loc]
+            ==
+            count_var - target
+        )
+
+        model.AddAbsEquality(
+            lokasyon_aksam_gece_abs_diff[loc],
+            lokasyon_aksam_gece_diff[loc]
+        )
+
+        lokasyon_aksam_gece_sapma_terms.append(
+            LOKASYON_AKSAM_GECE_ORAN_SAPMA_W
+            * lokasyon_aksam_gece_abs_diff[loc]
+        )
+
+        loc_agent_count = sum(
+            1
+            for a in AGENTS
+            if agent_location_map.get(str(a).strip()) == loc
+        )
+
+        lokasyon_aksam_gece_debug_rows.append({
+            "lokasyon": loc,
+            "config_oran": oran,
+            "agent_sayisi": loc_agent_count,
+            "toplam_aksam_gece_required": total_aksam_gece_required,
+            "hedef_atama": target,
+            "max_possible_var_count": max_possible,
+            "kural_tipi": "soft_abs_diff_penalty",
+            "penalty_weight": LOKASYON_AKSAM_GECE_ORAN_SAPMA_W,
+        })
+
+    lokasyon_aksam_gece_debug_df = pd.DataFrame(
+        lokasyon_aksam_gece_debug_rows
+    )
+
+    print("Lokasyon akşam/gece hedefleri:")
+    display(lokasyon_aksam_gece_debug_df)
+
+else:
+
+    total_aksam_gece_required = 0
+    lokasyon_aksam_gece_shift_df = pd.DataFrame()
+    lokasyon_aksam_gece_debug_df = pd.DataFrame()
+    agent_location_debug_df = pd.DataFrame()
+
+    print("Lokasyon akşam/gece oran kuralı kapalı.")
+
+
+
+# Lokasyon akşam/gece oran sapma cezası
+if (
+    "ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI" in globals()
+    and ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI
+    and "lokasyon_aksam_gece_sapma_terms" in globals()
+):
+    obj_terms.extend(lokasyon_aksam_gece_sapma_terms)
+
+
+# %% [KONTROL] - AKŞAM / GECE LOKASYON ORAN SONUÇ KONTROLÜ
+# Amaç:
+# İzmir / Gebze / Samsun için akşam/gece atama sayıları
+# config hedeflerine yakın mı görmek.
+
+lokasyon_aksam_gece_result_rows = []
+
+if (
+    "ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI" in globals()
+    and ENABLE_LOKASYON_AKSAM_GECE_ORAN_KURALI
+):
+
+    for loc in LOKASYON_AKSAM_GECE_ORANLARI.keys():
+
+        actual = int(
+            solver.Value(lokasyon_aksam_gece_count[loc])
+        )
+
+        target = int(lokasyon_aksam_gece_target[loc])
+
+        diff = actual - target
+
+        abs_diff = abs(diff)
+
+        lokasyon_aksam_gece_result_rows.append({
+            "lokasyon": loc,
+            "config_oran": float(LOKASYON_AKSAM_GECE_ORANLARI[loc]),
+            "toplam_aksam_gece_required": sum(
+                int(talep[(ds, v)])
+                for ds, v in aksam_gece_shift_keys
+                if (ds, v) in talep
+            ),
+            "hedef_atama": target,
+            "gercek_atama": actual,
+            "fark": diff,
+            "mutlak_fark": abs_diff,
+            "gercek_oran": (
+                actual
+                /
+                sum(
+                    int(talep[(ds, v)])
+                    for ds, v in aksam_gece_shift_keys
+                    if (ds, v) in talep
+                )
+                if len(aksam_gece_shift_keys) > 0
+                else 0
+            ),
+        })
+
+lokasyon_aksam_gece_result_df = pd.DataFrame(
+    lokasyon_aksam_gece_result_rows
 )
+
+display(lokasyon_aksam_gece_result_df)
+
+

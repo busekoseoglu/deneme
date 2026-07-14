@@ -1,100 +1,101 @@
-# %% KONTROL - GÜNLÜK 15:00 SONRASI LOKASYON DAĞILIMI
+# %% KONTROL - GÜNLÜK AKŞAM/GECE LOKASYON DAĞILIMI
+#
+# Kullanılan mevcut değişkenler:
+# - aksam_gece_shift_keys
+# - talep
+# - x
+# - solver
+# - AGENTS
+# - agent_location_map
+# - lokasyon_oranlari
+# - day_week
 #
 # Her gün için:
-# - 15:00 sonrası kapsama giren vardiyaların toplam required değeri
-# - Bu vardiyalara toplam kaç kişi atandığı
-# - Her lokasyondan kaç kişi geldiği
-# - Lokasyon hedefi
-# - Hedeften sapma
-#
-# birlikte gösterilir.
+# 1. 15:00 sonrası kapsamdaki vardiyaların required toplamı
+# 2. Toplam atanan kişi
+# 3. İzmir / Gebze / Samsun hedefi
+# 4. Her lokasyondan gerçekten gelen kişi
+# 5. Hedeften fark
 
-gunluk_lokasyon_kontrol_rows = []
+gunluk_lokasyon_rows = []
 
-for ds, day_shift_keys in aksam_gece_shifts_by_day.items():
+aksam_gece_gunleri = sorted(
+    set(ds for ds, v in aksam_gece_shift_keys),
+    key=lambda ds: pd.to_datetime(ds)
+)
 
-    # -------------------------------------------------
-    # 1) Günün 15:00 sonrası toplam required değeri
-    # -------------------------------------------------
+for ds in aksam_gece_gunleri:
 
-    daily_required = sum(
+    # Bu güne ait akşam/gece vardiyaları
+    gun_shift_keys = [
+        (d, v)
+        for d, v in aksam_gece_shift_keys
+        if d == ds and (d, v) in talep
+    ]
+
+    # Günlük toplam required
+    required_total = sum(
         int(talep[(d, v)])
-        for d, v in day_shift_keys
-        if (d, v) in talep
+        for d, v in gun_shift_keys
     )
 
-    # -------------------------------------------------
-    # 2) Günün 15:00 sonrası toplam gerçekleşen ataması
-    # -------------------------------------------------
-
-    daily_assigned = sum(
+    # Günlük toplam atama
+    assigned_total = sum(
         solver.Value(x[(a, d, v)])
         for a in AGENTS
-        for d, v in day_shift_keys
+        for d, v in gun_shift_keys
         if (a, d, v) in x
     )
 
     row = {
         "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
         "week": day_week.get(ds),
-        "vardiya_sayisi": len(day_shift_keys),
-        "required_total": daily_required,
-        "assigned_total": daily_assigned,
-        "coverage_gap": daily_assigned - daily_required,
+        "aksam_gece_vardiya_sayisi": len(gun_shift_keys),
+        "required_total": required_total,
+        "assigned_total": assigned_total,
+        "coverage_gap": assigned_total - required_total,
     }
 
-    takip_edilen_lokasyon_toplam = 0
+    takip_edilen_lokasyon_atama = 0
 
-    # -------------------------------------------------
-    # 3) Her lokasyondan gelen kişi sayısı
-    # -------------------------------------------------
+    for loc, oran in lokasyon_oranlari.items():
 
-    for loc in oran_lokasyonlari:
+        loc = str(loc).strip().lower()
+        oran = float(oran)
 
-        config_oran = float(lokasyon_oranlari[loc])
-
-        actual_count = sum(
+        gelen = sum(
             solver.Value(x[(a, d, v)])
             for a in AGENTS
             if agent_location_map.get(str(a).strip()) == loc
-            for d, v in day_shift_keys
+            for d, v in gun_shift_keys
             if (a, d, v) in x
         )
 
-        target_count = int(round(daily_required * config_oran))
+        hedef = int(round(required_total * oran))
 
-        actual_ratio_to_required = (
-            actual_count / daily_required
-            if daily_required > 0
-            else 0
-        )
+        row[f"{loc}_oran"] = oran
+        row[f"{loc}_hedef"] = hedef
+        row[f"{loc}_gelen"] = gelen
+        row[f"{loc}_fark"] = gelen - hedef
 
-        row[f"{loc}_hedef"] = target_count
-        row[f"{loc}_gelen"] = actual_count
-        row[f"{loc}_fark"] = actual_count - target_count
-        row[f"{loc}_oran_pct"] = round(
-            actual_ratio_to_required * 100,
+        row[f"{loc}_gercek_oran_pct"] = round(
+            (gelen / required_total * 100)
+            if required_total > 0
+            else 0,
             2
         )
 
-        takip_edilen_lokasyon_toplam += actual_count
+        takip_edilen_lokasyon_atama += gelen
 
-    # Config'te oran tanımlanmayan diğer lokasyonlar
     row["diger_lokasyon_gelen"] = (
-        daily_assigned - takip_edilen_lokasyon_toplam
+        assigned_total - takip_edilen_lokasyon_atama
     )
 
-    gunluk_lokasyon_kontrol_rows.append(row)
+    gunluk_lokasyon_rows.append(row)
 
 
 gunluk_lokasyon_kontrol_df = pd.DataFrame(
-    gunluk_lokasyon_kontrol_rows
-)
-
-gunluk_lokasyon_kontrol_df = (
-    gunluk_lokasyon_kontrol_df
-    .sort_values(["date"])
-    .reset_index(drop=True)
-)
+    gunluk_lokasyon_rows
+).sort_values("date").reset_index(drop=True)
 
 display(gunluk_lokasyon_kontrol_df)

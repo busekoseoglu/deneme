@@ -334,3 +334,118 @@ print(
 )
 
 display(team_1500_kontrol_df)
+
+
+
+# %% [DUMMY DATA] - EKİP BAZLI GEÇMİŞ 15:00 VARDİYA SAYISI
+
+import numpy as np
+import pandas as pd
+
+GECMIS_1500_KOLONU = "gecmis_1500_base_hafta_sayisi"
+
+# Sonucun her çalıştırmada aynı gelmesi için
+rng = np.random.default_rng(seed=42)
+
+# Gerekli kolonları temizle
+df_tam["takim"] = (
+    df_tam["takim"]
+    .astype(str)
+    .str.strip()
+)
+
+df_tam["sabah_calisir_flg"] = (
+    pd.to_numeric(
+        df_tam["sabah_calisir_flg"],
+        errors="coerce"
+    )
+    .fillna(0)
+    .astype(int)
+)
+
+# -------------------------------------------------
+# Takım bazında sabah çalışan ekip kontrolü
+# -------------------------------------------------
+# Takımın bütün üyeleri sabah_calisir_flg=1 ise
+# bu takım 15:00 vardiyasına uygun değildir.
+
+takim_sabah_durumu = (
+    df_tam
+    .groupby("takim")["sabah_calisir_flg"]
+    .agg(
+        takim_agent_sayisi="size",
+        sabah_calisan_sayisi="sum"
+    )
+    .reset_index()
+)
+
+takim_sabah_durumu["tamami_sabah_calisir"] = (
+    takim_sabah_durumu["takim_agent_sayisi"]
+    ==
+    takim_sabah_durumu["sabah_calisan_sayisi"]
+)
+
+# -------------------------------------------------
+# Takım bazlı dummy geçmiş değer oluştur
+# -------------------------------------------------
+
+team_gecmis_1500_dummy = {}
+
+for _, row in takim_sabah_durumu.iterrows():
+
+    takim = row["takim"]
+
+    if row["tamami_sabah_calisir"]:
+        # 15:00 vardiyasına uygun olmayan takım
+        gecmis_sayi = 0
+    else:
+        # Dummy geçmiş sayı
+        gecmis_sayi = int(rng.integers(2, 11))
+
+    team_gecmis_1500_dummy[takim] = gecmis_sayi
+
+# Aynı takımın tüm agentlarına aynı değeri yaz
+df_tam[GECMIS_1500_KOLONU] = (
+    df_tam["takim"]
+    .map(team_gecmis_1500_dummy)
+    .fillna(0)
+    .astype(int)
+)
+
+# -------------------------------------------------
+# Kontrol tablosu
+# -------------------------------------------------
+
+dummy_1500_kontrol_df = (
+    df_tam[
+        [
+            "takim",
+            "sabah_calisir_flg",
+            GECMIS_1500_KOLONU
+        ]
+    ]
+    .groupby("takim", as_index=False)
+    .agg(
+        takim_agent_sayisi=("sabah_calisir_flg", "size"),
+        sabah_calisan_sayisi=("sabah_calisir_flg", "sum"),
+        gecmis_1500_sayisi=(GECMIS_1500_KOLONU, "first"),
+        takim_ici_farkli_deger_sayisi=(GECMIS_1500_KOLONU, "nunique")
+    )
+)
+
+dummy_1500_kontrol_df["tamami_sabah_calisir"] = (
+    dummy_1500_kontrol_df["takim_agent_sayisi"]
+    ==
+    dummy_1500_kontrol_df["sabah_calisan_sayisi"]
+)
+
+print("Dummy geçmiş 15:00 kolonu oluşturuldu:", GECMIS_1500_KOLONU)
+print("Takım sayısı:", len(dummy_1500_kontrol_df))
+
+display(
+    dummy_1500_kontrol_df
+    .sort_values(
+        ["tamami_sabah_calisir", "gecmis_1500_sayisi", "takim"],
+        ascending=[False, True, True]
+    )
+)

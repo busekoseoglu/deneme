@@ -5,96 +5,20 @@
 
 TEAM_1500_DENGE_W = CONFIG["TEAM_1500_DENGE_W"]
 
-
-# %% [HAZIRLIK] - EKİP BAZLI GEÇMİŞ 15:00 VARDİYA SAYISI
-
-GECMIS_1500_KOLONU = "gecmis_1500_base_hafta_sayisi"
-
-if GECMIS_1500_KOLONU not in df_tam.columns:
-    raise ValueError(
-        f"df_tam içinde '{GECMIS_1500_KOLONU}' kolonu bulunamadı."
-    )
-
-gecmis_1500_kontrol_df = (
-    df_tam[
-        [
-            "takim",
-            GECMIS_1500_KOLONU
-        ]
-    ]
-    .dropna(subset=["takim"])
-    .copy()
-)
-
-gecmis_1500_kontrol_df["takim"] = (
-    gecmis_1500_kontrol_df["takim"]
-    .astype(str)
-    .str.strip()
-)
-
-gecmis_1500_kontrol_df[GECMIS_1500_KOLONU] = (
-    pd.to_numeric(
-        gecmis_1500_kontrol_df[GECMIS_1500_KOLONU],
-        errors="coerce"
-    )
-    .fillna(0)
-    .astype(int)
-)
-
-
-# Aynı ekipte farklı geçmiş değer girilmiş mi kontrol et
-takim_gecmis_deger_sayisi = (
-    gecmis_1500_kontrol_df
-    .groupby("takim")[GECMIS_1500_KOLONU]
-    .nunique()
-)
-
-tutarsiz_takimlar = takim_gecmis_deger_sayisi[
-    takim_gecmis_deger_sayisi > 1
-]
-
-if len(tutarsiz_takimlar) > 0:
-    tutarsiz_detay = (
-        gecmis_1500_kontrol_df[
-            gecmis_1500_kontrol_df["takim"].isin(
-                tutarsiz_takimlar.index
-            )
-        ]
-        .drop_duplicates()
-        .sort_values(
-            ["takim", GECMIS_1500_KOLONU]
-        )
-    )
-
-    display(tutarsiz_detay)
-
-    raise ValueError(
-        "Aynı ekipte farklı geçmiş 15:00 sayıları var. "
-        "Bir ekibin bütün agentlarında aynı değer bulunmalı."
-    )
-
+# %% [HAZIRLIK] - EKİP BAZLI GEÇMİŞ 15:00 SAYISI
 
 team_gecmis_1500 = (
-    gecmis_1500_kontrol_df
+    df_tam[
+        ["takim", "gecmis_1500_base_hafta_sayisi"]
+    ]
+    .dropna(subset=["takim"])
     .drop_duplicates(subset=["takim"])
-    .set_index("takim")[GECMIS_1500_KOLONU]
+    .set_index("takim")["gecmis_1500_base_hafta_sayisi"]
+    .astype(int)
     .to_dict()
 )
 
-
-print("Geçmiş 15:00 bilgisi olan ekip sayısı:", len(team_gecmis_1500))
-
-display(
-    pd.DataFrame(
-        [
-            {
-                "takim": t,
-                "gecmis_1500_sayisi": team_gecmis_1500[t]
-            }
-            for t in sorted(team_gecmis_1500)
-        ]
-    )
-)
+print(team_gecmis_1500)
 
 
 # %% [HAZIRLIK] - HAFTA BAZINDA 15:00 BAŞLANGIÇLI VARDİYALAR

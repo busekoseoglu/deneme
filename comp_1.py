@@ -373,3 +373,31 @@ display(
         ascending=[False, True, True]
     )
 )
+
+
+# -------------------------------------------------
+# EKİP 15:00 TARİHSEL ADALET CEZASI
+# -------------------------------------------------
+
+# Ekiplerin geçmiş + bu ay toplam farkını azalt
+objective_terms.append(
+    TEAM_1500_DENGE_W
+    * team_1500_spread
+)
+
+# Geçmişte çok alan ekibin bu ay tekrar seçilmesini azalt
+for t in TAKIMLAR:
+
+    t = str(t).strip()
+
+    gecmis_sayi = int(
+        team_gecmis_1500.get(t, 0)
+    )
+
+    objective_terms.append(
+        TEAM_1500_DENGE_W
+        * gecmis_sayi
+        * team_1500_bu_ay[t]
+    )
+
+print("TEAM_1500_DENGE_W:", TEAM_1500_DENGE_W)

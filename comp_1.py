@@ -1,192 +1,328 @@
-# ==================================================
-# 7) AYLIK TAKVİM
-# ==================================================
+# %% [KISIT] - AYDA EN AZ 1 CUMARTESİ-PAZAR GERÇEK ÇİFT OFF
+#
+# Çift OFF sayılması için:
+# - Cumartesi gerçek OFF olmalı
+# - Pazar gerçek OFF olmalı
+#
+# İZİN günü çalışılmasa bile OFF sayılmaz.
 
-calendar_value_df = agent_day_plan_df.copy()
+weekend_pairs = []
 
-calendar_value_df["date"] = pd.to_datetime(
-    calendar_value_df["date"]
-).dt.normalize()
+plan_dates = sorted([
+    pd.to_datetime(ds).date()
+    for ds in PLAN_GUNLER
+])
 
-calendar_value_df["weekday"] = (
-    calendar_value_df["date"].dt.weekday
+date_to_ds = {
+    pd.to_datetime(ds).date(): ds
+    for ds in PLAN_GUNLER
+}
+
+for d in plan_dates:
+
+    # Cumartesi = 5
+    if d.weekday() == 5:
+
+        sunday = d + pd.Timedelta(days=1)
+
+        if sunday in date_to_ds:
+
+            sat_ds = date_to_ds[d]
+            sun_ds = date_to_ds[sunday]
+
+            weekend_pairs.append(
+                (sat_ds, sun_ds)
+            )
+
+
+print("Cumartesi-Pazar çiftleri:")
+
+for pair in weekend_pairs:
+    print(pair)
+
+
+# --------------------------------------------------
+# GERÇEK OFF DEĞİŞKENLERİ
+# --------------------------------------------------
+
+gercek_off = {}
+
+for a in AGENTS:
+
+    for ds in PLAN_GUNLER:
+
+        gercek_off[(a, ds)] = model.NewBoolVar(
+            f"gercek_off_{a}_{ds}"
+        )
+
+        izinli_mi = int(
+            izin_map.get((a, ds), 0)
+        )
+
+        if izinli_mi == 1:
+
+            # İzin günü OFF sayılamaz
+            model.Add(
+                gercek_off[(a, ds)] == 0
+            )
+
+        else:
+
+            # İzinli değilse:
+            # çalışmıyorsa gerçek OFF,
+            # çalışıyorsa OFF değil.
+            model.Add(
+                gercek_off[(a, ds)]
+                + work[(a, ds)]
+                == 1
+            )
+
+
+# --------------------------------------------------
+# ÇİFT OFF DEĞİŞKENLERİ
+# --------------------------------------------------
+
+pair_off = {}
+
+weekend_pair_constraints = 0
+
+for a in AGENTS:
+
+    pair_vars = []
+
+    for i, (sat_ds, sun_ds) in enumerate(
+        weekend_pairs
+    ):
+
+        pair_off[(a, i)] = model.NewBoolVar(
+            f"pair_off_{a}_{i}"
+        )
+
+        # pair_off = 1 ise iki gün de gerçek OFF
+        model.Add(
+            pair_off[(a, i)]
+            <= gercek_off[(a, sat_ds)]
+        )
+
+        model.Add(
+            pair_off[(a, i)]
+            <= gercek_off[(a, sun_ds)]
+        )
+
+        # İki gün de gerçek OFF ise pair_off = 1
+        model.Add(
+            pair_off[(a, i)]
+            >=
+            gercek_off[(a, sat_ds)]
+            +
+            gercek_off[(a, sun_ds)]
+            - 1
+        )
+
+        pair_vars.append(
+            pair_off[(a, i)]
+        )
+
+        weekend_pair_constraints += 3
+
+    # Her agent için ayda en az 1 gerçek Cmt-Paz çift OFF
+    if pair_vars:
+
+        model.Add(
+            sum(pair_vars) >= 1
+        )
+
+        weekend_pair_constraints += 1
+
+
+print("Gerçek OFF değişken sayısı:", len(gercek_off))
+print("Pair OFF değişken sayısı:", len(pair_off))
+print(
+    "Cumartesi-Pazar gerçek çift OFF kısıtı:",
+    weekend_pair_constraints
 )
 
-# Mevcut day_week map'i varsa onu kullan
-calendar_value_df["week"] = (
-    calendar_value_df["date"]
-    .map(day_week)
-)
 
-calendar_value_df["calendar_value"] = np.where(
-    calendar_value_df["assigned"] == 1,
-    calendar_value_df["status"].fillna("") +
-    " | " +
-    calendar_value_df["assigned_shift"].fillna("") +
-    " (" +
-    calendar_value_df["shift_start"].fillna("") +
-    "-" +
-    calendar_value_df["shift_end"].fillna("") +
-    ")",
-    calendar_value_df["status"].fillna("")
-)
+# %% [KONTROL] - AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
 
+# --------------------------------------------------
+# 1. SOLVE SONUCU KONTROLÜ
+# --------------------------------------------------
 
-# ==================================================
-# 7.1) HAFTALIK NORM / MESAİ / ÇİFT OFF HESABI
-# ==================================================
-
-haftalik_calisma_rows = []
-
-for (agent_user_code, week), grp in calendar_value_df.groupby(
-    ["agent_user_code", "week"],
-    dropna=False
-):
-
-    # Pazartesi-Cuma arasında çalışılmayan gün sayısı
-    hafta_ici_off_sayisi = int(
-        (
-            (grp["weekday"].isin([0, 1, 2, 3, 4]))
-            &
-            (grp["assigned"] == 0)
-        ).sum()
+if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+    raise RuntimeError(
+        f"Model sonucu FEASIBLE/OPTIMAL değil. Status: {status}"
     )
 
-    # Cumartesi-Pazar çalışılan gün sayısı
-    hafta_sonu_calisma_sayisi = int(
-        (
-            (grp["weekday"].isin([5, 6]))
-            &
-            (grp["assigned"] == 1)
-        ).sum()
+
+# Tarihi okunabilir göstermek için
+def tarih_str(ds):
+    return pd.to_datetime(ds).strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------
+# 2. ÇİFT OFF DETAYLARI
+# --------------------------------------------------
+
+cift_off_kontrol_rows = []
+cift_off_ihlalleri = []
+
+for a in AGENTS:
+
+    agent_pair_off_sayisi = 0
+    agent_pair_detaylari = []
+
+    for i, (sat_ds, sun_ds) in enumerate(weekend_pairs):
+
+        pair_key = (a, i)
+
+        if pair_key not in pair_off:
+            continue
+
+        pair_val = int(
+            solver.Value(pair_off[pair_key])
+        )
+
+        cumartesi_work = int(
+            solver.Value(work[(a, sat_ds)])
+        )
+
+        pazar_work = int(
+            solver.Value(work[(a, sun_ds)])
+        )
+
+        cumartesi_gercek_off = int(
+            solver.Value(gercek_off[(a, sat_ds)])
+        )
+
+        pazar_gercek_off = int(
+            solver.Value(gercek_off[(a, sun_ds)])
+        )
+
+        # Gerçek sonuç:
+        # İki gün de gerçek OFF ise 1, aksi hâlde 0
+        beklenen_pair_val = int(
+            cumartesi_gercek_off == 1
+            and pazar_gercek_off == 1
+        )
+
+        pair_tutarlı_mı = (
+            pair_val == beklenen_pair_val
+        )
+
+        if pair_val == 1:
+            agent_pair_off_sayisi += 1
+
+        detay = (
+            f"{tarih_str(sat_ds)}-{tarih_str(sun_ds)}"
+            f" | Cmt work={cumartesi_work}"
+            f", gerçek_off={cumartesi_gercek_off}"
+            f" | Paz work={pazar_work}"
+            f", gerçek_off={pazar_gercek_off}"
+            f" | pair_off={pair_val}"
+        )
+
+        agent_pair_detaylari.append(detay)
+
+        # pair_off değişkeni gerçek OFF durumuyla uyuşmuyor
+        if not pair_tutarlı_mı:
+
+            cift_off_ihlalleri.append({
+                "agent_user_code": a,
+                "cumartesi": tarih_str(sat_ds),
+                "pazar": tarih_str(sun_ds),
+                "cumartesi_work": cumartesi_work,
+                "pazar_work": pazar_work,
+                "cumartesi_gercek_off": cumartesi_gercek_off,
+                "pazar_gercek_off": pazar_gercek_off,
+                "pair_off": pair_val,
+                "beklenen_pair_off": beklenen_pair_val,
+                "ihlal_tipi": "pair_off bağlantı ihlali"
+            })
+
+    # Her agentın ayda en az 1 çift OFF'u olmalı
+    aylik_kural_saglandi_mi = (
+        agent_pair_off_sayisi >= 1
     )
 
-    # Hafta içindeki OFF kadar hafta sonu çalışma normal sayılır
-    norm_calisma_sayisi = min(
-        hafta_ici_off_sayisi,
-        hafta_sonu_calisma_sayisi
-    )
+    if not aylik_kural_saglandi_mi:
 
-    # Norm sınırını aşan hafta sonu çalışmaları mesai sayılır
-    mesai_sayisi = max(
-        0,
-        hafta_sonu_calisma_sayisi - norm_calisma_sayisi
-    )
+        cift_off_ihlalleri.append({
+            "agent_user_code": a,
+            "cumartesi": None,
+            "pazar": None,
+            "cumartesi_work": None,
+            "pazar_work": None,
+            "cumartesi_gercek_off": None,
+            "pazar_gercek_off": None,
+            "pair_off": agent_pair_off_sayisi,
+            "beklenen_pair_off": "en az 1",
+            "ihlal_tipi": "Ayda hiç gerçek çift OFF yok"
+        })
 
-    # Aynı haftada hem Cumartesi hem Pazar OFF mu?
-    cumartesi_rows = grp[grp["weekday"] == 5]
-    pazar_rows = grp[grp["weekday"] == 6]
-
-    cumartesi_off = (
-        len(cumartesi_rows) > 0
-        and (cumartesi_rows["assigned"] == 0).all()
-    )
-
-    pazar_off = (
-        len(pazar_rows) > 0
-        and (pazar_rows["assigned"] == 0).all()
-    )
-
-    cift_off_sayisi = int(
-        cumartesi_off and pazar_off
-    )
-
-    haftalik_calisma_rows.append({
-        "agent_user_code": agent_user_code,
-        "week": week,
-        "hafta_ici_off_sayisi": hafta_ici_off_sayisi,
-        "hafta_sonu_calisma_sayisi": hafta_sonu_calisma_sayisi,
-        "norm_calisma_sayisi": norm_calisma_sayisi,
-        "mesai_sayisi": mesai_sayisi,
-        "cift_off_sayisi": cift_off_sayisi,
+    cift_off_kontrol_rows.append({
+        "agent_user_code": a,
+        "gercek_cift_off_sayisi": agent_pair_off_sayisi,
+        "kural_saglandi_mi": aylik_kural_saglandi_mi,
+        "weekend_pair_details": " || ".join(
+            agent_pair_detaylari
+        )
     })
 
 
-haftalik_calisma_df = pd.DataFrame(
-    haftalik_calisma_rows
+cift_off_kontrol_df = pd.DataFrame(
+    cift_off_kontrol_rows
+)
+
+cift_off_violation_df = pd.DataFrame(
+    cift_off_ihlalleri
 )
 
 
-# ==================================================
-# 7.2) AYLIK AGENT TOPLAMLARI
-# ==================================================
+# --------------------------------------------------
+# 3. SONUÇ
+# --------------------------------------------------
 
-aylik_calisma_ozet_df = (
-    haftalik_calisma_df
-    .groupby(
-        "agent_user_code",
-        as_index=False
-    )
-    .agg(
-        norm_calisma_sayisi=(
-            "norm_calisma_sayisi",
-            "sum"
-        ),
-        mesai_sayisi=(
-            "mesai_sayisi",
-            "sum"
-        ),
-        cift_off_sayisi=(
-            "cift_off_sayisi",
-            "sum"
+print("=" * 90)
+print("AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF KONTROLÜ")
+print("=" * 90)
+
+print("Kontrol edilen agent sayısı:", len(cift_off_kontrol_df))
+print(
+    "Kuralı sağlamayan agent sayısı:",
+    int((~cift_off_kontrol_df["kural_saglandi_mi"]).sum())
+)
+print(
+    "Toplam tespit edilen ihlal:",
+    len(cift_off_violation_df)
+)
+
+if cift_off_violation_df.empty:
+
+    print("SONUÇ: İHLAL YOK")
+
+else:
+
+    print("SONUÇ: İHLAL VAR")
+
+    display(
+        cift_off_violation_df
+        .sort_values(
+            ["ihlal_tipi", "agent_user_code"]
         )
+        .reset_index(drop=True)
     )
-)
 
-
-# ==================================================
-# 7.3) AYLIK TAKVİM PIVOT
-# ==================================================
-
-calendar_shift_df = calendar_value_df.pivot_table(
-    index=[
-        "agent_user_code",
-        "agent_name",
-        "takim",
-        "teamleader_name"
-    ],
-    columns="date",
-    values="calendar_value",
-    aggfunc="first"
-).reset_index()
-
-calendar_shift_df.columns = [
-    str(c)
-    for c in calendar_shift_df.columns
-]
-
-
-# ==================================================
-# 7.4) ÖZET KOLONLARINI AYLIK TAKVİME EKLE
-# ==================================================
-
-calendar_shift_df = calendar_shift_df.merge(
-    aylik_calisma_ozet_df,
-    on="agent_user_code",
-    how="left"
-)
-
-ozet_kolonlari = [
-    "norm_calisma_sayisi",
-    "mesai_sayisi",
-    "cift_off_sayisi"
-]
-
-calendar_shift_df[ozet_kolonlari] = (
-    calendar_shift_df[ozet_kolonlari]
-    .fillna(0)
-    .astype(int)
-)
 
 display(
-    calendar_shift_df[
+    cift_off_kontrol_df
+    .sort_values(
         [
-            "agent_user_code",
-            "agent_name",
-            "takim",
-            "norm_calisma_sayisi",
-            "mesai_sayisi",
-            "cift_off_sayisi"
-        ]
-    ].head(20)
+            "kural_saglandi_mi",
+            "gercek_cift_off_sayisi",
+            "agent_user_code"
+        ],
+        ascending=[True, True, True]
+    )
+    .reset_index(drop=True)
 )

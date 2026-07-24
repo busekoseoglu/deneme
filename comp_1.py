@@ -1,133 +1,192 @@
-"ENABLE_TEAM_1500_DENGE": True,
+# ==================================================
+# 7) AYLIK TAKVİM
+# ==================================================
 
-# Ekiplerin geçmiş + mevcut ay 15:00 toplamlarını dengeleme ağırlığı
-"TEAM_1500_DENGE_W": 10000,
+calendar_value_df = agent_day_plan_df.copy()
+
+calendar_value_df["date"] = pd.to_datetime(
+    calendar_value_df["date"]
+).dt.normalize()
+
+calendar_value_df["weekday"] = (
+    calendar_value_df["date"].dt.weekday
+)
+
+# Mevcut day_week map'i varsa onu kullan
+calendar_value_df["week"] = (
+    calendar_value_df["date"]
+    .map(day_week)
+)
+
+calendar_value_df["calendar_value"] = np.where(
+    calendar_value_df["assigned"] == 1,
+    calendar_value_df["status"].fillna("") +
+    " | " +
+    calendar_value_df["assigned_shift"].fillna("") +
+    " (" +
+    calendar_value_df["shift_start"].fillna("") +
+    "-" +
+    calendar_value_df["shift_end"].fillna("") +
+    ")",
+    calendar_value_df["status"].fillna("")
+)
 
 
-ENABLE_TEAM_1500_DENGE = CONFIG["ENABLE_TEAM_1500_DENGE"]
-TEAM_1500_DENGE_W = CONFIG["TEAM_1500_DENGE_W"]
+# ==================================================
+# 7.1) HAFTALIK NORM / MESAİ / ÇİFT OFF HESABI
+# ==================================================
 
+haftalik_calisma_rows = []
 
-# %% [KARAR DEĞİŞKENİ + BAĞLANTI] - EKİP 15:00 DENGESİ
+for (agent_user_code, week), grp in calendar_value_df.groupby(
+    ["agent_user_code", "week"],
+    dropna=False
+):
 
-team_1500_bu_ay = {}
-team_1500_toplam = {}
-team_1500_spread = None
-
-if ENABLE_TEAM_1500_DENGE:
-
-    team_1500_max_toplam_possible = (
-        max(team_gecmis_1500.values(), default=0)
-        + len(WEEKS)
+    # Pazartesi-Cuma arasında çalışılmayan gün sayısı
+    hafta_ici_off_sayisi = int(
+        (
+            (grp["weekday"].isin([0, 1, 2, 3, 4]))
+            &
+            (grp["assigned"] == 0)
+        ).sum()
     )
 
-    for t in TAKIMLAR:
+    # Cumartesi-Pazar çalışılan gün sayısı
+    hafta_sonu_calisma_sayisi = int(
+        (
+            (grp["weekday"].isin([5, 6]))
+            &
+            (grp["assigned"] == 1)
+        ).sum()
+    )
 
-        t = str(t).strip()
-        gecmis_sayi = int(team_gecmis_1500.get(t, 0))
+    # Hafta içindeki OFF kadar hafta sonu çalışma normal sayılır
+    norm_calisma_sayisi = min(
+        hafta_ici_off_sayisi,
+        hafta_sonu_calisma_sayisi
+    )
 
-        bu_ay_1500_vars = []
-
-        for wk in WEEKS:
-            for v in week_1500_vardiyalari.get(wk, []):
-
-                if (t, wk, v) in team_week_base:
-                    bu_ay_1500_vars.append(
-                        team_week_base[(t, wk, v)]
-                    )
-
-        team_1500_bu_ay[t] = model.NewIntVar(
-            0,
-            len(WEEKS),
-            f"team_1500_bu_ay_{t}"
-        )
-
-        if bu_ay_1500_vars:
-            model.Add(
-                team_1500_bu_ay[t]
-                ==
-                sum(bu_ay_1500_vars)
-            )
-        else:
-            model.Add(
-                team_1500_bu_ay[t] == 0
-            )
-
-        team_1500_toplam[t] = model.NewIntVar(
-            gecmis_sayi,
-            gecmis_sayi + len(WEEKS),
-            f"team_1500_toplam_{t}"
-        )
-
-        model.Add(
-            team_1500_toplam[t]
-            ==
-            gecmis_sayi + team_1500_bu_ay[t]
-        )
-
-    team_1500_max = model.NewIntVar(
+    # Norm sınırını aşan hafta sonu çalışmaları mesai sayılır
+    mesai_sayisi = max(
         0,
-        team_1500_max_toplam_possible,
-        "team_1500_max"
+        hafta_sonu_calisma_sayisi - norm_calisma_sayisi
     )
 
-    team_1500_min = model.NewIntVar(
-        0,
-        team_1500_max_toplam_possible,
-        "team_1500_min"
+    # Aynı haftada hem Cumartesi hem Pazar OFF mu?
+    cumartesi_rows = grp[grp["weekday"] == 5]
+    pazar_rows = grp[grp["weekday"] == 6]
+
+    cumartesi_off = (
+        len(cumartesi_rows) > 0
+        and (cumartesi_rows["assigned"] == 0).all()
     )
 
-    team_1500_spread = model.NewIntVar(
-        0,
-        team_1500_max_toplam_possible,
-        "team_1500_spread"
+    pazar_off = (
+        len(pazar_rows) > 0
+        and (pazar_rows["assigned"] == 0).all()
     )
 
-    model.AddMaxEquality(
-        team_1500_max,
-        list(team_1500_toplam.values())
+    cift_off_sayisi = int(
+        cumartesi_off and pazar_off
     )
 
-    model.AddMinEquality(
-        team_1500_min,
-        list(team_1500_toplam.values())
+    haftalik_calisma_rows.append({
+        "agent_user_code": agent_user_code,
+        "week": week,
+        "hafta_ici_off_sayisi": hafta_ici_off_sayisi,
+        "hafta_sonu_calisma_sayisi": hafta_sonu_calisma_sayisi,
+        "norm_calisma_sayisi": norm_calisma_sayisi,
+        "mesai_sayisi": mesai_sayisi,
+        "cift_off_sayisi": cift_off_sayisi,
+    })
+
+
+haftalik_calisma_df = pd.DataFrame(
+    haftalik_calisma_rows
+)
+
+
+# ==================================================
+# 7.2) AYLIK AGENT TOPLAMLARI
+# ==================================================
+
+aylik_calisma_ozet_df = (
+    haftalik_calisma_df
+    .groupby(
+        "agent_user_code",
+        as_index=False
     )
-
-    model.Add(
-        team_1500_spread
-        ==
-        team_1500_max - team_1500_min
-    )
-
-    print("15:00 ekip denge kuralı AÇIK.")
-
-else:
-    print("15:00 ekip denge kuralı KAPALI.")
-
-
-
-# -------------------------------------------------
-# EKİP 15:00 TARİHSEL ADALET CEZASI
-# -------------------------------------------------
-
-if ENABLE_TEAM_1500_DENGE:
-
-    # Maksimum ve minimum toplam arasındaki farkı azalt
-    objective_terms.append(
-        TEAM_1500_DENGE_W
-        * team_1500_spread
-    )
-
-    # Geçmişte çok alan ekibin bu ay tekrar seçilmesini azalt
-    for t in TAKIMLAR:
-
-        t = str(t).strip()
-        gecmis_sayi = int(team_gecmis_1500.get(t, 0))
-
-        objective_terms.append(
-            TEAM_1500_DENGE_W
-            * gecmis_sayi
-            * team_1500_bu_ay[t]
+    .agg(
+        norm_calisma_sayisi=(
+            "norm_calisma_sayisi",
+            "sum"
+        ),
+        mesai_sayisi=(
+            "mesai_sayisi",
+            "sum"
+        ),
+        cift_off_sayisi=(
+            "cift_off_sayisi",
+            "sum"
         )
+    )
+)
 
-    print("15:00 ekip denge objective cezası eklendi.")
+
+# ==================================================
+# 7.3) AYLIK TAKVİM PIVOT
+# ==================================================
+
+calendar_shift_df = calendar_value_df.pivot_table(
+    index=[
+        "agent_user_code",
+        "agent_name",
+        "takim",
+        "teamleader_name"
+    ],
+    columns="date",
+    values="calendar_value",
+    aggfunc="first"
+).reset_index()
+
+calendar_shift_df.columns = [
+    str(c)
+    for c in calendar_shift_df.columns
+]
+
+
+# ==================================================
+# 7.4) ÖZET KOLONLARINI AYLIK TAKVİME EKLE
+# ==================================================
+
+calendar_shift_df = calendar_shift_df.merge(
+    aylik_calisma_ozet_df,
+    on="agent_user_code",
+    how="left"
+)
+
+ozet_kolonlari = [
+    "norm_calisma_sayisi",
+    "mesai_sayisi",
+    "cift_off_sayisi"
+]
+
+calendar_shift_df[ozet_kolonlari] = (
+    calendar_shift_df[ozet_kolonlari]
+    .fillna(0)
+    .astype(int)
+)
+
+display(
+    calendar_shift_df[
+        [
+            "agent_user_code",
+            "agent_name",
+            "takim",
+            "norm_calisma_sayisi",
+            "mesai_sayisi",
+            "cift_off_sayisi"
+        ]
+    ].head(20)
+)

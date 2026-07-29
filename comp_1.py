@@ -1,90 +1,81 @@
-# df_off wide -> long
+# %% [OBJECTIVE HAZIRLIK] - SOFT OFF_T TALEBİ CEZASI
 
-gun_kolonlari = [
-    c for c in df_off.columns
-    if str(c).startswith("gun_")
-]
+# off_t hard ise:
+#     Agent o gün zaten çalışamaz.
+#     Objective cezası oluşturulmaz.
+#
+# off_t soft ise:
+#     Agent o gün çalışmazsa ceza 0 olur.
+#     Agent o gün çalışırsa work=1 üzerinden ceza oluşur.
 
-df_off_long = df_off.melt(
-    id_vars=["agent_user_code", "izin_tipi"],
-    value_vars=gun_kolonlari,
-    var_name="gun_kolonu",
-    value_name="deger"
+OFF_TALEP_CEZA_W = globals().get(
+    "OFF_TALEP_CEZA_W",
+    100_000
 )
 
-df_off_long = df_off_long[
-    pd.to_numeric(df_off_long["deger"], errors="coerce").fillna(0) == 1
-].copy()
+soft_off_objective_terms = []
+soft_off_objective_debug_rows = []
 
-df_off_long["gun"] = (
-    df_off_long["gun_kolonu"]
-    .str.extract(r"(\d+)")
-    .astype(int)
-)
+# PLAN_GUNLER içindeki tarihleri ds değerlerine bağla
+date_to_ds = {
+    pd.to_datetime(ds).date(): ds
+    for ds in PLAN_GUNLER
+}
 
-df_off_long["tarih"] = pd.to_datetime(
-    "2026-08-" + df_off_long["gun"].astype(str).str.zfill(2)
-)
+if not ENABLE_OFF_T_HARD:
 
-df_off_long = df_off_long[
-    ["agent_user_code", "tarih", "izin_tipi"]
-].assign(kaynak="df_off")
+    for a_raw in AGENTS:
 
+        a = str(a_raw).strip()
 
-# df_izin zaten long formatta
+        off_t_gunleri = {
+            pd.to_datetime(d).date()
+            for d in off_t_map.get(a, set())
+        }
 
-df_izin_long = df_izin[
-    ["agent_user_code", "tarih", "izin_tipi"]
-].copy()
+        for off_date in off_t_gunleri:
 
-df_izin_long["tarih"] = pd.to_datetime(
-    df_izin_long["tarih"]
-).dt.normalize()
+            # Talep tarihi plan dönemi dışında olabilir
+            if off_date not in date_to_ds:
+                continue
 
-df_izin_long["kaynak"] = "df_izin"
+            ds = date_to_ds[off_date]
 
+            # Günlük work değişkeni yoksa atla
+            if (a, ds) not in work:
+                continue
 
-# Aynı agent + aynı tarih çakışmaları
+            # Soft OFF talebi karşılanmaz ve agent çalışırsa:
+            # work[(a, ds)] = 1 olur ve objective cezası oluşur.
+            soft_off_objective_terms.append(
+                OFF_TALEP_CEZA_W * work[(a, ds)]
+            )
 
-df_cakisma = pd.concat(
-    [df_off_long, df_izin_long],
-    ignore_index=True
-)
+            soft_off_objective_debug_rows.append({
+                "agent_user_code": a,
+                "date": off_date,
+                "mode": "soft",
+                "objective_term_created": True,
+            })
 
-df_cakisma["agent_user_code"] = (
-    df_cakisma["agent_user_code"]
-    .astype(str)
-    .str.strip()
-)
+else:
 
-df_cakisma["izin_tipi"] = (
-    df_cakisma["izin_tipi"]
-    .astype(str)
-    .str.strip()
-    .str.lower()
-)
-
-df_cakisma = (
-    df_cakisma
-    .groupby(
-        ["agent_user_code", "tarih"],
-        as_index=False
+    print(
+        "ENABLE_OFF_T_HARD=True: "
+        "off_t talepleri hard olduğu için soft OFF cezası oluşturulmadı."
     )
-    .agg(
-        kayit_sayisi=("izin_tipi", "size"),
-        izin_tipleri=(
-            "izin_tipi",
-            lambda x: " | ".join(sorted(set(x)))
-        ),
-        kaynaklar=(
-            "kaynak",
-            lambda x: " | ".join(sorted(set(x)))
-        )
-    )
+
+
+soft_off_objective_debug_df = pd.DataFrame(
+    soft_off_objective_debug_rows
 )
 
-df_cakisma = df_cakisma[
-    df_cakisma["kayit_sayisi"] > 1
-].copy()
+print(
+    "Soft OFF objective terimi sayısı:",
+    len(soft_off_objective_terms)
+)
 
-display(df_cakisma)
+print(
+    "Soft OFF ceza ağırlığı:",
+    OFF_TALEP_CEZA_W
+)

@@ -1,22 +1,34 @@
-# %% [DEBUG] - PRESOLVE'DA PATLAYAN KISITIN DEĞİŞKENLERİNİ BUL
+# %% [DEBUG] - PRESOLVE'DA PATLAYAN LINEAR KISITI BUL
 
-# Solver logunda görünen constraint numarası
+# Solver logunda yazan constraint numarası:
 SORUNLU_CONSTRAINT_INDEX = 54275
 
 model_proto = model.Proto()
 
-if SORUNLU_CONSTRAINT_INDEX >= len(model_proto.constraints):
+toplam_kisit_sayisi = len(
+    model_proto.constraints
+)
+
+print(
+    "Modeldeki toplam kısıt sayısı:",
+    toplam_kisit_sayisi
+)
+
+if (
+    SORUNLU_CONSTRAINT_INDEX < 0
+    or SORUNLU_CONSTRAINT_INDEX >= toplam_kisit_sayisi
+):
     raise IndexError(
-        f"Modelde yalnızca {len(model_proto.constraints)} kısıt var. "
-        f"{SORUNLU_CONSTRAINT_INDEX} numaralı kısıt bulunamadı."
+        f"{SORUNLU_CONSTRAINT_INDEX} numaralı kısıt bulunamadı. "
+        f"Modelde 0 ile {toplam_kisit_sayisi - 1} arasında "
+        f"kısıt indeksleri var."
     )
 
-sorunlu_constraint = model_proto.constraints[
-    SORUNLU_CONSTRAINT_INDEX
-]
 
-constraint_type = sorunlu_constraint.WhichOneof(
-    "constraint"
+sorunlu_constraint = (
+    model_proto.constraints[
+        SORUNLU_CONSTRAINT_INDEX
+    ]
 )
 
 print(
@@ -25,30 +37,40 @@ print(
 )
 
 print(
-    "Constraint tipi:",
-    constraint_type
-)
-
-print(
     "Constraint adı:",
     sorunlu_constraint.name
 )
 
 
-sorunlu_var_rows = []
+# OR-Tools 9.15'te WhichOneof kullanılmıyor.
+# Solver logundaki kısıt linear olduğu için has_linear kontrolü yapıyoruz.
 
-if constraint_type == "linear":
+if not sorunlu_constraint.has_linear():
+
+    print(
+        "Bu constraint linear değil."
+    )
+
+    print(
+        sorunlu_constraint
+    )
+
+else:
+
+    linear_constraint = (
+        sorunlu_constraint.linear
+    )
 
     var_indices = list(
-        sorunlu_constraint.linear.vars
+        linear_constraint.vars
     )
 
     coeffs = list(
-        sorunlu_constraint.linear.coeffs
+        linear_constraint.coeffs
     )
 
     constraint_domain = list(
-        sorunlu_constraint.linear.domain
+        linear_constraint.domain
     )
 
     print(
@@ -56,35 +78,44 @@ if constraint_type == "linear":
         constraint_domain
     )
 
-    for var_index, coeff in zip(
+    print(
+        "Constraint içindeki değişken sayısı:",
+        len(var_indices)
+    )
+
+
+    sorunlu_var_rows = []
+
+    for var_index, coefficient in zip(
         var_indices,
         coeffs
     ):
 
-        var_proto = model_proto.variables[
-            var_index
-        ]
+        var_proto = (
+            model_proto.variables[
+                var_index
+            ]
+        )
 
         sorunlu_var_rows.append({
+            "constraint_index": (
+                SORUNLU_CONSTRAINT_INDEX
+            ),
             "var_index": var_index,
             "var_name": var_proto.name,
-            "coefficient": coeff,
+            "coefficient": coefficient,
             "original_domain": list(
                 var_proto.domain
             ),
         })
 
-else:
 
-    print(
-        sorunlu_constraint
+    sorunlu_constraint_vars_df = (
+        pd.DataFrame(
+            sorunlu_var_rows
+        )
     )
 
-
-sorunlu_constraint_vars_df = pd.DataFrame(
-    sorunlu_var_rows
-)
-
-display(
-    sorunlu_constraint_vars_df
-)
+    display(
+        sorunlu_constraint_vars_df
+    )

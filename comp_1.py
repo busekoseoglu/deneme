@@ -1,285 +1,90 @@
-# %% [KARAR DEĞİŞKENİ] - GÜNLÜK VARDİYA ATAMALARI
+# %% [DEBUG] - PRESOLVE'DA PATLAYAN KISITIN DEĞİŞKENLERİNİ BUL
 
-x = {}
+# Solver logunda görünen constraint numarası
+SORUNLU_CONSTRAINT_INDEX = 54275
 
-for a_raw in AGENTS:
+model_proto = model.Proto()
 
-    a = str(a_raw).strip()
+if SORUNLU_CONSTRAINT_INDEX >= len(model_proto.constraints):
+    raise IndexError(
+        f"Modelde yalnızca {len(model_proto.constraints)} kısıt var. "
+        f"{SORUNLU_CONSTRAINT_INDEX} numaralı kısıt bulunamadı."
+    )
 
-    for ds in PLAN_GUNLER:
+sorunlu_constraint = model_proto.constraints[
+    SORUNLU_CONSTRAINT_INDEX
+]
 
-        for v in gun_vardiyalari.get(ds, []):
+constraint_type = sorunlu_constraint.WhichOneof(
+    "constraint"
+)
 
-            x[(a, ds, v)] = model.NewBoolVar(
-                f"x_{a}_{pd.to_datetime(ds).strftime('%Y%m%d')}_{v}"
-            )
+print(
+    "Sorunlu constraint index:",
+    SORUNLU_CONSTRAINT_INDEX
+)
+
+print(
+    "Constraint tipi:",
+    constraint_type
+)
+
+print(
+    "Constraint adı:",
+    sorunlu_constraint.name
+)
 
 
-print("x karar değişkeni sayısı:", len(x))
+sorunlu_var_rows = []
 
+if constraint_type == "linear":
 
+    var_indices = list(
+        sorunlu_constraint.linear.vars
+    )
 
-# %% [KISIT / DEBUG] - HARD OFF GÜNLERİ
+    coeffs = list(
+        sorunlu_constraint.linear.coeffs
+    )
 
-# izin:
-#     her zaman hard
-#
-# off_t2:
-#     her zaman hard
-#
-# off_t:
-#     ENABLE_OFF_T_HARD=True ise hard
-#
-# Her hard OFF gününde work=0 zorunludur.
+    constraint_domain = list(
+        sorunlu_constraint.linear.domain
+    )
 
-hard_off_assumption = {}
-hard_off_assumption_index_map = {}
-hard_off_debug_rows = []
+    print(
+        "Constraint domain:",
+        constraint_domain
+    )
 
-for a_raw in AGENTS:
+    for var_index, coeff in zip(
+        var_indices,
+        coeffs
+    ):
 
-    a = str(a_raw).strip()
+        var_proto = model_proto.variables[
+            var_index
+        ]
 
-    izin_dates = {
-        pd.to_datetime(d).date()
-        for d in izin_map.get(a, set())
-    }
-
-    off_t2_dates = {
-        pd.to_datetime(d).date()
-        for d in off_t2_map.get(a, set())
-    }
-
-    off_t_dates = {
-        pd.to_datetime(d).date()
-        for d in off_t_map.get(a, set())
-    }
-
-    agent_hard_off_dates = {
-        pd.to_datetime(d).date()
-        for d in hard_off_map.get(a, set())
-    }
-
-    for ds in PLAN_GUNLER:
-
-        ds_date = pd.to_datetime(ds).date()
-
-        if ds_date not in agent_hard_off_dates:
-            continue
-
-        assumption_var = model.NewBoolVar(
-            f"assumption_hard_off_{a}_{ds_date.strftime('%Y%m%d')}"
-        )
-
-        # Hard OFF günü kişi kesinlikle çalışamaz
-        model.Add(
-            work[(a, ds)] == 0
-        ).OnlyEnforceIf(
-            assumption_var
-        )
-
-        model.AddAssumption(
-            assumption_var
-        )
-
-        hard_off_assumption[(a, ds)] = assumption_var
-
-        hard_off_assumption_index_map[
-            assumption_var.Index()
-        ] = {
-            "agent_user_code": a,
-            "date": ds_date,
-        }
-
-        if ds_date in izin_dates:
-            off_type = "izin"
-        elif ds_date in off_t2_dates:
-            off_type = "off_t2"
-        elif ds_date in off_t_dates:
-            off_type = "off_t"
-        else:
-            off_type = "diger_hard_off"
-
-        hard_off_debug_rows.append({
-            "agent_user_code": a,
-            "date": ds_date,
-            "week": day_week.get(ds),
-            "weekday": pd.to_datetime(ds).weekday(),
-            "off_type": off_type,
+        sorunlu_var_rows.append({
+            "var_index": var_index,
+            "var_name": var_proto.name,
+            "coefficient": coeff,
+            "original_domain": list(
+                var_proto.domain
+            ),
         })
 
+else:
 
-hard_off_debug_df = pd.DataFrame(
-    hard_off_debug_rows
+    print(
+        sorunlu_constraint
+    )
+
+
+sorunlu_constraint_vars_df = pd.DataFrame(
+    sorunlu_var_rows
 )
 
-print(
-    "Hard OFF assumption sayısı:",
-    len(hard_off_assumption)
+display(
+    sorunlu_constraint_vars_df
 )
-
-print(
-    hard_off_debug_df["off_type"].value_counts(
-        dropna=False
-    )
-)
-
-
-
-# %% [SOLVE / DEBUG] - HARD OFF ÇAKIŞMA TESPİTİ
-
-status = solver.Solve(model)
-
-print(
-    "Solver status:",
-    solver.StatusName(status)
-)
-
-if status == cp_model.INFEASIBLE:
-
-    core_literals = (
-        solver.SufficientAssumptionsForInfeasibility()
-    )
-
-    hard_off_core_rows = []
-    haftalik_core_rows = []
-    eslesmeyen_literal_sayisi = 0
-
-    for literal_raw in core_literals:
-
-        literal = int(literal_raw)
-
-        if literal >= 0:
-            variable_index = literal
-        else:
-            variable_index = -literal - 1
-
-        # Hard OFF assumption
-        if variable_index in hard_off_assumption_index_map:
-
-            hard_off_core_rows.append(
-                hard_off_assumption_index_map[
-                    variable_index
-                ]
-            )
-
-        # Önceki haftalık debug assumption'ları hâlâ varsa
-        elif (
-            "haftalik_assumption_index_map" in globals()
-            and variable_index
-            in haftalik_assumption_index_map
-        ):
-
-            haftalik_core_rows.append(
-                haftalik_assumption_index_map[
-                    variable_index
-                ]
-            )
-
-        else:
-            eslesmeyen_literal_sayisi += 1
-
-
-    hard_off_infeasible_core_df = pd.DataFrame(
-        hard_off_core_rows
-    )
-
-    if not hard_off_infeasible_core_df.empty:
-
-        hard_off_infeasible_core_df = (
-            hard_off_infeasible_core_df
-            .drop_duplicates()
-            .merge(
-                hard_off_debug_df,
-                on=[
-                    "agent_user_code",
-                    "date",
-                ],
-                how="left",
-            )
-            .sort_values(
-                [
-                    "agent_user_code",
-                    "date",
-                ]
-            )
-            .reset_index(drop=True)
-        )
-
-
-    haftalik_infeasible_core_df = pd.DataFrame(
-        haftalik_core_rows
-    )
-
-    if not haftalik_infeasible_core_df.empty:
-
-        haftalik_infeasible_core_df = (
-            haftalik_infeasible_core_df
-            .drop_duplicates()
-            .sort_values(
-                [
-                    "agent_user_code",
-                    "week",
-                    "grup",
-                ]
-            )
-            .reset_index(drop=True)
-        )
-
-
-    print(
-        "Toplam infeasible core literal:",
-        len(core_literals)
-    )
-
-    print(
-        "Çakışan hard OFF günü:",
-        len(hard_off_infeasible_core_df)
-    )
-
-    print(
-        "Çakışan haftalık debug kaydı:",
-        len(haftalik_infeasible_core_df)
-    )
-
-    print(
-        "Eşleşmeyen assumption literal:",
-        eslesmeyen_literal_sayisi
-    )
-
-
-    print("\nHARD OFF ÇAKIŞMALARI")
-
-    display(
-        hard_off_infeasible_core_df
-    )
-
-
-    if not haftalik_infeasible_core_df.empty:
-
-        print("\nHAFTALIK BLOK ÇAKIŞMALARI")
-
-        display(
-            haftalik_infeasible_core_df
-        )
-
-
-    if hard_off_infeasible_core_df.empty:
-
-        print(
-            "Infeasible core içinde hard OFF günü bulunmadı."
-        )
-
-        print(
-            "Bu durumda sorun hard OFF taleplerinden bağımsız "
-            "başka bir hard kısıtta."
-        )
-
-elif status in (
-    cp_model.FEASIBLE,
-    cp_model.OPTIMAL,
-):
-
-    print(
-        "Model feasible."
-    )

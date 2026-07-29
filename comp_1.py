@@ -1,62 +1,65 @@
-OFF_TALEP_KARSILANMAMA_W = 100000
+# %% [KISIT] - AYLIK EKSTRA OFF / TELAFİ DENGESİ
 
-
-# %% [OBJECTIVE HAZIRLIK] - SOFT OFF_T TALEBİ CEZA TERİMLERİ
-
-# ENABLE_OFF_T_HARD = True:
-#   off_t günleri hard_off_map içindedir.
-#   Agent çalışamaz, objective cezası gerekmez.
+# Mantık:
 #
-# ENABLE_OFF_T_HARD = False:
-#   off_t günleri soft taleptir.
-#   Agent o gün çalışırsa work=1 olur ve objective cezası oluşur.
+# Haftalık ilk 2 hard OFF talebi standart OFF hakkıdır.
+# Bunlar için telafi gerekmez.
+#
+# 2'yi aşan hard OFF talepleri extra_off_week içinde tutulur.
+#
+# Aylık toplam ekstra OFF:
+#     aylık toplam telafi günüyle kesin olarak eşit olmalıdır.
+#
+# Örnek:
+#     Bir hafta 2 hard OFF  -> extra_off_week = 0
+#     Bir hafta 3 hard OFF  -> extra_off_week = 1
+#     Bir hafta 4 hard OFF  -> extra_off_week = 2
+#
+# İzin günleri extra_off_week hesabına dahil değildir.
 
-off_talep_ceza_terms = []
+aylik_telafi_debug_rows = []
 
-plan_date_to_ds = {
-    pd.to_datetime(ds).date(): ds
-    for ds in PLAN_GUNLER
-}
+for a_raw in AGENTS:
 
-if not ENABLE_OFF_T_HARD:
+    a = str(a_raw).strip()
 
-    for a_raw in AGENTS:
+    agent_extra_off_vars = [
+        extra_off_week[(a, wk)]
+        for wk in WEEKS
+        if (a, wk) in extra_off_week
+    ]
 
-        a = str(a_raw).strip()
+    agent_overtime_vars = [
+        overtime_week[(a, wk)]
+        for wk in WEEKS
+        if (a, wk) in overtime_week
+    ]
 
-        for off_date_raw in off_t_map.get(a, set()):
+    # Ay içindeki ekstra OFF günleri kesinlikle başka haftalarda
+    # telafi edilmelidir.
+    model.Add(
+        sum(agent_extra_off_vars)
+        ==
+        sum(agent_overtime_vars)
+    )
 
-            off_date = pd.to_datetime(off_date_raw).date()
+    # Agentın ay içinde yapabileceği maksimum telafi günü
+    model.Add(
+        sum(agent_overtime_vars)
+        <= MAX_OVERTIME_PER_MONTH
+    )
 
-            # Talep tarihi plan döneminde değilse alma
-            if off_date not in plan_date_to_ds:
-                continue
-
-            ds = plan_date_to_ds[off_date]
-
-            # work değişkeni yoksa ceza terimi oluşturma
-            if (a, ds) not in work:
-                continue
-
-            # Soft OFF talebi bulunan günde:
-            # work = 0 → OFF talebi karşılandı, ceza yok
-            # work = 1 → OFF talebi karşılanmadı, ceza var
-            off_talep_ceza_terms.append(
-                work[(a, ds)]
-            )
+    aylik_telafi_debug_rows.append({
+        "agent_user_code": a,
+        "extra_off_week_var_sayisi": len(agent_extra_off_vars),
+        "overtime_week_var_sayisi": len(agent_overtime_vars),
+    })
 
 
-print("ENABLE_OFF_T_HARD:", ENABLE_OFF_T_HARD)
-print(
-    "Soft OFF talebi ceza terimi sayısı:",
-    len(off_talep_ceza_terms)
+aylik_telafi_debug_df = pd.DataFrame(
+    aylik_telafi_debug_rows
 )
 
-
-OFF_TALEP_KARSILANMAMA_W * sum(off_talep_ceza_terms)
-
-
-objective_terms.append(
-    OFF_TALEP_KARSILANMAMA_W
-    * sum(off_talep_ceza_terms)
-)
+print("Aylık ekstra OFF / telafi eşitliği eklendi.")
+print("Agent sayısı:", len(AGENTS))
+print("Aylık maksimum telafi:", MAX_OVERTIME_PER_MONTH)

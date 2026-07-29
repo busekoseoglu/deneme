@@ -1,37 +1,90 @@
-# %% [OBJECTIVE HAZIRLIK] - SOFT OFF TALEBİ CEZA TERİMLERİ
-#
-# Mantık:
-# - off_t2 her zaman HARD olduğu için burada yer almaz.
-# - off_t HARD açıksa burada yer almaz.
-# - Sadece SOFT çalışan off_t talepleri için:
-#       work[a, ds] = 0  -> talep karşılandı, ceza 0
-#       work[a, ds] = 1  -> talep karşılanmadı, ceza oluşur
-#
-# Bu hücre mevcut objective_terms listesine doğrudan dokunmaz.
-# Objective hücresinde kullanılacak listeyi hazırlar.
+# df_off wide -> long
 
-OFF_TALEP_CEZA_W = globals().get("OFF_TALEP_CEZA_W", 100_000)
+gun_kolonlari = [
+    c for c in df_off.columns
+    if str(c).startswith("gun_")
+]
 
-soft_off_objective_terms = []
-soft_off_objective_debug_rows = []
+df_off_long = df_off.melt(
+    id_vars=["agent_user_code", "izin_tipi"],
+    value_vars=gun_kolonlari,
+    var_name="gun_kolonu",
+    value_name="deger"
+)
 
-# Fonksiyonlardan üretilmiş ceza değişkenlerinin varlığını zorunlu kontrol et
-if "off_talep_ceza_terms" not in globals():
-    raise NameError(
-        "off_talep_ceza_terms oluşturulmamış. "
-        "Önce haftalık çalışma + OFF talebi modüllerini çalıştır."
+df_off_long = df_off_long[
+    pd.to_numeric(df_off_long["deger"], errors="coerce").fillna(0) == 1
+].copy()
+
+df_off_long["gun"] = (
+    df_off_long["gun_kolonu"]
+    .str.extract(r"(\d+)")
+    .astype(int)
+)
+
+df_off_long["tarih"] = pd.to_datetime(
+    "2026-08-" + df_off_long["gun"].astype(str).str.zfill(2)
+)
+
+df_off_long = df_off_long[
+    ["agent_user_code", "tarih", "izin_tipi"]
+].assign(kaynak="df_off")
+
+
+# df_izin zaten long formatta
+
+df_izin_long = df_izin[
+    ["agent_user_code", "tarih", "izin_tipi"]
+].copy()
+
+df_izin_long["tarih"] = pd.to_datetime(
+    df_izin_long["tarih"]
+).dt.normalize()
+
+df_izin_long["kaynak"] = "df_izin"
+
+
+# Aynı agent + aynı tarih çakışmaları
+
+df_cakisma = pd.concat(
+    [df_off_long, df_izin_long],
+    ignore_index=True
+)
+
+df_cakisma["agent_user_code"] = (
+    df_cakisma["agent_user_code"]
+    .astype(str)
+    .str.strip()
+)
+
+df_cakisma["izin_tipi"] = (
+    df_cakisma["izin_tipi"]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+)
+
+df_cakisma = (
+    df_cakisma
+    .groupby(
+        ["agent_user_code", "tarih"],
+        as_index=False
     )
-
-if off_talep_ceza_terms is None:
-    raise ValueError("off_talep_ceza_terms None geldi.")
-
-# off_talep_ceza_terms içinde:
-# 1 - off_talep_karsilandi[a, ds]
-# ifadeleri bulunuyor.
-for ceza_var in off_talep_ceza_terms:
-    soft_off_objective_terms.append(
-        OFF_TALEP_CEZA_W * ceza_var
+    .agg(
+        kayit_sayisi=("izin_tipi", "size"),
+        izin_tipleri=(
+            "izin_tipi",
+            lambda x: " | ".join(sorted(set(x)))
+        ),
+        kaynaklar=(
+            "kaynak",
+            lambda x: " | ".join(sorted(set(x)))
+        )
     )
+)
 
-print("Soft OFF ceza terimi sayısı:", len(soft_off_objective_terms))
-print("Soft OFF ceza ağırlığı:", OFF_TALEP_CEZA_W)
+df_cakisma = df_cakisma[
+    df_cakisma["kayit_sayisi"] > 1
+].copy()
+
+display(df_cakisma)

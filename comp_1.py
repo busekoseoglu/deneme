@@ -1,22 +1,23 @@
-# %% [OBJECTIVE HAZIRLIK] - SOFT OFF_T TALEBİ CEZASI
+OFF_TALEP_KARSILANMAMA_W = 100000
 
-# OFF_TALEP_CEZA_W config hücresinde tanımlıdır.
-# Bu hücre herhangi bir ağırlık değeri üretmez veya değiştirmez.
 
-if "OFF_TALEP_CEZA_W" not in globals():
-    raise NameError(
-        "OFF_TALEP_CEZA_W config hücresinde tanımlı değil."
-    )
+# %% [OBJECTIVE HAZIRLIK] - SOFT OFF_T TALEBİ CEZA TERİMLERİ
 
-soft_off_objective_terms = []
-soft_off_objective_debug_rows = []
+# ENABLE_OFF_T_HARD = True:
+#   off_t günleri hard_off_map içindedir.
+#   Agent çalışamaz, objective cezası gerekmez.
+#
+# ENABLE_OFF_T_HARD = False:
+#   off_t günleri soft taleptir.
+#   Agent o gün çalışırsa work=1 olur ve objective cezası oluşur.
 
-date_to_ds = {
+off_talep_ceza_terms = []
+
+plan_date_to_ds = {
     pd.to_datetime(ds).date(): ds
     for ds in PLAN_GUNLER
 }
 
-# off_t yalnızca soft moddayken objective cezasına girer
 if not ENABLE_OFF_T_HARD:
 
     for a_raw in AGENTS:
@@ -27,38 +28,35 @@ if not ENABLE_OFF_T_HARD:
 
             off_date = pd.to_datetime(off_date_raw).date()
 
-            # Plan dönemi dışındaki talepler objective'e alınmaz
-            if off_date not in date_to_ds:
+            # Talep tarihi plan döneminde değilse alma
+            if off_date not in plan_date_to_ds:
                 continue
 
-            ds = date_to_ds[off_date]
+            ds = plan_date_to_ds[off_date]
 
+            # work değişkeni yoksa ceza terimi oluşturma
             if (a, ds) not in work:
                 continue
 
-            # Soft OFF tarihinde çalışırsa work=1 olur
-            # ve config'teki ağırlık kadar ceza oluşur.
-            soft_off_objective_terms.append(
-                OFF_TALEP_CEZA_W * work[(a, ds)]
+            # Soft OFF talebi bulunan günde:
+            # work = 0 → OFF talebi karşılandı, ceza yok
+            # work = 1 → OFF talebi karşılanmadı, ceza var
+            off_talep_ceza_terms.append(
+                work[(a, ds)]
             )
 
-            soft_off_objective_debug_rows.append({
-                "agent_user_code": a,
-                "tarih": off_date,
-                "ceza_agirligi": OFF_TALEP_CEZA_W,
-            })
 
-
-soft_off_objective_debug_df = pd.DataFrame(
-    soft_off_objective_debug_rows
+print("ENABLE_OFF_T_HARD:", ENABLE_OFF_T_HARD)
+print(
+    "Soft OFF talebi ceza terimi sayısı:",
+    len(off_talep_ceza_terms)
 )
 
-print(
-    "ENABLE_OFF_T_HARD:",
-    ENABLE_OFF_T_HARD
-)
 
-print(
-    "Soft OFF objective terimi sayısı:",
-    len(soft_off_objective_terms)
+OFF_TALEP_KARSILANMAMA_W * sum(off_talep_ceza_terms)
+
+
+objective_terms.append(
+    OFF_TALEP_KARSILANMAMA_W
+    * sum(off_talep_ceza_terms)
 )

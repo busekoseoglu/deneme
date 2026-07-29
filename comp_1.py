@@ -1,53 +1,112 @@
-# %% [KISIT] - AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
+# %% [KISIT] - PARTIAL END HAFTA İÇİ HAMİLE / SÜT İZNİ ÇALIŞMA ZORUNLULUĞU
+#
+# Amaç:
+# Ay sonundaki partial_end haftasında görünen hafta içi günlerde,
+# hamile veya süt izni olan agentlar izinli/hard OFF değilse çalıştırılır.
+#
+# Çalışmaya zorlanmayacak günler:
+# - Resmî tatil
+# - izin_map içindeki izin günleri
+# - hard_off_map içindeki off_t2 / hard yapılmış off_t günleri
 
-# --------------------------------------------------
-# 1) PLAN İÇİNDEKİ CUMARTESİ-PAZAR ÇİFTLERİ
-# --------------------------------------------------
 
-plan_date_to_ds = {
-    pd.to_datetime(ds).date(): ds
-    for ds in PLAN_GUNLER
-}
+# ------------------------------------------------------------
+# 1) PARTIAL END HAFTALARINI HAZIRLA
+# ------------------------------------------------------------
 
-weekend_pairs = []
+if "partial_end_weeks" not in globals():
 
-for sat_date, sat_ds in plan_date_to_ds.items():
-
-    if sat_date.weekday() != 5:
-        continue
-
-    sun_date = sat_date + pd.Timedelta(days=1)
-
-    if sun_date in plan_date_to_ds:
-        weekend_pairs.append(
-            (
-                sat_ds,
-                plan_date_to_ds[sun_date]
-            )
+    if (
+        "week_boundary_df" in globals()
+        and isinstance(week_boundary_df, pd.DataFrame)
+        and not week_boundary_df.empty
+    ):
+        partial_end_weeks = set(
+            week_boundary_df.loc[
+                week_boundary_df["partial_type"] == "partial_end",
+                "week",
+            ]
+            .astype(str)
+            .str.strip()
         )
+    else:
+        partial_end_weeks = set()
+
+else:
+    partial_end_weeks = {
+        str(w).strip()
+        for w in partial_end_weeks
+    }
 
 
-# --------------------------------------------------
-# 2) GERÇEK OFF DEĞİŞKENLERİ
-# --------------------------------------------------
-#
-# Gerçek izin:
-#     gerçek OFF sayılmaz.
-#
-# off_t2:
-#     hard OFF olduğu için gerçek OFF sayılır.
-#
-# off_t:
-#     hard açıksa gerçek OFF sayılır.
-#     soft olduğunda model çalıştırmazsa normal OFF sayılır.
-#
-# Normal gün:
-#     work=0 ise gerçek OFF,
-#     work=1 ise OFF değildir.
+# ------------------------------------------------------------
+# 2) HAMİLE / SÜT İZNİ AGENT SETİ
+# ------------------------------------------------------------
 
-gercek_off = {}
+hamile_flg = (
+    pd.to_numeric(
+        df_tam["hamile_flg"],
+        errors="coerce",
+    )
+    .fillna(0)
+    .astype(int)
+)
 
-for a_raw in AGENTS:
+sut_izni_flg = (
+    pd.to_numeric(
+        df_tam["sut_izni_flg"],
+        errors="coerce",
+    )
+    .fillna(0)
+    .astype(int)
+)
+
+hamile_sut_agents = set(
+    df_tam.loc[
+        (hamile_flg == 1) | (sut_izni_flg == 1),
+        "agent_user_code",
+    ]
+    .astype(str)
+    .str.strip()
+)
+
+
+# ------------------------------------------------------------
+# 3) RESMÎ TATİL GÜNLERİ
+# ------------------------------------------------------------
+
+resmi_tatil_days_for_partial_end = set()
+
+if "resmi_tatil_plan_gunleri" in globals():
+
+    resmi_tatil_days_for_partial_end = {
+        pd.to_datetime(ds).date()
+        for ds in resmi_tatil_plan_gunleri
+    }
+
+elif "RESMI_TATIL_GUNLERI" in globals():
+
+    resmi_tatil_key_set = {
+        pd.to_datetime(d).strftime("%Y-%m-%d")
+        for d in RESMI_TATIL_GUNLERI
+    }
+
+    resmi_tatil_days_for_partial_end = {
+        pd.to_datetime(ds).date()
+        for ds in PLAN_GUNLER
+        if pd.to_datetime(ds).strftime("%Y-%m-%d")
+        in resmi_tatil_key_set
+    }
+
+
+# ------------------------------------------------------------
+# 4) HARD KISITLAR
+# ------------------------------------------------------------
+
+partial_end_hamile_sut_work_constraints = 0
+partial_end_hamile_sut_work_debug_rows = []
+
+for a_raw in hamile_sut_agents:
 
     a = str(a_raw).strip()
 
@@ -56,114 +115,112 @@ for a_raw in AGENTS:
         for d in izin_map.get(a, set())
     }
 
-    off_t2_gunleri = {
+    hard_off_gunleri = {
         pd.to_datetime(d).date()
-        for d in off_t2_map.get(a, set())
-    }
-
-    off_t_gunleri = {
-        pd.to_datetime(d).date()
-        for d in off_t_map.get(a, set())
+        for d in hard_off_map.get(a, set())
     }
 
     for ds in PLAN_GUNLER:
 
         ds_date = pd.to_datetime(ds).date()
+        wk = str(day_week[ds]).strip()
+        weekday = pd.to_datetime(ds).weekday()
 
-        gercek_off[(a, ds)] = model.NewBoolVar(
-            f"gercek_off_{a}_{ds}"
-        )
+        # Sadece ay sonundaki partial_end hafta
+        if wk not in partial_end_weeks:
+            continue
 
-        # Gerçek izin çift OFF sayılmaz
+        # Sadece Pazartesi-Cuma
+        if weekday not in [0, 1, 2, 3, 4]:
+            continue
+
+        # Resmî tatilde zorunlu çalışma kurulmaz
+        if ds_date in resmi_tatil_days_for_partial_end:
+
+            partial_end_hamile_sut_work_debug_rows.append({
+                "agent_user_code": a,
+                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "week": wk,
+                "constraint_added": False,
+                "reason": "resmi_tatil",
+            })
+
+            continue
+
+        # Normal izin gününde zorunlu çalışma kurulmaz
         if ds_date in izin_gunleri:
 
-            model.Add(
-                gercek_off[(a, ds)] == 0
-            )
+            partial_end_hamile_sut_work_debug_rows.append({
+                "agent_user_code": a,
+                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "week": wk,
+                "constraint_added": False,
+                "reason": "izinli",
+            })
 
-        # off_t2 her zaman hard ve gerçek OFF
-        elif ds_date in off_t2_gunleri:
+            continue
 
-            model.Add(
-                gercek_off[(a, ds)] == 1
-            )
+        # off_t2 veya hard yapılmış off_t gününde zorlanmaz
+        if ds_date in hard_off_gunleri:
 
-        # off_t hard moddaysa gerçek OFF
-        elif (
-            ENABLE_OFF_T_HARD
-            and ds_date in off_t_gunleri
-        ):
+            partial_end_hamile_sut_work_debug_rows.append({
+                "agent_user_code": a,
+                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "week": wk,
+                "constraint_added": False,
+                "reason": "hard_off",
+            })
 
-            model.Add(
-                gercek_off[(a, ds)] == 1
-            )
+            continue
 
-        else:
+        # Karar değişkeni yoksa zorunlu çalışma kuramayız
+        if (a, ds) not in work:
 
-            # Normal gün veya ileride soft off_t günü:
-            # çalışmıyorsa OFF, çalışıyorsa OFF değil
-            model.Add(
-                gercek_off[(a, ds)]
-                + work[(a, ds)]
-                == 1
-            )
+            partial_end_hamile_sut_work_debug_rows.append({
+                "agent_user_code": a,
+                "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "week": wk,
+                "constraint_added": False,
+                "reason": "work_variable_yok",
+            })
+
+            continue
+
+        # İzinli/hard OFF değilse çalışmak zorunda
+        model.Add(work[(a, ds)] == 1)
+
+        partial_end_hamile_sut_work_constraints += 1
+
+        partial_end_hamile_sut_work_debug_rows.append({
+            "agent_user_code": a,
+            "date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+            "week": wk,
+            "constraint_added": True,
+            "reason": "partial_end_weekday_force_work",
+        })
 
 
-# --------------------------------------------------
-# 3) CUMARTESİ-PAZAR ÇİFT OFF DEĞİŞKENLERİ
-# --------------------------------------------------
+# ------------------------------------------------------------
+# 5) DEBUG DATAFRAME
+# ------------------------------------------------------------
 
-pair_off = {}
-weekend_pair_constraints = 0
+partial_end_hamile_sut_work_debug_df = pd.DataFrame(
+    partial_end_hamile_sut_work_debug_rows
+)
 
-for a_raw in AGENTS:
+print("Partial end haftalar:", partial_end_weeks)
+print("Hamile / süt izni agent sayısı:", len(hamile_sut_agents))
+print(
+    "Partial end hafta içi hamile/süt izni çalışma zorunluluğu kısıt sayısı:",
+    partial_end_hamile_sut_work_constraints,
+)
 
-    a = str(a_raw).strip()
-    agent_pair_vars = []
+if not partial_end_hamile_sut_work_debug_df.empty:
 
-    for i, (sat_ds, sun_ds) in enumerate(weekend_pairs):
-
-        pair_off[(a, i)] = model.NewBoolVar(
-            f"pair_off_{a}_{i}"
+    display(
+        partial_end_hamile_sut_work_debug_df
+        .sort_values(
+            ["date", "agent_user_code"]
         )
-
-        # pair_off ancak iki gün de gerçek OFF ise 1 olabilir
-        model.Add(
-            pair_off[(a, i)]
-            <= gercek_off[(a, sat_ds)]
-        )
-
-        model.Add(
-            pair_off[(a, i)]
-            <= gercek_off[(a, sun_ds)]
-        )
-
-        # İki gün de gerçek OFF ise pair_off mutlaka 1
-        model.Add(
-            pair_off[(a, i)]
-            >=
-            gercek_off[(a, sat_ds)]
-            + gercek_off[(a, sun_ds)]
-            - 1
-        )
-
-        agent_pair_vars.append(
-            pair_off[(a, i)]
-        )
-
-        weekend_pair_constraints += 3
-
-    # Her agent ayda en az bir gerçek Cmt-Paz çift OFF almalı
-    if agent_pair_vars:
-
-        model.Add(
-            sum(agent_pair_vars) >= 1
-        )
-
-        weekend_pair_constraints += 1
-
-
-print("Cumartesi-Pazar çifti:", len(weekend_pairs))
-print("Gerçek OFF değişkeni:", len(gercek_off))
-print("Pair OFF değişkeni:", len(pair_off))
-print("Çift OFF kısıtı:", weekend_pair_constraints)
+        .head(30)
+    )

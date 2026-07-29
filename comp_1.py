@@ -1,24 +1,32 @@
-hard_off_map = {}
+daily_one_shift_constraints = 0
 
 for a in AGENTS:
     a = str(a).strip()
 
-    hard_days = set()
+    for ds in PLAN_GUNLER:
 
-    hard_days |= izin_map.get(a, set())
-    hard_days |= off_t2_map.get(a, set())
+        vars_day = [
+            x[(a, ds, v)]
+            for v in gun_vardiyalari.get(ds, [])
+            if (a, ds, v) in x
+        ]
 
-    if ENABLE_OFF_T_HARD:
-        hard_days |= off_t_map.get(a, set())
+        if vars_day:
+            model.Add(sum(vars_day) == work[(a, ds)])
+        else:
+            model.Add(work[(a, ds)] == 0)
 
-    hard_off_map[a] = hard_days
+        daily_one_shift_constraints += 1
 
-#-----------------------------
-# x karar değişkeni
-# Hard izin/OFF günlerinde x oluşturulmaz.
-# -----------------------------
+print(
+    f"Günde max 1 vardiya/work kısıtı: "
+    f"{daily_one_shift_constraints} agent-gün"
+)
 
-x = {}
+
+# Hard OFF günlerinde yanlışlıkla x oluşturulmuş mu?
+
+hard_off_x_hatalari = []
 
 for a in AGENTS:
     a = str(a).strip()
@@ -26,13 +34,23 @@ for a in AGENTS:
     for ds in PLAN_GUNLER:
         ds_date = pd.to_datetime(ds).date()
 
-        # Gerçek izin + off_t2 + hard ise off_t
-        hard_off_gunleri = hard_off_map.get(a, set())
-
-        if ds_date in hard_off_gunleri:
+        if ds_date not in hard_off_map.get(a, set()):
             continue
 
-        for v in gun_vardiyalari.get(ds, []):
-            x[(a, ds, v)] = model.NewBoolVar(
-                f"x_{a}_{ds}_{v}"
-            )
+        bulunan_x = [
+            v
+            for v in gun_vardiyalari.get(ds, [])
+            if (a, ds, v) in x
+        ]
+
+        if bulunan_x:
+            hard_off_x_hatalari.append({
+                "agent_user_code": a,
+                "tarih": ds_date,
+                "x_olusan_vardiyalar": bulunan_x
+            })
+
+hard_off_x_hata_df = pd.DataFrame(hard_off_x_hatalari)
+
+print("Hard OFF gününde x oluşturulan kayıt:", len(hard_off_x_hata_df))
+display(hard_off_x_hata_df.head(20))

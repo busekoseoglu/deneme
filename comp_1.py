@@ -1,398 +1,169 @@
-# %% [HAZIRLIK] - HAFTALIK HARD OFF VE TELAFİ YAPISI
+# %% [KISIT] - AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
 
-extra_off_week = {}
-weekly_target_debug_rows = []
+# --------------------------------------------------
+# 1) PLAN İÇİNDEKİ CUMARTESİ-PAZAR ÇİFTLERİ
+# --------------------------------------------------
 
-weekly_work_constraints = 0
-weekly_overtime_block_constraints = 0
-monthly_extra_off_balance_constraints = 0
-monthly_overtime_constraints = 0
+plan_date_to_ds = {
+    pd.to_datetime(ds).date(): ds
+    for ds in PLAN_GUNLER
+}
 
+weekend_pairs = []
 
-# Mesaiye kalamayan agentlar
-mesaiye_kalamaz_agents = set(
-    df_tam.loc[
-        pd.to_numeric(
-            df_tam["mesaiye_kalamaz_flg"],
-            errors="coerce"
-        ).fillna(0).astype(int) == 1,
-        "agent_user_code"
-    ]
-    .astype(str)
-    .str.strip()
-)
+for sat_date, sat_ds in plan_date_to_ds.items():
 
+    if sat_date.weekday() != 5:
+        continue
 
-# Resmî tatilleri date formatına çevir
-resmi_tatil_date_set = set()
+    sun_date = sat_date + pd.Timedelta(days=1)
 
-if "resmi_tatil_plan_gunleri" in globals():
-
-    resmi_tatil_date_set = {
-        pd.to_datetime(d).date()
-        for d in resmi_tatil_plan_gunleri
-    }
-
-elif "RESMI_TATIL_GUNLERI" in globals():
-
-    resmi_tatil_date_set = {
-        pd.to_datetime(d).date()
-        for d in RESMI_TATIL_GUNLERI
-    }
+    if sun_date in plan_date_to_ds:
+        weekend_pairs.append(
+            (
+                sat_ds,
+                plan_date_to_ds[sun_date]
+            )
+        )
 
 
-# Partial week ayarı
-skip_partial_week = globals().get(
-    "SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS",
-    True
-)
+# --------------------------------------------------
+# 2) GERÇEK OFF DEĞİŞKENLERİ
+# --------------------------------------------------
+#
+# Gerçek izin:
+#     gerçek OFF sayılmaz.
+#
+# off_t2:
+#     hard OFF olduğu için gerçek OFF sayılır.
+#
+# off_t:
+#     hard açıksa gerçek OFF sayılır.
+#     soft olduğunda model çalıştırmazsa normal OFF sayılır.
+#
+# Normal gün:
+#     work=0 ise gerçek OFF,
+#     work=1 ise OFF değildir.
 
-partial_weeks_local = globals().get(
-    "partial_weeks",
-    set()
-)
-
-print("Haftalık hard OFF hazırlığı tamamlandı.")
-print("Mesaiye kalamayan agent:", len(mesaiye_kalamaz_agents))
-print("Resmî tatil günü:", len(resmi_tatil_date_set))
-
-
-
-# %% [KISIT] - HAFTALIK ÇALIŞMA + HARD OFF
+gercek_off = {}
 
 for a_raw in AGENTS:
 
     a = str(a_raw).strip()
 
-    agent_izin_gunleri = {
+    izin_gunleri = {
         pd.to_datetime(d).date()
         for d in izin_map.get(a, set())
     }
 
-    agent_off_t2_gunleri = {
+    off_t2_gunleri = {
         pd.to_datetime(d).date()
         for d in off_t2_map.get(a, set())
     }
 
-    agent_off_t_gunleri = {
+    off_t_gunleri = {
         pd.to_datetime(d).date()
         for d in off_t_map.get(a, set())
     }
 
-    # off_t2 her zaman hard
-    agent_hard_talep_gunleri = set(
-        agent_off_t2_gunleri
-    )
+    for ds in PLAN_GUNLER:
 
-    # off_t config'e göre hard
-    if ENABLE_OFF_T_HARD:
-        agent_hard_talep_gunleri |= agent_off_t_gunleri
+        ds_date = pd.to_datetime(ds).date()
 
-
-    for wk in WEEKS:
-
-        week_days_list = [
-            ds
-            for ds in week_days[wk]
-            if (a, ds) in work
-        ]
-
-        # Her hafta için ekstra OFF değişkeni oluştur
-        extra_off_week[(a, wk)] = model.NewIntVar(
-            0,
-            len(week_days_list),
-            f"extra_off_week_{a}_{wk}"
+        gercek_off[(a, ds)] = model.NewBoolVar(
+            f"gercek_off_{a}_{ds}"
         )
 
-        # -------------------------------------------------
-        # PARÇA HAFTA
-        # -------------------------------------------------
-
-        wk_is_partial = wk in partial_weeks_local
-
-        if skip_partial_week and wk_is_partial:
+        # Gerçek izin çift OFF sayılmaz
+        if ds_date in izin_gunleri:
 
             model.Add(
-                extra_off_week[(a, wk)] == 0
+                gercek_off[(a, ds)] == 0
             )
 
-            if (a, wk) in overtime_week:
-                model.Add(
-                    overtime_week[(a, wk)] == 0
-                )
-
-            weekly_target_debug_rows.append({
-                "agent_user_code": a,
-                "week": wk,
-                "partial_week": True,
-                "normal_target": None,
-                "izin_sayisi": None,
-                "resmi_tatil_sayisi": None,
-                "hard_off_talep_sayisi": None,
-                "standart_off_sayisi": None,
-                "extra_off_sayisi": 0
-            })
-
-            continue
-
-
-        # -------------------------------------------------
-        # HAFTALIK GÜN SETLERİ
-        # -------------------------------------------------
-
-        week_date_map = {
-            ds: pd.to_datetime(ds).date()
-            for ds in week_days_list
-        }
-
-        resmi_tatil_days_this_week = {
-            ds
-            for ds, d_date in week_date_map.items()
-            if d_date in resmi_tatil_date_set
-        }
-
-        izin_days_this_week = {
-            ds
-            for ds, d_date in week_date_map.items()
-            if d_date in agent_izin_gunleri
-        }
-
-        # Resmî tatil ile izin aynı güne geldiyse iki kez düşme
-        izin_normal_days_this_week = (
-            izin_days_this_week
-            - resmi_tatil_days_this_week
-        )
-
-        hard_talep_days_this_week = {
-            ds
-            for ds, d_date in week_date_map.items()
-            if d_date in agent_hard_talep_gunleri
-            and ds not in izin_days_this_week
-            and ds not in resmi_tatil_days_this_week
-        }
-
-
-        # -------------------------------------------------
-        # NORMAL ÇALIŞMA DEĞİŞKENLERİ
-        # -------------------------------------------------
-
-        # Resmî tatildeki çalışma normal çalışmadan ayrı tutuluyor
-        normal_work_vars = [
-            work[(a, ds)]
-            for ds in week_days_list
-            if ds not in resmi_tatil_days_this_week
-        ]
-
-        if not normal_work_vars:
+        # off_t2 her zaman hard ve gerçek OFF
+        elif ds_date in off_t2_gunleri:
 
             model.Add(
-                extra_off_week[(a, wk)] == 0
+                gercek_off[(a, ds)] == 1
             )
 
-            if (a, wk) in overtime_week:
-                model.Add(
-                    overtime_week[(a, wk)] == 0
-                )
-
-            continue
-
-
-        # -------------------------------------------------
-        # NORMAL HAFTALIK HEDEF
-        # -------------------------------------------------
-
-        normal_target = (
-            NORMAL_WORK_DAYS
-            - len(izin_normal_days_this_week)
-            - len(resmi_tatil_days_this_week)
-        )
-
-        normal_target = max(
-            0,
-            min(normal_target, len(normal_work_vars))
-        )
-
-
-        # -------------------------------------------------
-        # STANDART OFF KAPASİTESİ
-        # -------------------------------------------------
-        #
-        # Normal tam haftada:
-        # 7 gün - 5 çalışma = 2 standart OFF
-        #
-        # İzin günü standart OFF sayılmaz.
-
-        izin_ve_tatil_haric_gun_sayisi = len([
-            ds
-            for ds in week_days_list
-            if ds not in izin_days_this_week
-            and ds not in resmi_tatil_days_this_week
-        ])
-
-        standart_off_sayisi = max(
-            0,
-            izin_ve_tatil_haric_gun_sayisi
-            - normal_target
-        )
-
-
-        # -------------------------------------------------
-        # EKSTRA HARD OFF
-        # -------------------------------------------------
-
-        hard_off_talep_sayisi = len(
-            hard_talep_days_this_week
-        )
-
-        extra_off_sayisi = max(
-            0,
-            hard_off_talep_sayisi
-            - standart_off_sayisi
-        )
-
-        model.Add(
-            extra_off_week[(a, wk)]
-            == extra_off_sayisi
-        )
-
-
-        # -------------------------------------------------
-        # TELAFİ ÇALIŞMASINI KAPATAN DURUMLAR
-        # -------------------------------------------------
-
-        overtime_forced_zero_reasons = []
-
-        if (a, wk) not in overtime_week:
-            raise KeyError(
-                f"overtime_week değişkeni bulunamadı: {(a, wk)}"
-            )
-
-        # Mesaiye kalamayan kişi 6. gün çalışamaz
-        if a in mesaiye_kalamaz_agents:
+        # off_t hard moddaysa gerçek OFF
+        elif (
+            ENABLE_OFF_T_HARD
+            and ds_date in off_t_gunleri
+        ):
 
             model.Add(
-                overtime_week[(a, wk)] == 0
+                gercek_off[(a, ds)] == 1
             )
 
-            weekly_overtime_block_constraints += 1
-            overtime_forced_zero_reasons.append(
-                "mesaiye_kalamaz"
-            )
+        else:
 
-        # Gerçek izin bulunan haftada telafi yapılmaz
-        if len(izin_normal_days_this_week) > 0:
-
+            # Normal gün veya ileride soft off_t günü:
+            # çalışmıyorsa OFF, çalışıyorsa OFF değil
             model.Add(
-                overtime_week[(a, wk)] == 0
-            )
-
-            weekly_overtime_block_constraints += 1
-            overtime_forced_zero_reasons.append(
-                "izinli_hafta"
+                gercek_off[(a, ds)]
+                + work[(a, ds)]
+                == 1
             )
 
 
-        # -------------------------------------------------
-        # HAFTALIK HARD EŞİTLİK
-        # -------------------------------------------------
+# --------------------------------------------------
+# 3) CUMARTESİ-PAZAR ÇİFT OFF DEĞİŞKENLERİ
+# --------------------------------------------------
 
-        model.Add(
-            sum(normal_work_vars)
-            ==
-            normal_target
-            - extra_off_week[(a, wk)]
-            + overtime_week[(a, wk)]
-        )
-
-        weekly_work_constraints += 1
-
-
-        weekly_target_debug_rows.append({
-            "agent_user_code": a,
-            "week": wk,
-            "partial_week": False,
-            "normal_target": normal_target,
-            "izin_sayisi": len(
-                izin_normal_days_this_week
-            ),
-            "resmi_tatil_sayisi": len(
-                resmi_tatil_days_this_week
-            ),
-            "hard_off_talep_sayisi": (
-                hard_off_talep_sayisi
-            ),
-            "standart_off_sayisi": (
-                standart_off_sayisi
-            ),
-            "extra_off_sayisi": (
-                extra_off_sayisi
-            ),
-            "overtime_forced_zero_reason": (
-                " | ".join(overtime_forced_zero_reasons)
-                if overtime_forced_zero_reasons
-                else None
-            )
-        })
-
-
-weekly_target_debug_df = pd.DataFrame(
-    weekly_target_debug_rows
-)
-
-print("Haftalık çalışma kısıtı:", weekly_work_constraints)
-print(
-    "Telafi kapatma kısıtı:",
-    weekly_overtime_block_constraints
-)
-
-
-
-# %% [KISIT] - AYLIK EKSTRA OFF / TELAFİ DENGESİ
+pair_off = {}
+weekend_pair_constraints = 0
 
 for a_raw in AGENTS:
 
     a = str(a_raw).strip()
+    agent_pair_vars = []
 
-    agent_extra_off_vars = [
-        extra_off_week[(a, wk)]
-        for wk in WEEKS
-        if (a, wk) in extra_off_week
-    ]
+    for i, (sat_ds, sun_ds) in enumerate(weekend_pairs):
 
-    agent_overtime_vars = [
-        overtime_week[(a, wk)]
-        for wk in WEEKS
-        if (a, wk) in overtime_week
-    ]
-
-    if agent_extra_off_vars:
-
-        # Ay içinde verilen her ekstra OFF,
-        # başka bir haftada bir telafi günüyle kapanır.
-        model.Add(
-            sum(agent_extra_off_vars)
-            ==
-            sum(agent_overtime_vars)
+        pair_off[(a, i)] = model.NewBoolVar(
+            f"pair_off_{a}_{i}"
         )
 
-        monthly_extra_off_balance_constraints += 1
-
-    if agent_overtime_vars:
-
+        # pair_off ancak iki gün de gerçek OFF ise 1 olabilir
         model.Add(
-            sum(agent_overtime_vars)
-            <= MAX_OVERTIME_PER_MONTH
+            pair_off[(a, i)]
+            <= gercek_off[(a, sat_ds)]
         )
 
-        monthly_overtime_constraints += 1
+        model.Add(
+            pair_off[(a, i)]
+            <= gercek_off[(a, sun_ds)]
+        )
+
+        # İki gün de gerçek OFF ise pair_off mutlaka 1
+        model.Add(
+            pair_off[(a, i)]
+            >=
+            gercek_off[(a, sat_ds)]
+            + gercek_off[(a, sun_ds)]
+            - 1
+        )
+
+        agent_pair_vars.append(
+            pair_off[(a, i)]
+        )
+
+        weekend_pair_constraints += 3
+
+    # Her agent ayda en az bir gerçek Cmt-Paz çift OFF almalı
+    if agent_pair_vars:
+
+        model.Add(
+            sum(agent_pair_vars) >= 1
+        )
+
+        weekend_pair_constraints += 1
 
 
-print(
-    "Aylık ekstra OFF-telafi kısıtı:",
-    monthly_extra_off_balance_constraints
-)
-
-print(
-    "Aylık maksimum telafi kısıtı:",
-    monthly_overtime_constraints
-)
+print("Cumartesi-Pazar çifti:", len(weekend_pairs))
+print("Gerçek OFF değişkeni:", len(gercek_off))
+print("Pair OFF değişkeni:", len(pair_off))
+print("Çift OFF kısıtı:", weekend_pair_constraints)

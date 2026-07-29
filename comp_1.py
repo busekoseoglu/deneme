@@ -1,5 +1,11 @@
 # %% [HAZIRLIK] - GERÇEK İZİN MAP
-
+def _b(row, col):
+    return (
+        pd.to_numeric(
+            row.get(col, 0),
+            errors="coerce"
+        ) == 1
+    )
 # df_izin_off_model içindeki yalnızca "izin" kayıtları
 izin_map = {}
 

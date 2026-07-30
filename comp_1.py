@@ -1,148 +1,264 @@
-# %% [HAZIRLIK] - AGENT BAZLI İZİN / OFF MAP'LERİ
+# %% [KISIT] - AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
 
-izin_map = {}
-off_t2_map = {}
-off_t_map = {}
+# --------------------------------------------------
+# MANTIK
+# --------------------------------------------------
+#
+# izin:
+#     Çalışılmayan gün olsa da gerçek OFF sayılmaz.
+#
+# off_t2:
+#     Her zaman gerçek OFF sayılır.
+#
+# off_t:
+#     ENABLE_OFF_T_HARD=True ise gerçek OFF sayılır.
+#     ENABLE_OFF_T_HARD=False ise çalışılmadığında gerçek OFF sayılır.
+#
+# Normal gün:
+#     work=0 ise gerçek OFF,
+#     work=1 ise OFF değildir.
+#
+# Ayın tamamı izinli olan agent:
+#     Modelde kalır, bütün günleri izin olur.
+#     Ancak bu agent için çift OFF zorunluluğu kurulmaz.
 
-for _, row in df_tam.iterrows():
 
-    code = str(
-        row["agent_user_code"]
-    ).strip()
+# --------------------------------------------------
+# 1) PLAN İÇİNDEKİ CUMARTESİ-PAZAR ÇİFTLERİ
+# --------------------------------------------------
 
-    izin = set()
-    off_t2 = set()
-    off_t = set()
+plan_date_to_ds = {
+    pd.to_datetime(ds).date(): ds
+    for ds in PLAN_GUNLER
+}
 
-    # df_izin + df_off birleşiminden gelen tarihler
-    for tarih, tipi in tip_map.get(code, {}).items():
+plan_date_set = set(
+    plan_date_to_ds.keys()
+)
 
-        tarih = pd.to_datetime(tarih).date()
-        tipi = str(tipi).strip().lower()
+weekend_pairs = []
 
-        if tipi == "izin":
-            izin.add(tarih)
+for sat_date, sat_ds in plan_date_to_ds.items():
 
-        elif tipi == "off_t2":
-            off_t2.add(tarih)
+    if sat_date.weekday() != 5:
+        continue
 
-        elif tipi == "off_t":
-            off_t.add(tarih)
+    sun_date = (
+        pd.Timestamp(sat_date)
+        + pd.Timedelta(days=1)
+    ).date()
 
-    # Tam ay idari izin / doğum izni
-    if (
-        _b(row, "idari_izinli_flg")
-        or _b(row, "dogum_izni_flg")
-    ):
-        izin |= set(GUN_SET)
+    if sun_date in plan_date_to_ds:
 
-    # Haftanın belirli günlerinde tekrarlanan izinler
-    sut_izni_var = _b(
-        row,
-        "sut_izni_flg"
-    )
-
-    for flag, weekday_no in HAFTALIK_IZIN_FLG.items():
-
-        if not _b(row, flag):
-            continue
-
-        gunler = set(
-            gunluk_izin.get(
-                weekday_no,
-                set()
+        weekend_pairs.append(
+            (
+                sat_ds,
+                plan_date_to_ds[sun_date],
             )
         )
 
-        if sut_izni_var:
 
-            gunler = {
-                d
-                for d in gunler
-                if d.isocalendar()[:2]
-                not in tatil_haftalari
-            }
+# --------------------------------------------------
+# 2) GERÇEK OFF DEĞİŞKENLERİ
+# --------------------------------------------------
 
-        izin |= gunler
-
-    izin_map[code] = izin
-    off_t2_map[code] = off_t2
-    off_t_map[code] = off_t
-
-
-df_tam["izin_gun_sayisi"] = (
-    df_tam["agent_user_code"]
-    .astype(str)
-    .str.strip()
-    .map(
-        lambda code: len(
-            izin_map.get(
-                code,
-                set()
-            )
-        )
-    )
-)
-
-
-print(
-    "İzin günü toplamı:",
-    sum(
-        len(gunler)
-        for gunler in izin_map.values()
-    )
-)
-
-print(
-    "off_t2 günü toplamı:",
-    sum(
-        len(gunler)
-        for gunler in off_t2_map.values()
-    )
-)
-
-print(
-    "off_t günü toplamı:",
-    sum(
-        len(gunler)
-        for gunler in off_t_map.values()
-    )
-)
-
-# %% [HAZIRLIK] - HARD OFF MAP
-
-hard_off_map = {}
+gercek_off = {}
 
 for a_raw in AGENTS:
 
     a = str(a_raw).strip()
 
-    hard_gunler = set()
+    izin_gunleri = {
+        pd.to_datetime(d).date()
+        for d in izin_map.get(a, set())
+    }
 
-    hard_gunler |= izin_map.get(
-        a,
-        set()
-    )
+    off_t2_gunleri = {
+        pd.to_datetime(d).date()
+        for d in off_t2_map.get(a, set())
+    }
 
-    hard_gunler |= off_t2_map.get(
-        a,
-        set()
-    )
+    off_t_gunleri = {
+        pd.to_datetime(d).date()
+        for d in off_t_map.get(a, set())
+    }
 
-    if ENABLE_OFF_T_HARD:
+    for ds in PLAN_GUNLER:
 
-        hard_gunler |= off_t_map.get(
-            a,
-            set()
+        ds_date = pd.to_datetime(ds).date()
+
+        gercek_off[(a, ds)] = model.NewBoolVar(
+            f"gercek_off_{a}_{ds}"
         )
 
-    hard_off_map[a] = hard_gunler
+        # İzin günü gerçek OFF değildir
+        if ds_date in izin_gunleri:
 
+            model.Add(
+                gercek_off[(a, ds)] == 0
+            )
+
+        # off_t2 her zaman gerçek OFF
+        elif ds_date in off_t2_gunleri:
+
+            model.Add(
+                gercek_off[(a, ds)] == 1
+            )
+
+        # Hard moddaki off_t gerçek OFF
+        elif (
+            ENABLE_OFF_T_HARD
+            and ds_date in off_t_gunleri
+        ):
+
+            model.Add(
+                gercek_off[(a, ds)] == 1
+            )
+
+        else:
+
+            # Normal gün veya soft off_t:
+            # çalışmıyorsa gerçek OFF
+            model.Add(
+                gercek_off[(a, ds)]
+                + work[(a, ds)]
+                == 1
+            )
+
+
+# --------------------------------------------------
+# 3) CUMARTESİ-PAZAR ÇİFT OFF DEĞİŞKENLERİ
+# --------------------------------------------------
+
+pair_off = {}
+
+cift_off_kisit_sayisi = 0
+cift_off_zorunlulugu_olan_agent = 0
+cift_off_zorunlulugu_olmayan_agent = 0
+
+cift_off_debug_rows = []
+
+for a_raw in AGENTS:
+
+    a = str(a_raw).strip()
+
+    izin_gunleri = {
+        pd.to_datetime(d).date()
+        for d in izin_map.get(a, set())
+    }
+
+    plan_ici_izin_gunleri = (
+        izin_gunleri
+        & plan_date_set
+    )
+
+    # Planın bütün günleri izinliyse çift OFF zorunluluğu kurulmaz
+    tum_plan_izinli = (
+        len(plan_date_set) > 0
+        and plan_date_set.issubset(
+            plan_ici_izin_gunleri
+        )
+    )
+
+    agent_pair_vars = []
+
+    for pair_index, (sat_ds, sun_ds) in enumerate(
+        weekend_pairs
+    ):
+
+        pair_off[(a, pair_index)] = model.NewBoolVar(
+            f"pair_off_{a}_{pair_index}"
+        )
+
+        model.Add(
+            pair_off[(a, pair_index)]
+            <= gercek_off[(a, sat_ds)]
+        )
+
+        model.Add(
+            pair_off[(a, pair_index)]
+            <= gercek_off[(a, sun_ds)]
+        )
+
+        model.Add(
+            pair_off[(a, pair_index)]
+            >= gercek_off[(a, sat_ds)]
+            + gercek_off[(a, sun_ds)]
+            - 1
+        )
+
+        agent_pair_vars.append(
+            pair_off[(a, pair_index)]
+        )
+
+        cift_off_kisit_sayisi += 3
+
+    # Yalnızca ay içinde çalışabilecek agent için
+    # en az bir gerçek çift OFF zorunluluğu kur
+    if agent_pair_vars and not tum_plan_izinli:
+
+        model.Add(
+            sum(agent_pair_vars) >= 1
+        )
+
+        cift_off_kisit_sayisi += 1
+        cift_off_zorunlulugu_olan_agent += 1
+
+    else:
+
+        cift_off_zorunlulugu_olmayan_agent += 1
+
+    cift_off_debug_rows.append({
+        "agent_user_code": a,
+        "izin_gun_sayisi_plan_ici": len(
+            plan_ici_izin_gunleri
+        ),
+        "plan_gun_sayisi": len(
+            plan_date_set
+        ),
+        "tum_plan_izinli": tum_plan_izinli,
+        "cift_off_zorunlulugu_kuruldu": (
+            bool(agent_pair_vars)
+            and not tum_plan_izinli
+        ),
+    })
+
+
+cift_off_debug_df = pd.DataFrame(
+    cift_off_debug_rows
+)
+
+
+# --------------------------------------------------
+# 4) BİLGİ ÇIKTISI
+# --------------------------------------------------
 
 print(
-    "Hard OFF günü toplamı:",
-    sum(
-        len(gunler)
-        for gunler in hard_off_map.values()
-    )
+    "Plan içindeki Cumartesi-Pazar çifti:",
+    len(weekend_pairs)
+)
+
+print(
+    "Gerçek OFF değişkeni:",
+    len(gercek_off)
+)
+
+print(
+    "Pair OFF değişkeni:",
+    len(pair_off)
+)
+
+print(
+    "Çift OFF kısıt sayısı:",
+    cift_off_kisit_sayisi
+)
+
+print(
+    "Çift OFF zorunluluğu kurulan agent:",
+    cift_off_zorunlulugu_olan_agent
+)
+
+print(
+    "Tüm ay izinli olduğu için çift OFF zorunluluğu kurulmayan agent:",
+    cift_off_zorunlulugu_olmayan_agent
 )

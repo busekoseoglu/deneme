@@ -1,121 +1,148 @@
-# %% [DEBUG] - PRESOLVE'DA PATLAYAN LINEAR KISITI BUL
+# %% [HAZIRLIK] - AGENT BAZLI İZİN / OFF MAP'LERİ
 
-# Solver logunda yazan constraint numarası:
-SORUNLU_CONSTRAINT_INDEX = 54275
+izin_map = {}
+off_t2_map = {}
+off_t_map = {}
 
-model_proto = model.Proto()
+for _, row in df_tam.iterrows():
 
-toplam_kisit_sayisi = len(
-    model_proto.constraints
-)
+    code = str(
+        row["agent_user_code"]
+    ).strip()
 
-print(
-    "Modeldeki toplam kısıt sayısı:",
-    toplam_kisit_sayisi
-)
+    izin = set()
+    off_t2 = set()
+    off_t = set()
 
-if (
-    SORUNLU_CONSTRAINT_INDEX < 0
-    or SORUNLU_CONSTRAINT_INDEX >= toplam_kisit_sayisi
-):
-    raise IndexError(
-        f"{SORUNLU_CONSTRAINT_INDEX} numaralı kısıt bulunamadı. "
-        f"Modelde 0 ile {toplam_kisit_sayisi - 1} arasında "
-        f"kısıt indeksleri var."
-    )
+    # df_izin + df_off birleşiminden gelen tarihler
+    for tarih, tipi in tip_map.get(code, {}).items():
 
+        tarih = pd.to_datetime(tarih).date()
+        tipi = str(tipi).strip().lower()
 
-sorunlu_constraint = (
-    model_proto.constraints[
-        SORUNLU_CONSTRAINT_INDEX
-    ]
-)
+        if tipi == "izin":
+            izin.add(tarih)
 
-print(
-    "Sorunlu constraint index:",
-    SORUNLU_CONSTRAINT_INDEX
-)
+        elif tipi == "off_t2":
+            off_t2.add(tarih)
 
-print(
-    "Constraint adı:",
-    sorunlu_constraint.name
-)
+        elif tipi == "off_t":
+            off_t.add(tarih)
 
-
-# OR-Tools 9.15'te WhichOneof kullanılmıyor.
-# Solver logundaki kısıt linear olduğu için has_linear kontrolü yapıyoruz.
-
-if not sorunlu_constraint.has_linear():
-
-    print(
-        "Bu constraint linear değil."
-    )
-
-    print(
-        sorunlu_constraint
-    )
-
-else:
-
-    linear_constraint = (
-        sorunlu_constraint.linear
-    )
-
-    var_indices = list(
-        linear_constraint.vars
-    )
-
-    coeffs = list(
-        linear_constraint.coeffs
-    )
-
-    constraint_domain = list(
-        linear_constraint.domain
-    )
-
-    print(
-        "Constraint domain:",
-        constraint_domain
-    )
-
-    print(
-        "Constraint içindeki değişken sayısı:",
-        len(var_indices)
-    )
-
-
-    sorunlu_var_rows = []
-
-    for var_index, coefficient in zip(
-        var_indices,
-        coeffs
+    # Tam ay idari izin / doğum izni
+    if (
+        _b(row, "idari_izinli_flg")
+        or _b(row, "dogum_izni_flg")
     ):
+        izin |= set(GUN_SET)
 
-        var_proto = (
-            model_proto.variables[
-                var_index
-            ]
-        )
-
-        sorunlu_var_rows.append({
-            "constraint_index": (
-                SORUNLU_CONSTRAINT_INDEX
-            ),
-            "var_index": var_index,
-            "var_name": var_proto.name,
-            "coefficient": coefficient,
-            "original_domain": list(
-                var_proto.domain
-            ),
-        })
-
-
-    sorunlu_constraint_vars_df = (
-        pd.DataFrame(
-            sorunlu_var_rows
-        )
+    # Haftanın belirli günlerinde tekrarlanan izinler
+    sut_izni_var = _b(
+        row,
+        "sut_izni_flg"
     )
 
-    display(
-        sorunlu_constraint_vars_df
+    for flag, weekday_no in HAFTALIK_IZIN_FLG.items():
+
+        if not _b(row, flag):
+            continue
+
+        gunler = set(
+            gunluk_izin.get(
+                weekday_no,
+                set()
+            )
+        )
+
+        if sut_izni_var:
+
+            gunler = {
+                d
+                for d in gunler
+                if d.isocalendar()[:2]
+                not in tatil_haftalari
+            }
+
+        izin |= gunler
+
+    izin_map[code] = izin
+    off_t2_map[code] = off_t2
+    off_t_map[code] = off_t
+
+
+df_tam["izin_gun_sayisi"] = (
+    df_tam["agent_user_code"]
+    .astype(str)
+    .str.strip()
+    .map(
+        lambda code: len(
+            izin_map.get(
+                code,
+                set()
+            )
+        )
     )
+)
+
+
+print(
+    "İzin günü toplamı:",
+    sum(
+        len(gunler)
+        for gunler in izin_map.values()
+    )
+)
+
+print(
+    "off_t2 günü toplamı:",
+    sum(
+        len(gunler)
+        for gunler in off_t2_map.values()
+    )
+)
+
+print(
+    "off_t günü toplamı:",
+    sum(
+        len(gunler)
+        for gunler in off_t_map.values()
+    )
+)
+
+# %% [HAZIRLIK] - HARD OFF MAP
+
+hard_off_map = {}
+
+for a_raw in AGENTS:
+
+    a = str(a_raw).strip()
+
+    hard_gunler = set()
+
+    hard_gunler |= izin_map.get(
+        a,
+        set()
+    )
+
+    hard_gunler |= off_t2_map.get(
+        a,
+        set()
+    )
+
+    if ENABLE_OFF_T_HARD:
+
+        hard_gunler |= off_t_map.get(
+            a,
+            set()
+        )
+
+    hard_off_map[a] = hard_gunler
+
+
+print(
+    "Hard OFF günü toplamı:",
+    sum(
+        len(gunler)
+        for gunler in hard_off_map.values()
+    )
+)

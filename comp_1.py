@@ -175,6 +175,52 @@ def vardiya_str(v):
     return str(v)
 
 
+def saat_formatla(value):
+    if value is None or value == "":
+        return ""
+
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%H:%M")
+        except Exception:
+            pass
+
+    text = str(value).strip()
+
+    if " " in text:
+        text = text.split(" ")[-1]
+
+    return text[:5]
+
+
+def vardiya_detay_str(ds, v):
+    vardiya_kodu = vardiya_str(v)
+
+    if "saat" not in globals():
+        return vardiya_kodu
+
+    vardiya_saati = saat.get((ds, v))
+
+    if not vardiya_saati:
+        return vardiya_kodu
+
+    try:
+        baslangic, bitis = vardiya_saati
+    except Exception:
+        return vardiya_kodu
+
+    baslangic = saat_formatla(baslangic)
+    bitis = saat_formatla(bitis)
+
+    if baslangic and bitis:
+        return f"{vardiya_kodu} | {baslangic}-{bitis}"
+
+    if baslangic:
+        return f"{vardiya_kodu} | {baslangic}"
+
+    return vardiya_kodu
+
+
 def agent_meta_map_olustur():
     sonuc = {}
 
@@ -273,8 +319,54 @@ def haftalik_baz_hedef(agent, wk):
 
 
 # ------------------------------------------------------------
-# 5) OFF BORCU VE TELAFİ GÜNLERİNİ TÜRET
+# 5) HAFTALIK GERÇEK OFF, OFF BORCU VE TELAFİ
 # ------------------------------------------------------------
+#
+# Doğru raporlama mantığı:
+# - İzin ve resmî tatil gerçek OFF sayılmaz.
+# - off_t / off_t2 gerçek OFF sayılır.
+# - Bunların dışındaki work=0 günleri gerçek OFF sayılır.
+# - Haftada 2 gerçek OFF varsa hafta sonu çalışmaları NORM'dur.
+# - Haftada 1 gerçek OFF varsa 6. çalışma günlerinden biri TELAFİ'dir.
+# - TELAFİ yalnızca başka haftadaki OFF borcuna karşılık atanır.
+
+haftalik_gercek_off = {}
+haftalik_calisma_gunleri = {}
+haftalik_hafta_sonu_calisma = {}
+
+for a_raw in AGENTS:
+    a = norm_agent(a_raw)
+
+    for wk, tarihler_raw in hafta_tarihleri.items():
+        tarihler = sorted(tarihler_raw)
+        gercek_off_tarihleri = []
+        calisma_tarihleri = []
+        hafta_sonu_calisma_tarihleri = []
+
+        for tarih in tarihler:
+            tip = tip_getir(a, tarih)
+            calisti = work_map.get((a, tarih), 0) == 1
+
+            if calisti:
+                calisma_tarihleri.append(tarih)
+                if tarih.weekday() >= 5:
+                    hafta_sonu_calisma_tarihleri.append(tarih)
+
+            if tip == "izin":
+                continue
+
+            if tarih in RESMI_TATIL_SET:
+                continue
+
+            if tip in {"off_t", "off_t2"}:
+                gercek_off_tarihleri.append(tarih)
+            elif not calisti:
+                gercek_off_tarihleri.append(tarih)
+
+        haftalik_gercek_off[(a, wk)] = gercek_off_tarihleri
+        haftalik_calisma_gunleri[(a, wk)] = calisma_tarihleri
+        haftalik_hafta_sonu_calisma[(a, wk)] = hafta_sonu_calisma_tarihleri
+
 
 off_borc_rows = []
 telafi_gunleri = {}
@@ -283,7 +375,6 @@ acik_borc_agent = {}
 
 for a_raw in AGENTS:
     a = norm_agent(a_raw)
-
     hafta_bilgileri = []
 
     for wk in sorted(hafta_tarihleri):
@@ -297,57 +388,53 @@ for a_raw in AGENTS:
         talep_sayisi = len(talep_tarihleri)
         borc = max(talep_sayisi - 2, 0)
 
-        calisma_tarihleri = [
-            t for t in tarihler
-            if work_map.get((a, t), 0) == 1
-        ]
+        gercek_off_tarihleri = haftalik_gercek_off.get((a, wk), [])
+        calisma_tarihleri = haftalik_calisma_gunleri.get((a, wk), [])
+        hafta_sonu_calisma_tarihleri = haftalik_hafta_sonu_calisma.get((a, wk), [])
 
-        baz_hedef = haftalik_baz_hedef(a, wk)
-        fazla_calisma = max(
-            len(calisma_tarihleri) - baz_hedef,
-            0
-        )
+        gercek_off_sayisi = len(gercek_off_tarihleri)
 
-        # Fazladan çalışılmış günleri raporlama için seç.
-        # Öncelik: hafta sonu, sonra en geç tarih.
+        # 2 OFF yerine 1 OFF kullanılmışsa 1 adet telafi ödeme kapasitesi vardır.
+        telafi_odeme_kapasitesi = max(2 - gercek_off_sayisi, 0)
+
+        # Telafi günü mümkünse hafta sonu çalışmasından seçilir.
         telafi_aday_gunleri = sorted(
-            calisma_tarihleri,
-            key=lambda t: (
-                0 if t.weekday() >= 5 else 1,
-                -t.toordinal()
-            )
-        )[:fazla_calisma]
+            hafta_sonu_calisma_tarihleri,
+            reverse=True,
+        )[:telafi_odeme_kapasitesi]
 
         hafta_bilgileri.append({
             "week": wk,
-            "dates": tarihler,
             "off_request_dates": talep_tarihleri,
             "off_request_count": talep_sayisi,
             "debt": borc,
+            "real_off_dates": gercek_off_tarihleri,
+            "real_off_count": gercek_off_sayisi,
             "work_dates": calisma_tarihleri,
-            "base_target": baz_hedef,
-            "extra_work": fazla_calisma,
-            "extra_work_dates": telafi_aday_gunleri,
+            "weekend_work_dates": hafta_sonu_calisma_tarihleri,
+            "payment_capacity": telafi_odeme_kapasitesi,
+            "payment_candidate_dates": telafi_aday_gunleri,
         })
 
         off_borc_rows.append({
             "agent_user_code": a,
             "hafta": wk,
             "off_talep_sayisi": talep_sayisi,
-            "off_talep_tarihleri": ", ".join(
-                t.isoformat() for t in talep_tarihleri
-            ),
+            "off_talep_tarihleri": ", ".join(t.isoformat() for t in talep_tarihleri),
+            "gercek_off_sayisi": gercek_off_sayisi,
+            "gercek_off_tarihleri": ", ".join(t.isoformat() for t in gercek_off_tarihleri),
             "standart_off_hakki": 2,
             "telafi_borcu": borc,
-            "haftalik_baz_hedef": baz_hedef,
-            "gerceklesen_calisma": len(calisma_tarihleri),
-            "fazla_calisma_kapasitesi": fazla_calisma,
+            "telafi_odeme_kapasitesi": telafi_odeme_kapasitesi,
+            "hafta_sonu_calisma_tarihleri": ", ".join(
+                t.isoformat() for t in hafta_sonu_calisma_tarihleri
+            ),
         })
 
     borclar = []
 
     for info in hafta_bilgileri:
-        for sira in range(info["debt"]):
+        for _ in range(info["debt"]):
             borclar.append({
                 "source_week": info["week"],
                 "source_dates": info["off_request_dates"],
@@ -359,7 +446,7 @@ for a_raw in AGENTS:
 
     kullanilan_odeme_gunleri = set()
 
-    # Önce borç haftasından sonraki haftaları kullan.
+    # Önce borçtan sonraki haftalardaki 1-OFF haftalarını kullan.
     for borc in borclar:
         adaylar = []
 
@@ -367,16 +454,12 @@ for a_raw in AGENTS:
             if info["week"] <= borc["source_week"]:
                 continue
 
-            for t in info["extra_work_dates"]:
-                if t not in kullanilan_odeme_gunleri:
-                    adaylar.append((info["week"], t))
+            for tarih in info["payment_candidate_dates"]:
+                if tarih not in kullanilan_odeme_gunleri:
+                    adaylar.append((info["week"], tarih))
 
         if adaylar:
-            odeme_week, odeme_tarih = sorted(
-                adaylar,
-                key=lambda x: (x[0], x[1])
-            )[0]
-
+            odeme_week, odeme_tarih = sorted(adaylar, key=lambda x: (x[0], x[1]))[0]
             borc["paid"] = True
             borc["payment_week"] = odeme_week
             borc["payment_date"] = odeme_tarih
@@ -388,8 +471,7 @@ for a_raw in AGENTS:
                 "payment_type": "TELAFİ",
             }
 
-    # Sonraki haftalarda yer yoksa önceki haftadaki fazla
-    # çalışma "ön ödeme" olarak kullanılır.
+    # Ay içindeki planlamada ödeme haftası borçtan önceyse ön ödeme olarak eşleştir.
     for borc in borclar:
         if borc["paid"]:
             continue
@@ -400,15 +482,15 @@ for a_raw in AGENTS:
             if info["week"] >= borc["source_week"]:
                 continue
 
-            for t in info["extra_work_dates"]:
-                if t not in kullanilan_odeme_gunleri:
-                    adaylar.append((info["week"], t))
+            for tarih in info["payment_candidate_dates"]:
+                if tarih not in kullanilan_odeme_gunleri:
+                    adaylar.append((info["week"], tarih))
 
         if adaylar:
             odeme_week, odeme_tarih = sorted(
                 adaylar,
                 key=lambda x: (x[0], x[1]),
-                reverse=True
+                reverse=True,
             )[0]
 
             borc["paid"] = True
@@ -432,14 +514,9 @@ for a_raw in AGENTS:
             "agent_user_code": a,
             "borc_haftasi": borc["source_week"],
             "borca_neden_olan_off_tarihleri": ", ".join(
-                t.isoformat()
-                for t in borc["source_dates"]
+                t.isoformat() for t in borc["source_dates"]
             ),
-            "durum": (
-                "ÖDENDİ"
-                if borc["paid"]
-                else "AÇIK BORÇ"
-            ),
+            "durum": "ÖDENDİ" if borc["paid"] else "AÇIK BORÇ",
             "odeme_haftasi": borc["payment_week"],
             "odeme_tarihi": (
                 borc["payment_date"].isoformat()
@@ -455,35 +532,26 @@ for a_raw in AGENTS:
 # ------------------------------------------------------------
 # 6) MESAİ GÜNLERİNİ RAPORLAMA İÇİN DAĞIT
 # ------------------------------------------------------------
-#
-# aylik_mesai_gun yalnızca aylık toplamı veriyor.
-# Bu nedenle gün bazlı MESAİ sınıflandırması rapor amacıyla
-# deterministik şekilde yapılır:
-# - TELAFİ olarak ayrılan günler dışarıda bırakılır.
-# - Öncelik resmi tatil / arife / hafta sonu çalışmalarıdır.
-# - Sonra en geç tarihler seçilir.
+# aylik_mesai_gun yalnızca toplam mesai gününü verir.
+# TELAFİ günleri mesai değildir ve aday havuzundan çıkarılır.
 
 mesai_gunleri = {}
 
 for a_raw in AGENTS:
     a = norm_agent(a_raw)
-
     mesai_sayisi = 0
 
     if (
         "aylik_mesai_gun" in globals()
+        and isinstance(aylik_mesai_gun, dict)
         and a in aylik_mesai_gun
     ):
-        mesai_sayisi = int(
-            solver.Value(aylik_mesai_gun[a])
-        )
+        mesai_sayisi = int(solver.Value(aylik_mesai_gun[a]))
 
     aday_gunler = [
         t for t in PLAN_TARIHLER
-        if (
-            work_map.get((a, t), 0) == 1
-            and (a, t) not in telafi_gunleri
-        )
+        if work_map.get((a, t), 0) == 1
+        and (a, t) not in telafi_gunleri
     ]
 
     aday_gunler = sorted(
@@ -493,7 +561,7 @@ for a_raw in AGENTS:
             0 if t in ARIFE_SET else 1,
             0 if t.weekday() >= 5 else 1,
             -t.toordinal(),
-        )
+        ),
     )
 
     for tarih in aday_gunler[:mesai_sayisi]:
@@ -503,6 +571,10 @@ for a_raw in AGENTS:
 # ------------------------------------------------------------
 # 7) GÜNLÜK DURUM SATIRLARI
 # ------------------------------------------------------------
+# - Hafta içi normal çalışma: sadece vardiya gösterilir, durum etiketi boş kalır.
+# - Hafta sonu ve haftada 2 gerçek OFF: NORM.
+# - OFF borcunu ödeyen hafta sonu çalışma: TELAFİ.
+# - Aylık hedef üzeri çalışma: MESAİ.
 
 gunluk_rows = []
 calendar_status = {}
@@ -512,11 +584,15 @@ for a_raw in AGENTS:
     meta = AGENT_META.get(a, {})
 
     for tarih in PLAN_TARIHLER:
+        ds = DATE_TO_DS[tarih]
+        wk = hafta_key(tarih)
         tip = tip_getir(a, tarih)
         calisti = work_map.get((a, tarih), 0) == 1
         vardiyalar = atama_map.get((a, tarih), [])
+
         vardiya_text = " / ".join(
-            vardiya_str(v) for v in vardiyalar
+            vardiya_detay_str(ds, v)
+            for v in vardiyalar
         )
 
         if tip == "izin":
@@ -535,6 +611,7 @@ for a_raw in AGENTS:
             if (a, tarih) in telafi_gunleri:
                 durum = "TELAFİ"
                 renk_kodu = "TELAFI"
+
             elif (a, tarih) in mesai_gunleri:
                 if tarih in RESMI_TATIL_SET:
                     durum = "RESMİ TATİL MESAİ"
@@ -545,9 +622,17 @@ for a_raw in AGENTS:
                 else:
                     durum = "MESAİ"
                     renk_kodu = "MESAI"
-            else:
+
+            elif tarih.weekday() >= 5:
+                # Hafta sonu normal çalışma.
+                # Örn. Pazartesi ve Pazar OFF, Cumartesi çalışma => NORM.
                 durum = "NORM"
                 renk_kodu = "NORM"
+
+            else:
+                # Hafta içi çalışma için NORM etiketi yazılmaz.
+                durum = ""
+                renk_kodu = "BEYAZ"
 
         else:
             if tarih in RESMI_TATIL_SET:
@@ -567,25 +652,22 @@ for a_raw in AGENTS:
             "agent_user_code": a,
             "agent_name": meta.get("agent_name", ""),
             "takim": meta.get("takim", ""),
-            "teamleader_name": meta.get(
-                "teamleader_name", ""
-            ),
+            "teamleader_name": meta.get("teamleader_name", ""),
             "tarih": tarih.isoformat(),
             "gun": gun_adi_tr(tarih),
-            "hafta": hafta_key(tarih),
+            "hafta": wk,
             "durum": durum,
             "vardiya": vardiya_text,
             "izin_off_tipi": tip,
             "calisti_mi": int(calisti),
-            "resmi_tatil_mi": int(
-                tarih in RESMI_TATIL_SET
+            "haftalik_gercek_off_sayisi": len(
+                haftalik_gercek_off.get((a, wk), [])
             ),
+            "resmi_tatil_mi": int(tarih in RESMI_TATIL_SET),
             "arife_mi": int(tarih in ARIFE_SET),
-            "telafi_borc_haftasi": (
-                telafi_gunleri.get(
-                    (a, tarih), {}
-                ).get("source_week", "")
-            ),
+            "telafi_borc_haftasi": telafi_gunleri.get(
+                (a, tarih), {}
+            ).get("source_week", ""),
         })
 
 
@@ -596,27 +678,54 @@ for a_raw in AGENTS:
 cift_off_rows = []
 cift_off_sayisi_agent = defaultdict(int)
 
-if (
-    "pair_off" in globals()
-    and "weekend_pairs" in globals()
-):
+pair_off_obj = globals().get("pair_off", None)
+weekend_pairs_obj = globals().get("weekend_pairs", [])
+
+pair_off_dict_mi = isinstance(pair_off_obj, dict)
+weekend_pairs_gecerli_mi = isinstance(weekend_pairs_obj, (list, tuple))
+
+if weekend_pairs_gecerli_mi:
     for a_raw in AGENTS:
         a = norm_agent(a_raw)
 
-        for pair_index, (
-            sat_ds,
-            sun_ds
-        ) in enumerate(weekend_pairs):
-
-            var = pair_off.get((a, pair_index))
-            pair_value = (
-                int(solver.Value(var))
-                if var is not None
-                else 0
-            )
-
+        for pair_index, (sat_ds, sun_ds) in enumerate(weekend_pairs_obj):
             sat_date = pd.to_datetime(sat_ds).date()
             sun_date = pd.to_datetime(sun_ds).date()
+
+            if pair_off_dict_mi:
+                var = pair_off_obj.get((a, pair_index))
+                pair_value = (
+                    int(solver.Value(var))
+                    if var is not None
+                    else 0
+                )
+                hesaplama_kaynagi = "solver_pair_off"
+
+            else:
+                # pair_off sözlük değilse final takvimden hesapla.
+                # İzin gerçek OFF sayılmaz; off_t/off_t2 ve normal work=0
+                # gerçek OFF sayılır.
+                sat_tip = tip_getir(a, sat_date)
+                sun_tip = tip_getir(a, sun_date)
+
+                sat_gercek_off = (
+                    sat_tip in {"off_t", "off_t2"}
+                    or (
+                        sat_tip != "izin"
+                        and work_map.get((a, sat_date), 0) == 0
+                    )
+                )
+
+                sun_gercek_off = (
+                    sun_tip in {"off_t", "off_t2"}
+                    or (
+                        sun_tip != "izin"
+                        and work_map.get((a, sun_date), 0) == 0
+                    )
+                )
+
+                pair_value = int(sat_gercek_off and sun_gercek_off)
+                hesaplama_kaynagi = "final_takvimden_hesaplandi"
 
             if pair_value == 1:
                 cift_off_sayisi_agent[a] += 1
@@ -626,14 +735,17 @@ if (
                 "pair_index": pair_index,
                 "cumartesi": sat_date.isoformat(),
                 "pazar": sun_date.isoformat(),
-                "cumartesi_durum": calendar_status[
-                    (a, sat_date)
-                ]["durum"],
-                "pazar_durum": calendar_status[
-                    (a, sun_date)
-                ]["durum"],
+                "cumartesi_durum": calendar_status[(a, sat_date)]["durum"],
+                "pazar_durum": calendar_status[(a, sun_date)]["durum"],
                 "cift_off_mi": pair_value,
+                "hesaplama_kaynagi": hesaplama_kaynagi,
             })
+
+print(
+    "Çift OFF okuma kaynağı:",
+    "solver pair_off sözlüğü" if pair_off_dict_mi
+    else "final takvimden hesaplandı"
+)
 
 
 # ------------------------------------------------------------
@@ -1361,11 +1473,12 @@ sheet_yaz(
         "hafta",
         "off_talep_sayisi",
         "off_talep_tarihleri",
+        "gercek_off_sayisi",
+        "gercek_off_tarihleri",
         "standart_off_hakki",
         "telafi_borcu",
-        "haftalik_baz_hedef",
-        "gerceklesen_calisma",
-        "fazla_calisma_kapasitesi",
+        "telafi_odeme_kapasitesi",
+        "hafta_sonu_calisma_tarihleri",
     ],
     off_borc_rows,
 )

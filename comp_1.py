@@ -27,7 +27,11 @@ from datetime import datetime, date, timedelta
 
 import pandas as pd
 from ortools.sat.python import cp_model
-from artifact_tool import Workbook, SpreadsheetFile
+from pathlib import Path
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
+from openpyxl.utils import get_column_letter
 
 
 # ------------------------------------------------------------
@@ -74,7 +78,7 @@ EXCEL_DOSYA_ADI = globals().get(
     "vardiya_planlama_model_raporu.xlsx"
 )
 
-RAPOR_YOLU = f"/mnt/data/{EXCEL_DOSYA_ADI}"
+RAPOR_YOLU = str(Path.cwd() / EXCEL_DOSYA_ADI)
 
 RENKLER = {
     "BASLIK": "#1F4E78",
@@ -949,78 +953,103 @@ for kural in sorted({
 
 
 # ------------------------------------------------------------
-# 12) WORKBOOK YARDIMCILARI
+# 12) OPENPYXL YARDIMCILARI
 # ------------------------------------------------------------
 
-def excel_col_name(n):
-    sonuc = ""
-    while n:
-        n, kalan = divmod(n - 1, 26)
-        sonuc = chr(65 + kalan) + sonuc
-    return sonuc
+ince_kenarlik = Side(style="thin", color="D9E1F2")
+standart_border = Border(
+    left=ince_kenarlik,
+    right=ince_kenarlik,
+    top=ince_kenarlik,
+    bottom=ince_kenarlik,
+)
 
 
-def sheet_yaz(sheet, headers, rows):
-    matrix = [headers]
+def hex_renk(renk):
+    return str(renk).replace("#", "").upper()
+
+
+def fill_olustur(renk):
+    return PatternFill(
+        fill_type="solid",
+        fgColor=hex_renk(renk),
+    )
+
+
+def sheet_yaz(ws, headers, rows):
+    ws.append(headers)
 
     for row in rows:
-        matrix.append([
+        ws.append([
             row.get(header, "")
             for header in headers
         ])
 
-    end_col = excel_col_name(len(headers))
-    end_row = max(len(matrix), 1)
+    for cell in ws[1]:
+        cell.fill = fill_olustur(RENKLER["BASLIK"])
+        cell.font = Font(
+            bold=True,
+            color=hex_renk(RENKLER["BEYAZ"]),
+        )
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        cell.border = standart_border
 
-    sheet.get_range(
-        f"A1:{end_col}{end_row}"
-    ).values = matrix
+    for row in ws.iter_rows(
+        min_row=2,
+        max_row=ws.max_row,
+        min_col=1,
+        max_col=ws.max_column,
+    ):
+        for cell in row:
+            cell.alignment = Alignment(
+                vertical="center",
+                wrap_text=True,
+            )
+            cell.border = standart_border
 
-    header_range = sheet.get_range(
-        f"A1:{end_col}1"
-    )
-
-    header_range.format = {
-        "fill": RENKLER["BASLIK"],
-        "font": {
-            "bold": True,
-            "color": RENKLER["BEYAZ"],
-        },
-        "horizontal_alignment": "center",
-        "vertical_alignment": "center",
-        "wrap_text": True,
-    }
-
-    sheet.freeze_panes.freeze_rows(1)
-
-    data_range = sheet.get_range(
-        f"A1:{end_col}{end_row}"
-    )
-    data_range.format.wrap_text = True
-    data_range.format.autofit_columns()
-
-    return end_row, end_col
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    kolon_genisliklerini_ayarla(ws)
 
 
-def kolon_genisligi_ayarla(
-    sheet,
-    kolon,
-    genislik
-):
-    sheet.get_range(
-        f"{kolon}:{kolon}"
-    ).format.column_width = genislik
+def kolon_genisliklerini_ayarla(ws, max_genislik=35):
+    for col_idx in range(1, ws.max_column + 1):
+        max_len = 0
+        col_letter = get_column_letter(col_idx)
+
+        for cell in ws[col_letter]:
+            value = "" if cell.value is None else str(cell.value)
+            satir_uzunlugu = max(
+                [len(parca) for parca in value.split("\n")]
+                or [0]
+            )
+            max_len = max(max_len, satir_uzunlugu)
+
+        ws.column_dimensions[col_letter].width = min(
+            max(max_len + 2, 10),
+            max_genislik,
+        )
+
+
+def bos_default_sheet_sil(wb):
+    if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
+        del wb["Sheet"]
 
 
 # ------------------------------------------------------------
 # 13) WORKBOOK OLUŞTUR
 # ------------------------------------------------------------
 
-wb = Workbook.create()
+wb = Workbook()
 
 
 # 13.1 Renk Açıklamaları
-sheet = wb.worksheets.add("Renk Açıklamaları")
+ws = wb.active
+ws.title = "Renk Açıklamaları"
 
 legend_rows = [
     ["Durum", "Anlam"],
@@ -1036,17 +1065,15 @@ legend_rows = [
     ["ARİFE MESAİ", "Arife çalışması"],
 ]
 
-sheet.get_range(
-    f"A1:B{len(legend_rows)}"
-).values = legend_rows
+for row in legend_rows:
+    ws.append(row)
 
-sheet.get_range("A1:B1").format = {
-    "fill": RENKLER["BASLIK"],
-    "font": {
-        "bold": True,
-        "color": RENKLER["BEYAZ"],
-    },
-}
+for cell in ws[1]:
+    cell.fill = fill_olustur(RENKLER["BASLIK"])
+    cell.font = Font(
+        bold=True,
+        color=hex_renk(RENKLER["BEYAZ"]),
+    )
 
 legend_renk_map = {
     "NORM": "NORM",
@@ -1062,21 +1089,22 @@ legend_renk_map = {
 }
 
 for row_no in range(2, len(legend_rows) + 1):
-    durum = legend_rows[row_no - 1][0]
+    durum = ws.cell(row=row_no, column=1).value
     renk_anahtari = legend_renk_map.get(durum)
 
     if renk_anahtari:
-        sheet.get_range(
-            f"A{row_no}:B{row_no}"
-        ).format.fill = RENKLER[renk_anahtari]
+        for col_no in [1, 2]:
+            ws.cell(
+                row=row_no,
+                column=col_no,
+            ).fill = fill_olustur(RENKLER[renk_anahtari])
 
-sheet.get_range(
-    f"A1:B{len(legend_rows)}"
-).format.autofit_columns()
+kolon_genisliklerini_ayarla(ws)
+ws.freeze_panes = "A2"
 
 
 # 13.2 Agent Takvimi
-sheet = wb.worksheets.add("Agent Takvimi")
+ws = wb.create_sheet("Agent Takvimi")
 
 sabit_headers = [
     "agent_user_code",
@@ -1091,8 +1119,7 @@ tarih_headers = [
 ]
 
 takvim_headers = sabit_headers + tarih_headers
-
-takvim_matrix = [takvim_headers]
+ws.append(takvim_headers)
 
 for a_raw in AGENTS:
     a = norm_agent(a_raw)
@@ -1107,7 +1134,6 @@ for a_raw in AGENTS:
 
     for tarih in PLAN_TARIHLER:
         info = calendar_status[(a, tarih)]
-
         cell_text = info["durum"]
 
         if info["vardiya"]:
@@ -1116,83 +1142,73 @@ for a_raw in AGENTS:
         if (a, tarih) in telafi_gunleri:
             cell_text += (
                 "\nBorç: "
-                + telafi_gunleri[
-                    (a, tarih)
-                ]["source_week"]
+                + telafi_gunleri[(a, tarih)]["source_week"]
             )
 
         row.append(cell_text)
 
-    takvim_matrix.append(row)
+    ws.append(row)
 
-takvim_end_col = excel_col_name(
-    len(takvim_headers)
-)
+for cell in ws[1]:
+    cell.fill = fill_olustur(RENKLER["BASLIK"])
+    cell.font = Font(
+        bold=True,
+        color=hex_renk(RENKLER["BEYAZ"]),
+    )
+    cell.alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True,
+    )
 
-takvim_end_row = len(takvim_matrix)
+ws.freeze_panes = "E2"
+ws.auto_filter.ref = ws.dimensions
 
-sheet.get_range(
-    f"A1:{takvim_end_col}{takvim_end_row}"
-).values = takvim_matrix
+ws.column_dimensions["A"].width = 17
+ws.column_dimensions["B"].width = 22
+ws.column_dimensions["C"].width = 18
+ws.column_dimensions["D"].width = 22
 
-sheet.get_range(
-    f"A1:{takvim_end_col}1"
-).format = {
-    "fill": RENKLER["BASLIK"],
-    "font": {
-        "bold": True,
-        "color": RENKLER["BEYAZ"],
-    },
-    "horizontal_alignment": "center",
-    "vertical_alignment": "center",
-    "wrap_text": True,
-}
+for tarih_index, tarih in enumerate(PLAN_TARIHLER, start=5):
+    ws.column_dimensions[
+        get_column_letter(tarih_index)
+    ].width = 16
 
-sheet.freeze_panes.freeze_rows(1)
-sheet.freeze_panes.freeze_columns(4)
-
-sheet.get_range(
-    f"A1:{takvim_end_col}{takvim_end_row}"
-).format.wrap_text = True
-
-kolon_genisligi_ayarla(sheet, "A", 17)
-kolon_genisligi_ayarla(sheet, "B", 22)
-kolon_genisligi_ayarla(sheet, "C", 18)
-kolon_genisligi_ayarla(sheet, "D", 22)
-
-for tarih_index, tarih in enumerate(
-    PLAN_TARIHLER,
-    start=5
-):
-    col = excel_col_name(tarih_index)
-    kolon_genisligi_ayarla(sheet, col, 16)
-
-for row_index, a_raw in enumerate(
-    AGENTS,
-    start=2
-):
+for row_index, a_raw in enumerate(AGENTS, start=2):
     a = norm_agent(a_raw)
 
-    for tarih_index, tarih in enumerate(
-        PLAN_TARIHLER,
-        start=5
-    ):
-        col = excel_col_name(tarih_index)
-        info = calendar_status[(a, tarih)]
-
-        cell = sheet.get_range(
-            f"{col}{row_index}"
+    for tarih_index, tarih in enumerate(PLAN_TARIHLER, start=5):
+        cell = ws.cell(
+            row=row_index,
+            column=tarih_index,
         )
+        info = calendar_status[(a, tarih)]
+        cell.fill = fill_olustur(
+            RENKLER[info["renk_kodu"]]
+        )
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        cell.border = standart_border
 
-        cell.format.fill = RENKLER[
-            info["renk_kodu"]
-        ]
-        cell.format.horizontal_alignment = "center"
-        cell.format.vertical_alignment = "center"
+for row in ws.iter_rows(
+    min_row=2,
+    max_row=ws.max_row,
+    min_col=1,
+    max_col=4,
+):
+    for cell in row:
+        cell.border = standart_border
+        cell.alignment = Alignment(
+            vertical="center",
+            wrap_text=True,
+        )
 
 
 # 13.3 Agent Özet
-sheet = wb.worksheets.add("Agent Özet")
+ws = wb.create_sheet("Agent Özet")
 
 agent_ozet_headers = [
     "agent_user_code",
@@ -1219,25 +1235,21 @@ agent_ozet_headers = [
     "idari_izinli_flg",
 ]
 
-agent_end_row, agent_end_col = sheet_yaz(
-    sheet,
-    agent_ozet_headers,
-    agent_ozet_rows
-)
+sheet_yaz(ws, agent_ozet_headers, agent_ozet_rows)
 
-sheet.get_range(
-    f"Q2:Q{agent_end_row}"
-).conditional_formats.add_cell_is({
-    "operator": "greaterThan",
-    "formula": 0,
-    "format": {
-        "fill": RENKLER["IHLAL"]
-    },
-})
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"Q2:Q{ws.max_row}",
+        CellIsRule(
+            operator="greaterThan",
+            formula=["0"],
+            fill=fill_olustur(RENKLER["IHLAL"]),
+        ),
+    )
 
 
 # 13.4 Günlük Atamalar
-sheet = wb.worksheets.add("Günlük Atamalar")
+ws = wb.create_sheet("Günlük Atamalar")
 
 gunluk_headers = [
     "agent_user_code",
@@ -1256,24 +1268,18 @@ gunluk_headers = [
     "telafi_borc_haftasi",
 ]
 
-sheet_yaz(
-    sheet,
-    gunluk_headers,
-    gunluk_rows
-)
+sheet_yaz(ws, gunluk_headers, gunluk_rows)
 
 
 # 13.5 OFF Talepleri
-sheet = wb.worksheets.add("OFF Talepleri")
+ws = wb.create_sheet("OFF Talepleri")
 
 off_talep_rows = []
 
 for a_raw in AGENTS:
     a = norm_agent(a_raw)
 
-    for tarih, tip in sorted(
-        tip_map.get(a, {}).items()
-    ):
+    for tarih, tip in sorted(tip_map.get(a, {}).items()):
         tip_str = str(tip).strip().lower()
 
         if (
@@ -1282,28 +1288,22 @@ for a_raw in AGENTS:
         ):
             continue
 
-        karsilandi = (
-            work_map.get((a, tarih), 0) == 0
-        )
+        karsilandi = work_map.get((a, tarih), 0) == 0
 
         off_talep_rows.append({
             "agent_user_code": a,
-            "agent_name": AGENT_META.get(
-                a, {}
-            ).get("agent_name", ""),
+            "agent_name": AGENT_META.get(a, {}).get(
+                "agent_name", ""
+            ),
             "tarih": tarih.isoformat(),
             "hafta": hafta_key(tarih),
             "talep_tipi": tip_str,
-            "karsilandi_mi": (
-                "EVET" if karsilandi else "HAYIR"
-            ),
-            "takvim_durumu": calendar_status[
-                (a, tarih)
-            ]["durum"],
+            "karsilandi_mi": "EVET" if karsilandi else "HAYIR",
+            "takvim_durumu": calendar_status[(a, tarih)]["durum"],
         })
 
-off_end_row, _ = sheet_yaz(
-    sheet,
+sheet_yaz(
+    ws,
     [
         "agent_user_code",
         "agent_name",
@@ -1313,34 +1313,31 @@ off_end_row, _ = sheet_yaz(
         "karsilandi_mi",
         "takvim_durumu",
     ],
-    off_talep_rows
+    off_talep_rows,
 )
 
-if off_end_row >= 2:
-    sheet.get_range(
-        f"F2:F{off_end_row}"
-    ).conditional_formats.add_custom(
-        '=F2="HAYIR"',
-        {
-            "fill": RENKLER["IHLAL"]
-        }
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"F2:F{ws.max_row}",
+        FormulaRule(
+            formula=['F2="HAYIR"'],
+            fill=fill_olustur(RENKLER["IHLAL"]),
+        ),
     )
-
-    sheet.get_range(
-        f"F2:F{off_end_row}"
-    ).conditional_formats.add_custom(
-        '=F2="EVET"',
-        {
-            "fill": RENKLER["OK"]
-        }
+    ws.conditional_formatting.add(
+        f"F2:F{ws.max_row}",
+        FormulaRule(
+            formula=['F2="EVET"'],
+            fill=fill_olustur(RENKLER["OK"]),
+        ),
     )
 
 
 # 13.6 Telafi Takibi
-sheet = wb.worksheets.add("Telafi Takibi")
+ws = wb.create_sheet("Telafi Takibi")
 
 sheet_yaz(
-    sheet,
+    ws,
     [
         "agent_user_code",
         "borc_haftasi",
@@ -1350,15 +1347,15 @@ sheet_yaz(
         "odeme_tarihi",
         "odeme_tipi",
     ],
-    telafi_detay_rows
+    telafi_detay_rows,
 )
 
 
 # 13.7 Haftalık OFF Borcu
-sheet = wb.worksheets.add("Haftalık OFF Borcu")
+ws = wb.create_sheet("Haftalık OFF Borcu")
 
 sheet_yaz(
-    sheet,
+    ws,
     [
         "agent_user_code",
         "hafta",
@@ -1370,15 +1367,15 @@ sheet_yaz(
         "gerceklesen_calisma",
         "fazla_calisma_kapasitesi",
     ],
-    off_borc_rows
+    off_borc_rows,
 )
 
 
 # 13.8 Çift OFF
-sheet = wb.worksheets.add("Çift OFF")
+ws = wb.create_sheet("Çift OFF")
 
-cift_end_row, _ = sheet_yaz(
-    sheet,
+sheet_yaz(
+    ws,
     [
         "agent_user_code",
         "pair_index",
@@ -1388,26 +1385,25 @@ cift_end_row, _ = sheet_yaz(
         "pazar_durum",
         "cift_off_mi",
     ],
-    cift_off_rows
+    cift_off_rows,
 )
 
-if cift_end_row >= 2:
-    sheet.get_range(
-        f"G2:G{cift_end_row}"
-    ).conditional_formats.add_cell_is({
-        "operator": "equalTo",
-        "formula": 1,
-        "format": {
-            "fill": RENKLER["CIFT_OFF"]
-        },
-    })
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"G2:G{ws.max_row}",
+        CellIsRule(
+            operator="equal",
+            formula=["1"],
+            fill=fill_olustur(RENKLER["CIFT_OFF"]),
+        ),
+    )
 
 
 # 13.9 Coverage
-sheet = wb.worksheets.add("Coverage")
+ws = wb.create_sheet("Coverage")
 
-coverage_end_row, _ = sheet_yaz(
-    sheet,
+sheet_yaz(
+    ws,
     [
         "tarih",
         "gun",
@@ -1418,60 +1414,56 @@ coverage_end_row, _ = sheet_yaz(
         "eksik",
         "fazla",
     ],
-    coverage_rows
+    coverage_rows,
 )
 
-if coverage_end_row >= 2:
-    sheet.get_range(
-        f"G2:G{coverage_end_row}"
-    ).conditional_formats.add_cell_is({
-        "operator": "greaterThan",
-        "formula": 0,
-        "format": {
-            "fill": RENKLER["IHLAL"]
-        },
-    })
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"G2:G{ws.max_row}",
+        CellIsRule(
+            operator="greaterThan",
+            formula=["0"],
+            fill=fill_olustur(RENKLER["IHLAL"]),
+        ),
+    )
 
 
 # 13.10 Kural Kontrol Özeti
-sheet = wb.worksheets.add("Kural Kontrol Özeti")
+ws = wb.create_sheet("Kural Kontrol Özeti")
 
-kural_ozet_end_row, _ = sheet_yaz(
-    sheet,
+sheet_yaz(
+    ws,
     [
         "kural",
         "kontrol_kaydi",
         "ihlal_sayisi",
         "genel_sonuc",
     ],
-    kural_ozet_rows
+    kural_ozet_rows,
 )
 
-if kural_ozet_end_row >= 2:
-    sheet.get_range(
-        f"D2:D{kural_ozet_end_row}"
-    ).conditional_formats.add_custom(
-        '=D2="İHLAL"',
-        {
-            "fill": RENKLER["IHLAL"]
-        }
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"D2:D{ws.max_row}",
+        FormulaRule(
+            formula=['D2="İHLAL"'],
+            fill=fill_olustur(RENKLER["IHLAL"]),
+        ),
     )
-
-    sheet.get_range(
-        f"D2:D{kural_ozet_end_row}"
-    ).conditional_formats.add_custom(
-        '=D2="OK"',
-        {
-            "fill": RENKLER["OK"]
-        }
+    ws.conditional_formatting.add(
+        f"D2:D{ws.max_row}",
+        FormulaRule(
+            formula=['D2="OK"'],
+            fill=fill_olustur(RENKLER["OK"]),
+        ),
     )
 
 
 # 13.11 Kural Kontrol Detay
-sheet = wb.worksheets.add("Kural Kontrol Detay")
+ws = wb.create_sheet("Kural Kontrol Detay")
 
-kural_end_row, _ = sheet_yaz(
-    sheet,
+sheet_yaz(
+    ws,
     [
         "kural",
         "agent_user_code",
@@ -1479,17 +1471,16 @@ kural_end_row, _ = sheet_yaz(
         "sonuc",
         "detay",
     ],
-    kural_rows
+    kural_rows,
 )
 
-if kural_end_row >= 2:
-    sheet.get_range(
-        f"D2:D{kural_end_row}"
-    ).conditional_formats.add_custom(
-        '=D2="İHLAL"',
-        {
-            "fill": RENKLER["IHLAL"]
-        }
+if ws.max_row >= 2:
+    ws.conditional_formatting.add(
+        f"D2:D{ws.max_row}",
+        FormulaRule(
+            formula=['D2="İHLAL"'],
+            fill=fill_olustur(RENKLER["IHLAL"]),
+        ),
     )
 
 
@@ -1497,7 +1488,7 @@ if kural_end_row >= 2:
 # 14) EXPORT
 # ------------------------------------------------------------
 
-SpreadsheetFile.export_xlsx(wb).save(RAPOR_YOLU)
+wb.save(RAPOR_YOLU)
 
 print("Excel raporu oluşturuldu:")
 print(RAPOR_YOLU)

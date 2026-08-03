@@ -1122,4 +1122,194 @@ for t, wk, n in _bos_base[:MAX_RAPOR]:
     print(f"    takım={t} hafta={wk} (tanımlı {n} vardiya, hepsi 0'a sabit)")
 print("=" * 78)
 
-                print(f"   {_ds} ({_GUN[_d.weekday()]}): tip={_tipd.get(_d, '-')} | açık vardiya={len(_sec)}")
+
+
+
+
+# %% [TEŞHİS 3] - YAYILIM (PROPAGATION) İLE ÇELİŞKİ ZİNCİRİNİ BUL
+# Presolve'un yaptığını yapar: linear kısıtlarda sınır yayılımını sabit noktaya kadar çalıştırır.
+# Bir kısıt sağlanamaz hâle gelir ya da bir değişkenin aralığı boşalırsa durur ve sebebini yazar.
+#
+# Model kurulduktan SONRA (OBJECTIVE dahil) çalıştır. Solve GEREKMEZ. 1-3 dk sürebilir.
+
+MAX_TUR = 60
+MAX_RAPOR = 12
+BUYUK = 10 ** 15          # bunun ustu "sinirsiz" sayilir
+
+proto = model.Proto() if hasattr(model, "Proto") else model.proto
+NV, NC = len(proto.variables), len(proto.constraints)
+print(f"model: {NV} değişken | {NC} kısıt")
+
+lo = [0] * NV
+hi = [0] * NV
+for i in range(NV):
+    d = list(proto.variables[i].domain)
+    lo[i], hi[i] = d[0], d[-1]
+adlar = [proto.variables[i].name or f"var{i}" for i in range(NV)]
+
+kis = []
+for k in range(NC):
+    cc = proto.constraints[k]
+    try:
+        L = cc.linear
+        vs = list(L.vars)
+        if not vs:
+            continue
+    except Exception:
+        continue
+    try:
+        enf = list(cc.enforcement_literal)
+    except Exception:
+        enf = []
+    dom = list(L.domain)
+    kis.append((k, vs, list(L.coeffs), dom[0], dom[-1], enf))
+
+NK = len(kis)
+print(f"yayılıma girecek linear kısıt: {NK}")
+
+var_kis = {}
+for idx in range(NK):
+    for v in kis[idx][1]:
+        var_kis.setdefault(v, []).append(idx)
+
+
+def _lit(l):
+    """enforcement literal durumu: 1 açık, 0 kapalı, None belirsiz"""
+    v = l if l >= 0 else -l - 1
+    if lo[v] != hi[v]:
+        return None
+    return lo[v] if l >= 0 else 1 - lo[v]
+
+
+def _aktif(enf):
+    for l in enf:
+        d = _lit(l)
+        if d == 0:
+            return False
+        if d is None:
+            return None
+    return True
+
+
+def _yaz(idx):
+    k, vs, co, dmn, dmx, enf = kis[idx]
+    ifade = "  +  ".join(f"{c}*{adlar[v]}[{lo[v]},{hi[v]}]" for v, c in zip(vs, co))
+    d1 = "-inf" if dmn < -BUYUK else dmn
+    d2 = "+inf" if dmx > BUYUK else dmx
+    s = f"kısıt #{k}:  {ifade}   ∈ [{d1}, {d2}]"
+    if enf:
+        s += "\n     enforcement: " + str([("NOT " if l < 0 else "") + adlar[l if l >= 0 else -l - 1]
+                                           for l in enf])
+    return s
+
+
+kuyruk = list(range(NK))
+kuyrukta = [True] * NK
+suclu = None
+daraltma = 0
+
+for tur in range(MAX_TUR):
+    if not kuyruk or suclu:
+        break
+    yeni = []
+    for idx in kuyruk:
+        kuyrukta[idx] = False
+        k, vs, co, dmn, dmx, enf = kis[idx]
+        if enf and _aktif(enf) is not True:
+            continue
+
+        amin = amax = 0
+        for v, c in zip(vs, co):
+            if c >= 0:
+                amin += c * lo[v]; amax += c * hi[v]
+            else:
+                amin += c * hi[v]; amax += c * lo[v]
+
+        if amin > dmx or amax < dmn:
+            suclu = (idx, amin, amax, "kısıt sağlanamaz")
+            break
+
+        if amin < -BUYUK or amax > BUYUK:
+            continue                      # sınırsız - daraltma anlamsız
+
+        for v, c in zip(vs, co):
+            if c == 0:
+                continue
+            if c > 0:
+                kalan_min = amin - c * lo[v]
+                kalan_max = amax - c * hi[v]
+            else:
+                kalan_min = amin - c * hi[v]
+                kalan_max = amax - c * lo[v]
+            alt = dmn - kalan_max          # c*x >= alt
+            ust = dmx - kalan_min          # c*x <= ust
+            if alt < -BUYUK and ust > BUYUK:
+                continue
+            # Python: floor(a/b) = a//b ,  ceil(a/b) = -((-a)//b)   (b'nin isareti farketmez)
+            if c > 0:
+                y_lo = -((-alt) // c) if alt > -BUYUK else lo[v]
+                y_hi = (ust // c) if ust < BUYUK else hi[v]
+            else:
+                y_lo = -((-ust) // c) if ust < BUYUK else lo[v]
+                y_hi = (alt // c) if alt > -BUYUK else hi[v]
+
+            degisti = False
+            if y_lo > lo[v]:
+                lo[v] = y_lo; daraltma += 1; degisti = True
+            if y_hi < hi[v]:
+                hi[v] = y_hi; daraltma += 1; degisti = True
+            if lo[v] > hi[v]:
+                suclu = (idx, amin, amax, f"{adlar[v]} aralığı boşaldı -> [{lo[v]}, {hi[v]}]")
+                break
+            if degisti:
+                for j in var_kis.get(v, ()):
+                    if not kuyrukta[j]:
+                        kuyrukta[j] = True; yeni.append(j)
+        if suclu:
+            break
+    if suclu:
+        break
+    kuyruk = yeni
+    print(f"  tur {tur + 1}: kuyruk {len(kuyruk)} | toplam daraltma {daraltma}")
+
+print("\n" + "=" * 78)
+if suclu is None:
+    print("Yayılım çelişki BULAMADI (sınır yayılımı seviyesinde tutarlı).")
+    print("-> Çelişki mantıksal/kombinatoryal seviyede; grup bazlı izolasyon gerekir.")
+else:
+    idx, amin, amax, sebep = suclu
+    k, vs, co, dmn, dmx, enf = kis[idx]
+    print(f"ÇELİŞKİ BULUNDU  ({sebep})")
+    print("=" * 78)
+    print(_yaz(idx))
+    print(f"\n  ifadenin mümkün aralığı [{amin}, {amax}] | olması gereken [{dmn}, {dmx}]")
+    print(f"\n  Bu değişkenleri sıkıştıran diğer kısıtlar:")
+    for v in vs:
+        print(f"\n  >>> {adlar[v]}  ->  [{lo[v]}, {hi[v]}]   (model tanımı {list(proto.variables[v].domain)})")
+        n = 0
+        for j in var_kis.get(v, ()):
+            if j == idx or len(kis[j][1]) > 4:
+                continue
+            print("      " + _yaz(j).replace("\n", "\n      "))
+            n += 1
+            if n >= MAX_RAPOR:
+                print("      ... (kesildi)")
+                break
+
+    import re as _re
+    _GUN = ["Pzt", "Sal", "Çrş", "Prş", "Cum", "Cmt", "Paz"]
+    _ag = set()
+    for v in vs:
+        m = _re.match(r"^(?:x|work|gercek_off)_(.+?)_(\d{4}-\d{2}-\d{2}|\d{8})", adlar[v])
+        if m:
+            _ag.add((m.group(1), m.group(2)))
+    if _ag:
+        print(f"\n  ETKİLENEN AGENT / GÜN:")
+        for a, g in sorted(_ag):
+            _d = pd.to_datetime(g).date()
+            _hs = a in globals().get("hamile_sut_agents", set())
+            _sec = [v for v in gun_vardiyalari.get(_d.isoformat(), []) if (a, _d.isoformat(), v) in x]
+            print(f"    {a} @ {_d} ({_GUN[_d.weekday()]}) hamile/süt={_hs} "
+                  f"tip={tip_map.get(a, {}).get(_d, '-')} tanımlı vardiya={len(_sec)}")
+print("=" * 78)
+

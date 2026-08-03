@@ -1,19 +1,32 @@
-# %% [HÜCRE] - TEMMUZ SON HAFTA GEÇMİŞİ (HISTORY / CONTEXT)
-# Ağustos 1 Cumartesi -> W31 (27 Tem - 2 Ağu) devamlılığı Temmuz'dan gelir.
-# Bu geçmiş SABİTTİR; karar değişkeni oluşturulmaz. Yalnızca:
-#   - max 6 gün üst üste (HÜCRE 12)
-#   - min 11 saat dinlenme (HÜCRE 15)
-# kısıtlarına sabit olarak beslenir.
+# %% [HÜCRE 3B] - TEMMUZ SON HAFTA GEÇMİŞİ - VERİ ÇEKME (SQL)
+# NOT: Diğer SQL çekme hücreleriyle birlikte EN ÜSTTE tutulur (df_agents/df_off/df_izin yanı).
+# Sadece sync_engine + pd yeterli; başka bağımlılığı yok.
 
 TEMMUZ_GECMIS_TABLE = "BNS_VP_TEMMUZ_SON_HAFTA_GECMIS"  # <-- KENDİ TABLO ADINLA DEĞİŞTİR
-
-if "PLAN_START_DATE" not in globals():
-    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
 
 query = f"SELECT * FROM {TEMMUZ_GECMIS_TABLE}"
 chunks = pd.read_sql(query, sync_engine, chunksize=10000)
 df_gecmis = pd.concat(chunks, ignore_index=True)
 df_gecmis.columns = [str(c).strip().lower() for c in df_gecmis.columns]
+print(f"df_gecmis: {df_gecmis.shape[0]} satır x {df_gecmis.shape[1]} kolon")
+print(f"kolonlar: {list(df_gecmis.columns)}")
+
+
+
+
+# %% [HÜCRE] - TEMMUZ SON HAFTA GEÇMİŞİ - İŞLEME (HISTORY / CONTEXT)
+# Ağustos 1 Cumartesi -> W31 (27 Tem - 2 Ağu) devamlılığı Temmuz'dan gelir.
+# df_gecmis yukarıda (SQL çekme bölümünde) yüklenmiş olmalı.
+# Bu geçmiş SABİTTİR; karar değişkeni oluşturulmaz. Yalnızca:
+#   - max 6 gün üst üste (HÜCRE 12)
+#   - min 11 saat dinlenme (HÜCRE 15)
+# kısıtlarına sabit olarak beslenir.
+
+if "df_gecmis" not in globals():
+    raise SystemExit("df_gecmis yok - önce 'TEMMUZ GEÇMİŞİ - VERİ ÇEKME' hücresini çalıştır.")
+
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
 
 def _pick_col(cands):
     for c in cands:
@@ -80,7 +93,6 @@ if _tum:
 print(f"Toplam geçmiş agent-gün: {sum(len(g) for g in gecmis_calisma_gunleri.values())}")
 if _eslesmeyen_start:
     print("UYARI - df_talep'te bitişi bulunamayan başlangıçlar (rest'te atlanır):", sorted(_eslesmeyen_start))
-
 
 
 
@@ -210,4 +222,3 @@ for a in AGENTS:
 
 print(f"min 11 saat dinlenme kısıtı (Ağustos içi): {min_rest_constraints} adet")
 print(f"min 11 saat dinlenme kısıtı (Temmuz geçmişi): {gecmis_min_rest_constraints} adet")
-

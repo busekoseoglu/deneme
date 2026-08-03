@@ -134,8 +134,15 @@ def _parse_vardiya(v):
 
     m = _ARALIK_RE.match(s)
     if m:
-        bas = f"{int(m.group(1)):02d}:{m.group(2)}"
-        bit = f"{int(m.group(3)):02d}:{m.group(4)}"
+        # "24:00" gecerli bir saat degil (0-23). Gece yarisi -> "00:00";
+        # make_shift_datetime bitis <= baslangic oldugunda gunu 1 artiriyor,
+        # yani 16:00-24:00 dogru sekilde ertesi gun 00:00'a denk geliyor.
+        _bh, _bm = int(m.group(1)), m.group(2)
+        _eh, _em = int(m.group(3)), m.group(4)
+        if _bh >= 24 or _eh >= 24:
+            _stat["saat_24_duzeltildi"] = _stat.get("saat_24_duzeltildi", 0) + 1
+        bas = f"{_bh % 24:02d}:{_bm}"
+        bit = f"{_eh % 24:02d}:{_em}"
         return ("calisma", bas, bit)
 
     k = re.sub(r"[\s\-]+", "", s.translate(_TR).lower())
@@ -210,6 +217,8 @@ print(f"  çalışma: {_stat['calisma']} | off: {_stat['off']} | yıllık izin: 
 if _stat["haftalik_izin"]:
     print(f"    -> {_stat['haftalik_izin']} gün 'off' yazıyordu ama agent'ın *_izinli_flg gününe")
     print("       denk geldiği için OFF sayılmadı; haftalık off kotasını tüketmiyor.")
+if _stat.get("saat_24_duzeltildi"):
+    print(f"  bilgi: {_stat['saat_24_duzeltildi']} satırda 24:00 -> 00:00 çevrildi (ertesi gün gece yarısı).")
 if gecmis_taninmayan_vardiya:
     print(f"  !! tanınmayan vardiya değerleri: {list(gecmis_taninmayan_vardiya.keys())[:15]}")
 
@@ -221,7 +230,6 @@ _ornek = sorted({(bas, bit) for g in gecmis_calisma.values() for (bas, bit) in g
 print(f"Görülen vardiya aralıkları ({len(_ornek)} adet):")
 for _b, _e in _ornek:
     print(f"  {_b} - {_e}")
-
 
 
 

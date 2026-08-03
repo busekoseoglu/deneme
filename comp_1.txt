@@ -707,4 +707,24 @@ for r in _tam_bloklu[:15]:
 if "w31_eksik_off" in globals():
     for a, var in w31_eksik_off.items():
         objective_terms.append(W31_EKSIK_OFF_W * var)
+
+
+_GUN = ["Pzt","Sal","Çrş","Prş","Cum","Cmt","Paz"]
+_FLG = {"pazartesi_izinli_flg":0,"sali_izinli_flg":1,"carsamba_izinli_flg":2,
+        "persembe_izinli_flg":3,"cuma_izinli_flg":4}
+
+print("hücre 28'de bayrak bulunan agent:", len(_agent_haftalik_izin_wd))
+print("df_tam'da bayrak kolonları:", [c for c in _FLG if c in df_tam.columns])
+
+_idx = df_tam.set_index(df_tam["agent_user_code"].astype(str).str.strip())
+for a, gunler in dbg6_hs_off[:15]:
+    _r = _idx.loc[a]
+    if hasattr(_r, "iloc") and getattr(_r, "ndim", 1) > 1:
+        _r = _r.iloc[0]
+    ham = {f: _r.get(f, None) for f in _FLG}
+    print(f"\n{a}")
+    print(f"  ham bayraklar : {ham}")
+    print(f"  okunan günler : {sorted(_agent_haftalik_izin_wd.get(a, set()))}")
+    print(f"  Temmuz off    : {[(str(d), _GUN[d.weekday()]) for d in gunler]}")
+
 print("W31_EKSIK_OFF_W:", W31_EKSIK_OFF_W)

@@ -225,6 +225,7 @@ for _b, _e in _ornek:
 
 
 
+
 # %% [DEBUG] - TEMMUZ GEÇMİŞİ VERİ DENETİMİ (solve'dan ÖNCE bakılacak)
 # Bu hücre modele HİÇBİR kısıt eklemez, sadece rapor basar.
 # 7 kontrol: veri boşlukları + W31 off kotası çakışmaları.

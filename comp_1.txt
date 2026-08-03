@@ -958,4 +958,168 @@ else:
                 _d = pd.to_datetime(g).date()
                 _ds = _d.isoformat()
                 _sec = [v for v in gun_vardiyalari.get(_ds, []) if (a, _ds, v) in x]
+
+
+
+
+# %% [TEŞHİS 2] - "exactly_one { }" AVI: KAPALI AGENT-GÜNLERİ VE KAPASİTE AÇIĞI
+# CP-SAT "INFEASIBLE: 'exactly_one: empty or all false'" derse buraya bak.
+# Sebep genelde: work[(a,ds)] 1'e zorlanmış ama o günün TÜM vardiyaları 0'a sabitlenmiş.
+# Bu hücre model proto'sundaki 0/1'e sabitlenmiş değişkenleri okuyup bunu tespit eder.
+#
+# Model kurulduktan SONRA (OBJECTIVE dahil) çalıştır. Solve GEREKMEZ.
+
+MAX_RAPOR = 30
+
+proto = model.Proto() if hasattr(model, "Proto") else model.proto
+
+# ---------- sabitlenmiş değişkenler ----------
+sabit = {}
+for i in range(len(proto.variables)):
+    d = list(proto.variables[i].domain)
+    if len(d) == 2 and d[0] == d[1]:
+        sabit[i] = d[0]
+
+for k in range(len(proto.constraints)):
+    cc = proto.constraints[k]
+    try:
+        if len(cc.enforcement_literal) > 0:
+            continue
+    except Exception:
+        pass
+    try:
+        L = cc.linear
+        if len(L.vars) != 1:
+            continue
+    except Exception:
+        continue
+    dom, co = list(L.domain), list(L.coeffs)
+    if len(dom) == 2 and dom[0] == dom[1] and co[0] != 0 and dom[0] % co[0] == 0:
+        sabit[L.vars[0]] = dom[0] // co[0]
+
+ad2idx = {}
+for i in range(len(proto.variables)):
+    nm = proto.variables[i].name
+    if nm:
+        ad2idx[nm] = i
+
+print(f"model: {len(proto.variables)} değişken | {len(proto.constraints)} kısıt "
+      f"| sabitlenmiş: {len(sabit)}")
+
+_GUN = ["Pzt", "Sal", "Çrş", "Prş", "Cum", "Cmt", "Paz"]
+_agents = sorted({str(a).strip() for a in AGENTS})
+
+# ---------- 1) agent-gün taraması ----------
+olumsuz = []      # work=1 zorunlu ama hic acik vardiya yok -> INFEASIBLE
+kapali_gun = {}   # agent -> [ds, ...]  (acik vardiya yok, work zorunlu degil)
+acik_gun = {}     # agent -> set(date)
+
+for a in _agents:
+    for ds in PLAN_GUNLER:
+        g = pd.to_datetime(ds).strftime("%Y%m%d")
+        w_i = ad2idx.get(f"work_{a}_{g}")
+        x_i = [ad2idx.get(f"x_{a}_{g}_{v}")
+               for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
+        acik = [i for i in x_i if i is not None and sabit.get(i, None) != 0]
+        if acik:
+            acik_gun.setdefault(a, set()).add(pd.to_datetime(ds).date())
+            continue
+        if w_i is not None and sabit.get(w_i, None) == 1:
+            olumsuz.append((a, ds, len(x_i)))
+        else:
+            kapali_gun.setdefault(a, []).append(ds)
+
+print(f"\n{'=' * 78}")
+print(f"[1] work=1 ZORUNLU ama hiç açık vardiya YOK  ->  {len(olumsuz)}  (INFEASIBLE sebebi)")
+print(f"{'=' * 78}")
+for a, ds, n in olumsuz[:MAX_RAPOR]:
+    _d = pd.to_datetime(ds).date()
+    _hs = a in globals().get("hamile_sut_agents", set())
+    print(f"  {a}  {ds} ({_GUN[_d.weekday()]})  tanımlı vardiya={n}, hepsi 0'a sabit | "
+          f"hamile/süt={_hs} | tip={tip_map.get(a, {}).get(_d, '-')}")
+if olumsuz:
+    print("\n  -> work'ü 1 yapan: 'PARTIAL END HAFTA İÇİ HAMİLE / SÜT İZNİ ÇALIŞMA ZORUNLULUĞU'")
+    print("     x'leri 0 yapan aday hücreler: 11 SAAT (Temmuz köprüsü), SABAH ÇALIŞANLAR,")
+    print("     HAMİLE/SÜT HAFTA SONU, TAKIM HAFTALIK BASE VARDİYA (hafta içi hard).")
+
+# ---------- 2) aylık minimum vs mümkün maksimum (max-6 altında, DP) ----------
+_tatil = {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
+_is_gunu_dates = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER
+                  if pd.to_datetime(ds).weekday() < 5 and pd.to_datetime(ds).date() not in _tatil}
+_aylik_is_gunu = len(_is_gunu_dates)
+
+_gun_date = [pd.to_datetime(ds).date() for ds in PLAN_GUNLER]
+_n = len(_gun_date)
+_W = WINDOW_DAYS - 1
+_MASK = (1 << _W) - 1
+_PLAN_START = min(_gun_date)
+
+
+def _dp(available, seed):
+    cur = {seed: 0}
+    for i in range(_n):
+        nxt = {}
+        for st, val in cur.items():
+            if available[i] and bin(st).count("1") + 1 <= MAX_CONSECUTIVE_WORK_DAYS:
+                ns = ((st << 1) | 1) & _MASK
+                if nxt.get(ns, -1) < val + 1:
+                    nxt[ns] = val + 1
+            ns = (st << 1) & _MASK
+            if nxt.get(ns, -1) < val:
+                nxt[ns] = val
+        cur = nxt
+    return max(cur.values()) if cur else 0
+
+
+from datetime import timedelta
+_worked = globals().get("gecmis_calisma_gunleri", {})
+kapasite = []
+for a in _agents:
+    _ac = acik_gun.get(a, set())
+    available = [(d in _ac) and (d not in _tatil) for d in _gun_date]
+    seed = 0
+    for k in range(_W):
+        if (_PLAN_START - timedelta(days=k + 1)) in _worked.get(a, set()):
+            seed |= (1 << k)
+    tavan = _dp(available, seed)
+    _izin = len({d for d, t in tip_map.get(a, {}).items()
+                 if str(t).strip().lower() == "izin" and d in _is_gunu_dates})
+    baz = _aylik_is_gunu - _izin
+    kapasite.append({"agent_user_code": a, "baz_gereken": baz, "max_mumkun": tavan,
+                     "acik": tavan - baz, "acik_gun_sayisi": len(_ac)})
+
+kapasite_df = pd.DataFrame(kapasite).sort_values("acik")
+_dar = kapasite_df[kapasite_df["acik"] < 0]
+
+print(f"\n{'=' * 78}")
+print(f"[2] Aylık minimumu SAĞLAYAMAYAN agent (max-6 + kapalı günler altında): {len(_dar)}")
+print(f"    aylık iş günü = {_aylik_is_gunu}")
+print(f"{'=' * 78}")
+if len(_dar):
+    print(_dar.head(MAX_RAPOR).to_string(index=False))
+    print("\n  -> Bu agentlar için  toplam_calisma >= baz_gereken  kısıtı sağlanamaz.")
+else:
+    print("  Yok - aylık minimum tarafında sorun görünmüyor.")
+
+print("\n  En dar 10 agent:")
+print(kapasite_df.head(10).to_string(index=False))
+
+# ---------- 3) takım-hafta base: hiç seçilebilir vardiya kalmayan ----------
+print(f"\n{'=' * 78}")
+_bos_base = []
+for t in TAKIMLAR:
+    for wk in WEEKS:
+        _vs = [ad2idx.get(f"team_week_base_{t}_{wk}_{v}") for v in week_vardiyalari.get(wk, [])
+               if (t, wk, v) in team_week_base]
+        _vs = [i for i in _vs if i is not None]
+        if not _vs:
+            continue
+        _acik = [i for i in _vs if sabit.get(i, None) != 0]
+        if not _acik:
+            _bos_base.append((t, wk, len(_vs)))
+print(f"[3] Hiç base vardiyası kalmayan takım-hafta: {len(_bos_base)}")
+for t, wk, n in _bos_base[:MAX_RAPOR]:
+    print(f"    takım={t} hafta={wk} (tanımlı {n} vardiya, hepsi 0'a sabit)")
+print("=" * 78)
+
                 print(f"   {_ds} ({_GUN[_d.weekday()]}): tip={_tipd.get(_d, '-')} | açık vardiya={len(_sec)}")

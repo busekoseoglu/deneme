@@ -1,0 +1,322 @@
+# %% [KONTROL] - ÇÖZÜMÜ ÇIKAR + ORTAK YARDIMCILAR
+assert FEASIBLE_OK, "Çözüm yok, kontroller çalıştırılamaz."
+V = solver.Value
+
+cozum_calisma = {}   # (a, ds) -> 0/1
+cozum_atama = {}     # (a, ds) -> vardiya kodu (çalışıyorsa)
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        w = V(work[(a, ds)]) if (a, ds) in work else 0
+        cozum_calisma[(a, ds)] = int(w)
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) in x and V(x[(a, ds, v)]) == 1:
+                cozum_atama[(a, ds)] = v
+                break
+
+def _dk(t):
+    s = str(t).strip()[:5]; h, m = s.split(":"); return int(h) * 60 + int(m)
+
+def _shift_dt(ds, bas, bit):
+    s = pd.to_datetime(f"{pd.to_datetime(ds).strftime('%Y-%m-%d')} {bas}")
+    e = pd.to_datetime(f"{pd.to_datetime(ds).strftime('%Y-%m-%d')} {bit}")
+    if e <= s: e += pd.Timedelta(days=1)
+    return s, e
+
+ihlal_ozet = []
+def kaydet(kural, adet, tur="HARD"):
+    ihlal_ozet.append({"kural": kural, "tur": tur, "ihlal": adet})
+    etiket = "OK   " if adet == 0 else "İHLAL"
+    print(f"[{etiket}] ({tur}) {kural}: {adet}")
+
+_gecmis_calisma = globals().get("gecmis_calisma", {})
+_gecmis_gunleri = globals().get("gecmis_calisma_gunleri", {})
+print("Çözüm çıkarıldı. Çalışan agent-gün:", sum(cozum_calisma.values()))
+
+
+
+
+# %% [KONTROL 1] - GÜNDE MAX 1 VARDİYA + WORK TUTARLILIĞI
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        atn = [v for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x and V(x[(a, ds, v)]) == 1]
+        if len(atn) > 1:
+            ihlal.append((a, ds, "coklu_vardiya", atn))
+        if (a, ds) in work and V(work[(a, ds)]) != len(atn):
+            ihlal.append((a, ds, "work_uyumsuz", len(atn)))
+kaydet("Günde max 1 vardiya / work tutarlılığı", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 2] - İZİN / OFF_T / OFF_T2 GÜNÜNDE ÇALIŞMA YOK (HARD OFF)
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        d = pd.to_datetime(ds).date()
+        tip = str(tip_map.get(a, {}).get(d, "")).strip().lower()
+        if tip in ("izin", "off_t", "off_t2") and cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, tip, cozum_atama.get((a, ds))))
+kaydet("İzin/off_t/off_t2 gününde çalışma yok", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 3] - COVERAGE (buffer + talep) [RAPOR/SOFT]
+rows = []
+buffer_alti = 0
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        assigned = sum(V(x[(str(a).strip(), ds, v)]) for a in AGENTS if (str(a).strip(), ds, v) in x)
+        req = int(talep[(ds, v)])
+        lo = coverage_lower.get((ds, v), req) if "coverage_lower" in globals() else req
+        hi = coverage_upper.get((ds, v), req) if "coverage_upper" in globals() else req
+        durum = "ok"
+        if assigned < lo: durum = "BUFFER_ALTI"; buffer_alti += 1
+        elif assigned < req: durum = "talep_alti"
+        elif assigned > hi: durum = "buffer_ustu"
+        rows.append({"tarih": str(ds), "vardiya": v, "talep": req, "lower": lo, "upper": hi, "atanan": int(assigned), "durum": durum})
+coverage_kontrol_df = pd.DataFrame(rows)
+kaydet("Coverage buffer altı (soft)", buffer_alti, tur="SOFT")
+print("Talep altı gün-vardiya:", int((coverage_kontrol_df["durum"] == "talep_alti").sum()))
+print("Buffer üstü gün-vardiya:", int((coverage_kontrol_df["durum"] == "buffer_ustu").sum()))
+display(coverage_kontrol_df[coverage_kontrol_df["durum"] != "ok"].head(40))
+
+
+
+# %% [KONTROL 4] - FAZLA ATAMA ÜST LİMİTİ (HARD)
+ihlal = []
+partial_weeks_c = globals().get("partial_weeks", set())
+for ds in PLAN_GUNLER:
+    wk = day_week[ds]
+    for v in gun_vardiyalari.get(ds, []):
+        assigned = sum(V(x[(str(a).strip(), ds, v)]) for a in AGENTS if (str(a).strip(), ds, v) in x)
+        req = int(talep[(ds, v)])
+        if wk in partial_weeks_c:
+            max_fazla = PARTIAL_WEEK_MAX_FAZLA_ATAMA
+        else:
+            max_fazla = fazla_atama_ust_limiti.get((ds, v), GENEL_MAX_FAZLA_ATAMA)
+        # arife özel vardiya cap gevşemesi göz ardı; sadece kaba kontrol
+        if assigned > req + max_fazla and (ds, v) not in globals().get("arife_ozel_vardiyalar", set()):
+            ihlal.append((ds, v, "atanan", int(assigned), "limit", req + max_fazla))
+kaydet("Fazla atama üst limiti", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 5] - AYLIK ÇALIŞMA DENGESİ (min/max)
+resmi_tatil_ds = globals().get("resmi_tatil_date_set", set())
+aylik_is_dates = globals().get("aylik_is_gunu_dates",
+    {pd.to_datetime(ds).date() for ds in PLAN_GUNLER if pd.to_datetime(ds).weekday() < 5 and pd.to_datetime(ds).date() not in resmi_tatil_ds})
+aylik_is = len(aylik_is_dates)
+
+rows = []; ihlal = 0
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    izin_is = len({d for d, t in tip_map.get(a, {}).items() if str(t).strip().lower() == "izin" and d in aylik_is_dates})
+    baz = aylik_is - izin_is
+    toplam = sum(cozum_calisma[(a, ds)] for ds in PLAN_GUNLER if pd.to_datetime(ds).date() not in resmi_tatil_ds)
+    ok = baz <= toplam <= baz + MAX_OVERTIME_PER_MONTH
+    if not ok: ihlal += 1
+    rows.append({"agent": a, "baz_gereken": baz, "toplam_calisma": int(toplam), "mesai": int(toplam - baz), "min": baz, "max": baz + MAX_OVERTIME_PER_MONTH, "ok": ok})
+aylik_denge_kontrol_df = pd.DataFrame(rows)
+kaydet("Aylık çalışma dengesi (min<=toplam<=max)", ihlal)
+display(aylik_denge_kontrol_df[~aylik_denge_kontrol_df["ok"]].head(40))
+
+
+# %% [KONTROL 6] - MAX 6 GÜN ÜST ÜSTE (TEMMUZ GEÇMİŞİ DAHİL)
+from datetime import timedelta
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    worked = set(_gecmis_gunleri.get(a, set()))  # Temmuz gerçek çalışma
+    for ds in PLAN_GUNLER:
+        if cozum_calisma[(a, ds)] == 1:
+            worked.add(pd.to_datetime(ds).date())
+    if not worked:
+        continue
+    tum = sorted(worked)
+    lo, hi = tum[0], tum[-1]
+    d = lo
+    while d <= hi - timedelta(days=WINDOW_DAYS - 1):
+        pencere = [d + timedelta(days=k) for k in range(WINDOW_DAYS)]
+        c = sum(1 for x_ in pencere if x_ in worked)
+        if c > MAX_CONSECUTIVE_WORK_DAYS:
+            ihlal.append((a, str(d), "pencere_calisma", c))
+        d += timedelta(days=1)
+kaydet("Max 6 gün üst üste (Temmuz dahil)", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+# %% [KONTROL 7] - MİN 11 SAAT DİNLENME (TEMMUZ GEÇMİŞİ DAHİL)
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    shifts = []
+    for d, (bas, bit) in _gecmis_calisma.get(a, {}).items():
+        if bit is None: continue
+        shifts.append(_shift_dt(d.isoformat(), bas, bit))
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if v:
+            bas, bit = saat[(ds, v)]
+            shifts.append(_shift_dt(ds, bas, bit))
+    shifts.sort(key=lambda r: r[0])
+    for i in range(len(shifts) - 1):
+        rest = (shifts[i + 1][0] - shifts[i][1]).total_seconds() / 60
+        if rest < MIN_REST_MINUTES:
+            ihlal.append((a, str(shifts[i][1]), str(shifts[i + 1][0]), int(rest)))
+kaydet("Min 11 saat dinlenme (Temmuz dahil)", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 8] - CUMARTESİ-PAZAR GERÇEK ÇİFT OFF
+# Gerçek OFF: izin DEĞİL; (off_t/off_t2) veya (work=0). work=1 -> OFF değil.
+def _gercek_off(a, ds):
+    d = pd.to_datetime(ds).date()
+    tip = str(tip_map.get(a, {}).get(d, "")).strip().lower()
+    if tip == "izin": return False
+    if tip in ("off_t", "off_t2"): return True
+    return cozum_calisma.get((a, ds), 0) == 0
+
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    tip_dates = tip_map.get(a, {})
+    plan_izin = {d for d, t in tip_dates.items() if str(t).strip().lower() == "izin"}
+    tum_izinli = len(PLAN_GUNLER) > 0 and all(pd.to_datetime(ds).date() in plan_izin for ds in PLAN_GUNLER)
+    if tum_izinli:
+        continue  # tam-ay izinli agent için zorunluluk kurulmaz
+    var_mi = any(_gercek_off(a, sat) and _gercek_off(a, sun) for sat, sun in weekend_pairs)
+    if not var_mi:
+        ihlal.append(a)
+kaydet("Ayda en az 1 Cmt-Pzr çift OFF", len(ihlal))
+print("   çift OFF'u olmayan agentlar:", ihlal[:30])
+
+
+
+# %% [KONTROL 9] - HAMİLE / SÜT İZNİ HAFTA SONU ÇALIŞMAZ (HARD)
+ozel = set()
+for _, row in df_tam.iterrows():
+    if int(pd.to_numeric(row.get("hamile_flg", 0), errors="coerce") or 0) == 1 or int(pd.to_numeric(row.get("sut_izni_flg", 0), errors="coerce") or 0) == 1:
+        ozel.add(str(row["agent_user_code"]).strip())
+ihlal = []
+for a in ozel:
+    for ds in PLAN_GUNLER:
+        if pd.to_datetime(ds).weekday() in (5, 6) and cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, cozum_atama.get((a, ds))))
+kaydet("Hamile/süt izni hafta sonu çalışmaz", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+
+# %% [KONTROL 10] - SABAH ÇALIŞANLAR (bitiş <= SABAH_CALISIR_MAX_BITIS_SAATI)
+LIMIT = _dk(SABAH_CALISIR_MAX_BITIS_SAATI)
+sabah = {str(r["agent_user_code"]).strip() for _, r in df_tam.iterrows() if pd.to_numeric(r.get("sabah_calisir_flg", 0), errors="coerce") == 1}
+ihlal = []
+for a in sabah:
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if not v: continue
+        bas, bit = saat[(ds, v)]
+        bas_dk, bit_dk = _dk(bas), _dk(bit)
+        if bit_dk < bas_dk: bit_dk += 24 * 60
+        if bit_dk > LIMIT:
+            ihlal.append((a, ds, v, bit))
+kaydet("Sabah çalışanlar geç vardiyada değil", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 11] - AYDA MAX 2 HAFTA GECE/AKŞAM
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    gece_haftalar = set()
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if v and night_shift_map.get((ds, v), False):
+            gece_haftalar.add(day_week[ds])
+    if len(gece_haftalar) > MAX_NIGHT_WEEKS_PER_MONTH:
+        ihlal.append((a, sorted(gece_haftalar)))
+kaydet("Ayda max 2 gece/akşam haftası", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 12] - HAFTA İÇİ TAKIM BASE VARDİYASI (HARD)
+# Hafta içi (Pzt-Cuma), arife/resmi tatil hariç: agent yalnızca takımının seçtiği base'de çalışır.
+ozel_tatil = set(globals().get("ozel_tatil_plan_gunleri", []))
+# takım-hafta seçilen base
+secilen_base = {}
+for (t, wk, v), var in team_week_base.items():
+    if V(var) == 1:
+        secilen_base[(t, wk)] = v
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    t = agent_team.get(a)
+    if t is None: continue
+    t = str(t).strip()
+    for ds in PLAN_GUNLER:
+        if ds in ozel_tatil: continue
+        if pd.to_datetime(ds).weekday() >= 5: continue
+        v = cozum_atama.get((a, ds))
+        if not v: continue
+        base = secilen_base.get((t, day_week[ds]))
+        if base is not None and v != base:
+            ihlal.append((a, ds, "atanan", v, "base", base))
+kaydet("Hafta içi takım base vardiyası", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 13] - HAFTA SONU ÇALIŞMA ADALETİ [RAPOR/SOFT]
+hafta_sonu_gunleri_c = sorted(set([s for s, _ in weekend_pairs] + [p for _, p in weekend_pairs]))
+rows = []; asiri = 0
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    cnt = sum(cozum_calisma.get((a, ds), 0) for ds in hafta_sonu_gunleri_c)
+    fazla = max(0, cnt - HAFTA_SONU_CEZA_BASLANGIC_GUN)
+    if fazla > 0: asiri += 1
+    rows.append({"agent": a, "hafta_sonu_calisma": int(cnt), "ceza_esigi": HAFTA_SONU_CEZA_BASLANGIC_GUN, "cezali_gun": int(fazla)})
+hafta_sonu_kontrol_df = pd.DataFrame(rows).sort_values("hafta_sonu_calisma", ascending=False)
+kaydet("Hafta sonu eşik üstü çalışan agent (soft)", asiri, tur="SOFT")
+display(hafta_sonu_kontrol_df.head(30))
+
+
+
+
+
+# %% [KONTROL 14] - RESMİ TATİL KISITLI AGENT İHLALİ [RAPOR/SOFT]
+resmi_gunler = globals().get("resmi_tatil_plan_gunleri", [])
+kisitli = globals().get("tatil_kisitli_agents", set())
+ihlal = []
+for a in kisitli:
+    a = str(a).strip()
+    for ds in resmi_gunler:
+        if cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, cozum_atama.get((a, ds))))
+kaydet("Resmi tatilde kısıtlı agent çalışması (soft)", len(ihlal), tur="SOFT")
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL ÖZET] - TÜM KURALLAR TEK TABLODA
+ihlal_ozet_df = pd.DataFrame(ihlal_ozet)
+print("=== KURAL KONTROL ÖZETİ ===")
+display(ihlal_ozet_df)
+hard_ihlal = ihlal_ozet_df[(ihlal_ozet_df["tur"] == "HARD") & (ihlal_ozet_df["ihlal"] > 0)]
+if hard_ihlal.empty:
+    print("TÜM HARD KURALLAR TEMİZ ✅")
+else:
+    print("DİKKAT - HARD İHLAL VAR ⚠️")
+    display(hard_ihlal)
+
+
+

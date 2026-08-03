@@ -25,22 +25,37 @@ col_start = _pick_col(["shift_start", "shift_start_hour", "baslangic"])
 # Sadece modele giren agentlar (df_tam) tutulur; df_gecmis'te fazladan agent olabilir.
 _model_agents = set(df_tam["agent_user_code"].astype(str).str.strip())
 
+import re
+
 def _norm_saat(t):
-    if pd.isna(t):
-        return None
+    # None / NaN
+    try:
+        if t is None or pd.isna(t):
+            return None
+    except (TypeError, ValueError):
+        pass
+    # datetime.time / Timestamp gibi strftime destekleyenler
+    if hasattr(t, "strftime"):
+        try:
+            return t.strftime("%H:%M")
+        except Exception:
+            pass
     s = str(t).strip()
-    try:  # "8" / "8.0" gibi tam saat
+    if s == "" or s.lower() == "nan" or s.lower() == "nat":
+        return None
+    # "0 days 17:00:00" / "17:00:00" / "17:00" -> ilk HH:MM
+    m = re.search(r"(\d{1,2}):(\d{2})", s)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    # düz saat sayısı "8" / "17" / "8.0"
+    try:
         return f"{int(float(s)):02d}:00"
     except ValueError:
-        pass
-    s = s[:5]
-    if len(s) == 4 and s[1] == ":":  # "8:00" -> "08:00"
-        s = "0" + s
-    return s
+        return None
 
 def _dk(s):
-    h, m = s.split(":")
-    return int(h) * 60 + int(m)
+    parts = str(s).split(":")
+    return int(parts[0]) * 60 + int(parts[1] if len(parts) > 1 else 0)
 
 # BİTİŞ SAATİ KURALI:
 #   - 17:00 ve sonrası başlayan vardiya -> 8 saat  (örn. 17:00 -> 01:00, 18:00 -> 02:00)

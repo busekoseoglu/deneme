@@ -62,7 +62,9 @@ if "agent_user_code" in df_gecmis.columns:
 #   gecmis_calisma          agent -> {date: (bas, bit)}  -> 11h kuralı   (HÜCRE 15)
 #   gecmis_calisma_gunleri  agent -> set(date)           -> max-6 kuralı (HÜCRE 12)
 #   gecmis_off_gunleri      agent -> set(date)           -> W31 off kotası (KURAL 3)
-#   gecmis_izin_gunleri     agent -> set(date)           -> kotadan düşmez, ayrı tutulur
+#   gecmis_izin_gunleri     agent -> set(date)           -> yıllık izin vb., kotadan düşmez
+#   gecmis_haftalik_izin_gunleri  agent -> set(date)      -> *_izinli_flg günü (süt izni düzeni),
+#                                                            YILLIK İZİN DEĞİL, kotadan düşmez
 #   gecmis_kapsam           agent -> set(date)           -> kaydı olan günler (veri boşluğu tespiti)
 #   GECMIS_MIN_DATE / GECMIS_MAX_DATE
 
@@ -93,6 +95,23 @@ if col_agent is None or col_date is None or col_vardiya is None:
 
 # Sadece modele giren agentlar (df_tam) tutulur; df_gecmis'te fazladan agent olabilir.
 _model_agents = set(df_tam["agent_user_code"].astype(str).str.strip())
+
+# HAFTALIK İZİN BAYRAKLARI (*_izinli_flg)
+# Süt izni düzeninde agent tam gün çalışıp haftanın bir gününü izinli geçirebiliyor.
+# Bu gün YILLIK İZİN DEĞİL - ayrı kategoride tutulur. Ortak yanı: haftalık 2 günlük
+# OFF kotasını TÜKETMEZ (agent yine 2 gün off hak eder).
+_HAFTAICI_IZIN_FLG = globals().get("HAFTAICI_IZIN_FLG", {
+    "pazartesi_izinli_flg": 0, "sali_izinli_flg": 1, "carsamba_izinli_flg": 2,
+    "persembe_izinli_flg": 3, "cuma_izinli_flg": 4,
+})
+_agent_haftalik_izin_wd = {}      # agent -> {weekday, ...}
+for _, _r in df_tam.iterrows():
+    _c = str(_r["agent_user_code"]).strip()
+    _wds = {wd for flg, wd in _HAFTAICI_IZIN_FLG.items()
+            if pd.to_numeric(_r.get(flg, 0), errors="coerce") == 1}
+    if _wds:
+        _agent_haftalik_izin_wd[_c] = _wds
+print(f"haftalık izin bayrağı olan agent: {len(_agent_haftalik_izin_wd)}")
 
 _TR = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
 _ARALIK_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})$")
@@ -130,11 +149,12 @@ def _parse_vardiya(v):
 gecmis_calisma = {}          # agent -> {date: (bas, bit)}
 gecmis_calisma_gunleri = {}  # agent -> set(date)
 gecmis_off_gunleri = {}      # agent -> set(date)
-gecmis_izin_gunleri = {}     # agent -> set(date)
+gecmis_izin_gunleri = {}     # agent -> set(date)   (yillik izin vb.)
+gecmis_haftalik_izin_gunleri = {}   # agent -> set(date)   (*_izinli_flg gunu)
 gecmis_kapsam = {}           # agent -> set(date)
 
 _stat = {"ham": 0, "agent_disi": 0, "tarih_bozuk": 0, "plan_icinde": 0,
-         "calisma": 0, "off": 0, "izin": 0, "taninmayan": 0}
+         "calisma": 0, "off": 0, "izin": 0, "haftalik_izin": 0, "taninmayan": 0}
 gecmis_taninmayan_vardiya = {}   # ham deger -> [(agent, date), ...]
 
 for _, row in df_gecmis.iterrows():
@@ -160,9 +180,15 @@ for _, row in df_gecmis.iterrows():
         gecmis_kapsam.setdefault(a, set()).add(d)
         _stat["calisma"] += 1
     elif durum == "off":
-        gecmis_off_gunleri.setdefault(a, set()).add(d)
+        # Agent'ın *_izinli_flg günü ise bu bir OFF değil, haftalık izin düzenidir.
+        # Off kotasını tüketmez -> ayrı kovaya konur.
+        if d.weekday() in _agent_haftalik_izin_wd.get(a, set()):
+            gecmis_haftalik_izin_gunleri.setdefault(a, set()).add(d)
+            _stat["haftalik_izin"] += 1
+        else:
+            gecmis_off_gunleri.setdefault(a, set()).add(d)
+            _stat["off"] += 1
         gecmis_kapsam.setdefault(a, set()).add(d)
-        _stat["off"] += 1
     elif durum == "izin":
         gecmis_izin_gunleri.setdefault(a, set()).add(d)
         gecmis_kapsam.setdefault(a, set()).add(d)
@@ -179,7 +205,11 @@ GECMIS_MAX_DATE = _tum_gunler[-1] if _tum_gunler else None
 print(f"df_gecmis ham satır: {_stat['ham']} | modeldeki agent (df_tam): {len(_model_agents)}")
 print(f"  kolonlar -> agent:'{col_agent}' tarih:'{col_date}' vardiya:'{col_vardiya}'")
 print(f"  elenen -> agent dışı: {_stat['agent_disi']} | tarih bozuk: {_stat['tarih_bozuk']} | plan içi: {_stat['plan_icinde']}")
-print(f"  çalışma: {_stat['calisma']} | off: {_stat['off']} | izin: {_stat['izin']} | TANINMAYAN: {_stat['taninmayan']}")
+print(f"  çalışma: {_stat['calisma']} | off: {_stat['off']} | yıllık izin: {_stat['izin']} | "
+      f"haftalık izin (*_izinli_flg): {_stat['haftalik_izin']} | TANINMAYAN: {_stat['taninmayan']}")
+if _stat["haftalik_izin"]:
+    print(f"    -> {_stat['haftalik_izin']} gün 'off' yazıyordu ama agent'ın *_izinli_flg gününe")
+    print("       denk geldiği için OFF sayılmadı; haftalık off kotasını tüketmiyor.")
 if gecmis_taninmayan_vardiya:
     print(f"  !! tanınmayan vardiya değerleri: {list(gecmis_taninmayan_vardiya.keys())[:15]}")
 
@@ -279,7 +309,8 @@ print(f"\n[4] W31 Temmuz'unda {HAFTALIK_OFF_KOTASI}'den FAZLA off almış agent:
 for a, o, i, c in dbg4_fazla[:30]:
     print(f"    {a}: off={o} izin={i} çalışma={c} -> {[str(d) for d in W31_AGUSTOS]} ÇALIŞMA olacak")
 if dbg4_fazla:
-    print("    -> Kotadan fazlası telafi edilmez; Ağustos tarafı tamamen çalışmaya zorlanır.")
+    print("    -> Hak ettiğinden fazla off kullanmış. 1-2 Ağustos'ta off hakkı kalmadı;")
+    print("       KURAL 3 bunu borç olarak kaydeder (borç mekanizması şu an kapalı).")
 
 # ---------- 5) 1-2 Ağustos çakışması (izin / off_t / off_t2) ----------
 dbg5_cakisma = []
@@ -300,10 +331,12 @@ for a, t_off, gerek, musait, engelli in dbg5_cakisma[:30]:
     print(f"    {a}: temmuz_off={t_off} -> {gerek} gün çalışmalı, müsait {musait} gün | "
           f"engel: {[(str(d), t) for d, t in engelli]}")
 if dbg5_cakisma:
-    print("    -> Bu agentlarda W31 kotası KAPANAMAZ. Kural hard '<=' yönünde olduğu için")
-    print("       model infeasible OLMAZ, ama agent hak ettiğinden fazla off almış olur.")
+    print("    -> Bu agentlar hak ettiğinden fazla off alacak. KURAL 3'te hard tavan")
+    print("       KALDIRILDI, o yüzden infeasible olmaz; fark w31_fazla_off'ta borç olarak durur.")
 
-# ---------- 6) Hamile/süt: W31 Temmuz'unda hafta içi 'off' (veri anomalisi) ----------
+# ---------- 6) Hamile/süt: W31 Temmuz'unda AÇIKLANAMAYAN hafta içi 'off' ----------
+# *_izinli_flg gününe denk gelen 'off'lar hücre 28'de zaten haftalık izne çevrildi;
+# burada kalanlar gerçek anomalidir (hamile/süt agent hafta içi off alamaz).
 dbg6_hs_off = []
 for a in sorted(_hamile_sut):
     hafta_ici_off = sorted(d for d in (gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
@@ -313,10 +346,13 @@ for a in sorted(_hamile_sut):
 print(f"\n[6] Hamile/süt izinli olup W31 Temmuz'unda HAFTA İÇİ 'off' kaydı olan agent: {len(dbg6_hs_off)}")
 for a, gs in dbg6_hs_off[:30]:
     print(f"    {a}: {[str(g) for g in gs]}")
+_hs_haftalik = sum(len(gecmis_haftalik_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+                   for a in _hamile_sut)
+print(f"    (bilgi: hamile/süt agentlarda *_izinli_flg'e denk gelip haftalık izne "
+      f"çevrilen gün: {_hs_haftalik})")
 if dbg6_hs_off:
-    print("    -> Bu agentlar hafta içi off alamaz. Kural 3 onları 1-2 Ağustos'ta çalışmaya")
-    print("       zorlarken HÜCRE 14 hafta sonu çalışmayı yasaklıyor -> INFEASIBLE riski.")
-    print("       Veriyi düzelt ya da bu günleri 'izin' olarak işaretle.")
+    print("    -> Bu günler bir bayrakla açıklanamıyor. Hamile/süt agent hafta içi off alamaz;")
+    print("       veriyi kontrol et ya da ilgili *_izinli_flg'i df_tam'da işaretle.")
 
 # ---------- 7) Hamile/süt: Ağustos'ta hafta içi off_t / off_t2 ----------
 dbg7_hs_offt = []
@@ -422,46 +458,55 @@ for r in max6_sifir_limit[:15]:
 # %% [KISIT] - KURAL 3: W31 HAFTALIK OFF DENGESİ (TEMMUZ - AĞUSTOS SINIRI)
 # Sadece W31'e (planın ilk gününü içeren ISO hafta) uygulanır.
 # Ağustos'un TAM haftalarına uygulanmaz: agent bir hafta 3 off talep edip başka haftada
-# telafi edebilir; oradaki bağlayıcı kısıt HÜCRE 36'daki aylık minimumdur.
-# W31 istisna çünkü Temmuz kapandı, telafi edilecek yer kalmadı.
+# telafi edebilir; oradaki bağlayıcı kısıt HÜCRE 37'deki aylık minimumdur.
 #
-#   temmuz_off      = W31'in Temmuz günlerinde 'off' olan gün sayısı   (izin SAYILMAZ)
-#   kalan_off       = clamp(HAFTALIK_OFF_KOTASI - temmuz_off, 0, Ağustos gün sayısı)
+#   temmuz_off = W31'in Temmuz günlerinde 'off' olan gün sayısı
+#                yıllık izin ve *_izinli_flg (süt izni düzeni) günleri SAYILMAZ
+#   kalan_off  = clamp(HAFTALIK_OFF_KOTASI - temmuz_off, 0, Ağustos gün sayısı)
+#   fazla_off  = max(0, verilen off - kalan_off)   -> agent'ın o haftaki ÇALIŞMA BORCU
 #
-#   HARD: sum(gercek_off[1-2 Ağu]) <= kalan_off
-#         "Borçlu olduğundan fazla off veremezsin."
-#         Temmuz'da 2 off aldıysa kalan_off=0 -> 1-2 Ağustos ÇALIŞMA.
-#   SOFT: eksik kalan off cezalandırılır (W31_EKSIK_OFF_W).
-#         Mesai yazılabilsin diye hard değil - off mesaiye dönüşebiliyor, parası ödeniyor.
+# ---------------------------------------------------------------------------------
+# DURUM: BORÇ MEKANİZMASI HENÜZ KAPALI (iş biriminden cevap bekleniyor)
 #
-# gercek_off (HÜCRE 40'ta tanımlı) semantiği tam olarak istediğimiz gibi:
-#   izin günü        -> gercek_off = 0  (izin off yerine geçmez)
-#   off_t / off_t2   -> gercek_off = 1  (talep edilen off, off sayılır)
-#   normal gün       -> gercek_off = 1 - work
+#   HARD tavan (sum(off) <= kalan_off) KALDIRILDI.
+#   Sebep: 1-2 Ağustos'ta off_t/off_t2 talebi olan agentta gercek_off 1'e sabitlenir;
+#          kalan_off=1 iken "2 <= 1" çıkıp model INFEASIBLE oluyordu.
+#
+#   Şu an bu hücre modele SADECE soft ceza ekliyor (hak edilen off verilsin diye).
+#   fazla_off değişkeni kuruluyor ama HİÇBİR kısıtta kullanılmıyor - yalnızca
+#   çözümden sonra "kim kaç gün borçlandı" diye okunabilsin diye duruyor.
+#
+#   İş birimi "telafi edilecek" derse tek yapılacak: aşağıdaki BORÇ bloğunu aç.
+# ---------------------------------------------------------------------------------
+#
+# gercek_off (HÜCRE 41'de tanımlı) semantiği tam istediğimiz gibi:
+#   izin günü      -> gercek_off = 0  (izin off yerine geçmez)
+#   off_t / off_t2 -> gercek_off = 1  (talep edilen off, off sayılır)
+#   normal gün     -> gercek_off = 1 - work
 from datetime import timedelta
+
+W31_BORC_AKTIF = False        # <-- iş biriminden "telafi edilecek" cevabı gelince True yap
 
 if "PLAN_START_DATE" not in globals():
     PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
 
-HAFTALIK_OFF_KOTASI = CONFIG.get("HAFTALIK_OFF_KOTASI", 2)
-W31_EKSIK_OFF_W = CONFIG.get("W31_EKSIK_OFF_W", 50000)
-
 _w31_pzt = PLAN_START_DATE - timedelta(days=PLAN_START_DATE.weekday())
-W31_GUNLER  = [_w31_pzt + timedelta(days=k) for k in range(7)]
+W31_GUNLER = [_w31_pzt + timedelta(days=k) for k in range(7)]
 W31_TEMMUZ_SET = {d for d in W31_GUNLER if d < PLAN_START_DATE}
 
 _d2ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
 W31_AGUSTOS_DS = [_d2ds[d] for d in W31_GUNLER if d in _d2ds]
 
-w31_eksik_off = {}          # agent -> IntVar (kotadan eksik verilen off)
-w31_kisit_sayisi = 0
-w31_atlanan_veri_yok = 0
-w31_zorunlu_calisma = []    # (agent, temmuz_off, gereken_calisma_gunu)
+w31_eksik_off = {}      # agent -> IntVar : kotadan EKSİK verilen off (soft ceza)
+w31_fazla_off = {}      # agent -> IntVar : kotadan FAZLA verilen off = çalışma borcu
 w31_debug_rows = []
+w31_atlanan_veri_yok = 0
+w31_kesin_borclu = []   # off_t/off_t2 yüzünden borcu şimdiden belli olanlar
 
 if not W31_AGUSTOS_DS:
     print("KURAL 3 atlandı: W31'in Ağustos tarafında plan günü yok.")
 else:
+    _n_agu = len(W31_AGUSTOS_DS)
     for a_raw in AGENTS:
         a = str(a_raw).strip()
 
@@ -472,50 +517,81 @@ else:
 
         temmuz_off  = len(gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
         temmuz_izin = len(gecmis_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+        temmuz_haftalik_izin = len(gecmis_haftalik_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
         temmuz_cal  = len(gecmis_calisma_gunleri.get(a, set()) & W31_TEMMUZ_SET)
 
-        kalan_off = min(max(HAFTALIK_OFF_KOTASI - temmuz_off, 0), len(W31_AGUSTOS_DS))
-        gereken_calisma = len(W31_AGUSTOS_DS) - kalan_off
+        kalan_off = min(max(HAFTALIK_OFF_KOTASI - temmuz_off, 0), _n_agu)
 
         off_vars = [gercek_off[(a, ds)] for ds in W31_AGUSTOS_DS if (a, ds) in gercek_off]
         if not off_vars:
             continue
 
-        # HARD: hak ettiğinden fazla off verilemez
-        model.Add(sum(off_vars) <= kalan_off)
-        w31_kisit_sayisi += 1
-        if gereken_calisma > 0:
-            w31_zorunlu_calisma.append((a, temmuz_off, gereken_calisma))
+        _off_toplam = model.NewIntVar(0, len(off_vars), f"w31_off_toplam_{a}")
+        model.Add(_off_toplam == sum(off_vars))
 
-        # SOFT: eksik verilen off cezalandırılır (mesai serbest kalsın diye)
+        # EKSİK off -> soft ceza (hak ettiği off'u alsın)
         if kalan_off > 0:
             _eksik = model.NewIntVar(0, kalan_off, f"w31_eksik_off_{a}")
-            model.Add(_eksik >= kalan_off - sum(off_vars))
+            model.AddMaxEquality(_eksik, [kalan_off - _off_toplam, 0])
             w31_eksik_off[a] = _eksik
+
+        # FAZLA off -> çalışma borcu. Şu an SADECE gözlem değişkeni, kısıt yok.
+        _fazla = model.NewIntVar(0, _n_agu, f"w31_fazla_off_{a}")
+        model.AddMaxEquality(_fazla, [_off_toplam - kalan_off, 0])
+        w31_fazla_off[a] = _fazla
+
+        # ---- BORÇ BLOĞU (kapalı) ----
+        # İş birimi onay verince W31_BORC_AKTIF = True yap.
+        # Aylık minimum borç kadar yükselir; tavan da yükselir ki mesai hakkı kısılmasın.
+        if W31_BORC_AKTIF:
+            _ay_vars = [work[(a, ds)] for ds in PLAN_GUNLER
+                        if (a, ds) in work and pd.to_datetime(ds).date() not in resmi_tatil_date_set]
+            _tip_dates = tip_map.get(a, {})
+            _izin_is_gunu = len({d for d, t in _tip_dates.items()
+                                 if str(t).strip().lower() == "izin" and d in aylik_is_gunu_dates})
+            _baz = aylik_is_gunu - _izin_is_gunu
+            model.Add(sum(_ay_vars) >= _baz + _fazla)
+            model.Add(sum(_ay_vars) <= _baz + _fazla + MAX_OVERTIME_PER_MONTH)
+
+        # off_t/off_t2 zorunlu off olduğu için borcu şimdiden kesin olanlar
+        _zorunlu_off = sum(
+            1 for ds in W31_AGUSTOS_DS
+            if str(tip_map.get(a, {}).get(pd.to_datetime(ds).date(), "")).strip().lower()
+            in ("off_t", "off_t2")
+        )
+        if _zorunlu_off > kalan_off:
+            w31_kesin_borclu.append((a, temmuz_off, kalan_off, _zorunlu_off, _zorunlu_off - kalan_off))
 
         w31_debug_rows.append({
             "agent_user_code": a,
             "temmuz_calisma": temmuz_cal,
             "temmuz_off": temmuz_off,
             "temmuz_izin": temmuz_izin,
+            "temmuz_haftalik_izin": temmuz_haftalik_izin,
             "kalan_off": kalan_off,
-            "agustos_gereken_calisma": gereken_calisma,
+            "agustos_zorunlu_off": _zorunlu_off,
         })
 
     w31_debug_df = pd.DataFrame(w31_debug_rows)
 
     print(f"KURAL 3 - W31 haftalık off dengesi ({W31_GUNLER[0]} .. {W31_GUNLER[-1]})")
     print(f"  Ağustos tarafı: {W31_AGUSTOS_DS} | off kotası: {HAFTALIK_OFF_KOTASI}")
-    print(f"  hard kısıt kurulan agent : {w31_kisit_sayisi}")
+    print(f"  BORÇ MEKANİZMASI: {'AÇIK' if W31_BORC_AKTIF else 'KAPALI (iş birimi cevabı bekleniyor)'}")
+    print(f"  hard tavan: YOK (kaldırıldı - off_t ile çakışıp infeasible yapıyordu)")
+    print(f"  soft ceza (eksik off): {len(w31_eksik_off)} agent | W31_EKSIK_OFF_W = {W31_EKSIK_OFF_W}")
+    print(f"  gözlem değişkeni (fazla off/borç): {len(w31_fazla_off)} agent")
     print(f"  Temmuz verisi olmadığı için atlanan agent: {w31_atlanan_veri_yok}")
-    print(f"  soft ceza değişkeni (eksik off): {len(w31_eksik_off)} | W31_EKSIK_OFF_W = {W31_EKSIK_OFF_W}")
-    print(f"  1-2 Ağustos'ta ÇALIŞMAYA zorlanan agent: {len(w31_zorunlu_calisma)}")
+
     if len(w31_debug_df):
-        print("\n  kalan_off dağılımı:")
+        print("\n  kalan_off dağılımı (1-2 Ağustos'ta hak ettiği off):")
         print(w31_debug_df["kalan_off"].value_counts().sort_index().to_string())
-        print("\n  Örnek (çalışmaya zorlananlar):")
-        for a, t_off, gerek in w31_zorunlu_calisma[:15]:
-            print(f"    {a}: temmuz_off={t_off} -> {gerek} gün çalışacak")
+
+    print(f"\n  off_t/off_t2 yüzünden borcu ŞİMDİDEN kesin olan agent: {len(w31_kesin_borclu)}")
+    for a, t_off, kalan, zorunlu, borc in w31_kesin_borclu[:20]:
+        print(f"    {a}: temmuz_off={t_off} -> hak {kalan} off, talep {zorunlu} off => {borc} gün BORÇ")
+    if w31_kesin_borclu:
+        print("    -> Borç mekanizması kapalı olduğu için şu an telafi ettirilmiyor.")
+
 
 
 

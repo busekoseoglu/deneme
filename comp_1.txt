@@ -781,15 +781,27 @@ print("W31_EKSIK_OFF_W:", W31_EKSIK_OFF_W)
 #   "Problem proven infeasible during initial copy of constraint #55024"
 # numarayı aşağıya gir. Model tamamen kurulduktan SONRA (OBJECTIVE dahil) çalıştır.
 # Solve etmeye GEREK YOK - bu hücre sadece model proto'sunu okur.
+# OR-Tools 9.15+ proto sınıfında WhichOneof/HasField yok; duck-typing ile ilerliyoruz.
 
 INFEASIBLE_CONSTRAINT_NO = 55024
 
-proto = model.Proto()
+proto = model.Proto() if hasattr(model, "Proto") else model.proto
 print(f"model: {len(proto.variables)} değişken | {len(proto.constraints)} kısıt")
 
 if INFEASIBLE_CONSTRAINT_NO >= len(proto.constraints):
     raise SystemExit(f"Kısıt no {INFEASIBLE_CONSTRAINT_NO} yok (model {len(proto.constraints)} kısıt içeriyor). "
                      "Modeli baştan kurup log'daki numarayı tekrar al.")
+
+
+def _linear(cc):
+    """Kısıt linear ise .linear alanını döndürür, değilse None. Sürümden bağımsız."""
+    try:
+        lin = cc.linear
+        if lin is None or len(lin.vars) == 0:
+            return None
+        return lin
+    except Exception:
+        return None
 
 
 def _ad(idx):
@@ -800,54 +812,59 @@ def _ad(idx):
     return f"{nm}#{idx}"
 
 
-def _domain(idx):
-    return list(proto.variables[idx].domain)
-
-
 c = proto.constraints[INFEASIBLE_CONSTRAINT_NO]
-tur = c.WhichOneof("constraint")
-print(f"\n{'=' * 78}\nKISIT #{INFEASIBLE_CONSTRAINT_NO}  (tip: {tur})\n{'=' * 78}")
-if c.enforcement_literal:
-    print("enforcement:", [_ad(l) for l in c.enforcement_literal])
+lin = _linear(c)
 
-if tur != "linear":
-    print(c)
-    raise SystemExit("Linear değil - yukarıdaki ham çıktıya bak.")
+print(f"\n{'=' * 78}\nKISIT #{INFEASIBLE_CONSTRAINT_NO}\n{'=' * 78}")
+_enf = list(getattr(c, "enforcement_literal", []) or [])
+if _enf:
+    print("enforcement:", [_ad(l) for l in _enf])
 
-hedef = list(c.linear.vars)
+if lin is None:
+    print("Bu kısıt linear DEĞİL. Ham hâli:")
+    try:
+        print(c)
+    except Exception as e:
+        print("  (yazdırılamadı:", e, ")")
+    raise SystemExit("Linear olmayan kısıt - yukarıdaki çıktıya bak.")
+
+hedef = list(lin.vars)
 print("değişkenler :", [_ad(v) for v in hedef])
-print("katsayılar  :", list(c.linear.coeffs))
-print("domain      :", list(c.linear.domain), "  (yani ifadenin alabileceği değer aralığı)")
-print("\nDeğişkenlerin MODELDEKİ tanım aralıkları:")
+print("katsayılar  :", list(lin.coeffs))
+print("domain      :", list(lin.domain), "  (ifadenin alabileceği değer aralığı)")
+print("\nDeğişkenlerin modeldeki tanım aralıkları:")
 for v in hedef:
-    print(f"  {_ad(v)} -> {_domain(v)}")
+    print(f"  {_ad(v)} -> {list(proto.variables[v].domain)}")
 
 # ---- bu değişkenlere dokunan tüm kısıtları tara ----
 hedef_set = set(hedef)
-sabitleyen = []      # tek degiskenli, 1'e (ya da sabit bir degere) kilitleyenler
+sabitleyen = []
 digerleri = []
 
-for k, cc in enumerate(proto.constraints):
-    if cc.WhichOneof("constraint") != "linear":
+for k in range(len(proto.constraints)):
+    cc = proto.constraints[k]
+    l2 = _linear(cc)
+    if l2 is None:
         continue
-    vs = list(cc.linear.vars)
+    vs = list(l2.vars)
     if not (hedef_set & set(vs)):
         continue
-    kayit = (k, [_ad(v) for v in vs], list(cc.linear.coeffs), list(cc.linear.domain),
-             [_ad(l) for l in cc.enforcement_literal])
-    if len(vs) == 1 and len(cc.linear.domain) == 2 and cc.linear.domain[0] == cc.linear.domain[1]:
+    dom = list(l2.domain)
+    kayit = (k, [_ad(v) for v in vs], list(l2.coeffs), dom,
+             [_ad(l) for l in (list(getattr(cc, "enforcement_literal", []) or []))])
+    if len(vs) == 1 and len(dom) == 2 and dom[0] == dom[1]:
         sabitleyen.append(kayit)
     else:
         digerleri.append(kayit)
 
 print(f"\n{'=' * 78}")
-print(f"Bu değişkenleri SABİT bir değere kilitleyen kısıt: {len(sabitleyen)}")
+print(f"Bu değişkenleri SABİT değere kilitleyen kısıt: {len(sabitleyen)}")
 print(f"{'=' * 78}")
 for k, vs, co, dom, enf in sabitleyen:
     print(f"  #{k}: {vs} * {co} == {dom[0]}" + (f"  [enforce: {enf}]" if enf else ""))
 if sabitleyen:
-    print("\n  ^^^ SUÇLU BUNLAR. Bu kısıtları hangi hücre kuruyorsa çakışma orada.")
-    print("      Değişken adı 'x_<agent>_<yyyymmdd>_<vardiya>' formatında.")
+    print("\n  ^^^ SUÇLU BUNLAR. Bu kısıtları kuran hücreyi bul.")
+    print("      Değişken adı formatı: x_<agent>_<yyyymmdd>_<vardiya> / work_<agent>_<yyyymmdd>")
 
 print(f"\nDiğer ilgili kısıtlar: {len(digerleri)} (ilk 25)")
 for k, vs, co, dom, enf in digerleri[:25]:
@@ -863,20 +880,22 @@ for v in hedef:
         _gunler_t.add(m.group(2))
 
 if _agentler:
+    _GUN = ["Pzt", "Sal", "Çrş", "Prş", "Cum", "Cmt", "Paz"]
     print(f"\n{'=' * 78}")
-    print(f"İLGİLİ AGENT(LER): {sorted(_agentler)} | GÜN(LER): {sorted(_gunler_t)}")
+    print(f"İLGİLİ AGENT: {sorted(_agentler)} | GÜN: {sorted(_gunler_t)}")
     print(f"{'=' * 78}")
     for a in sorted(_agentler):
         print(f"\n[{a}]")
-        _tip = tip_map.get(a, {})
+        _tipd = tip_map.get(a, {})
         for g in sorted(_gunler_t):
             _d = pd.to_datetime(g).date()
             _ds = _d.isoformat()
             _secenek = [v for v in gun_vardiyalari.get(_ds, []) if (a, _ds, v) in x]
-            print(f"  {_ds} ({['Pzt','Sal','Çrş','Prş','Cum','Cmt','Paz'][_d.weekday()]}): "
-                  f"tip={_tip.get(_d, '-')} | açık vardiya {len(_secenek)}: {_secenek[:8]}")
+            print(f"  {_ds} ({_GUN[_d.weekday()]}): tip={_tipd.get(_d, '-')} | "
+                  f"açık vardiya {len(_secenek)}: {_secenek[:8]}")
         _hs = globals().get("_hamile_sut", set())
         print(f"  hamile/süt: {a in _hs}")
         _gc = globals().get("gecmis_calisma", {}).get(a, {})
         if _gc:
             print(f"  Temmuz son vardiyalar: {sorted((str(d), v) for d, v in _gc.items())[-3:]}")
+

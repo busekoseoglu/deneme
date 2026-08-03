@@ -334,25 +334,58 @@ if dbg5_cakisma:
     print("    -> Bu agentlar hak ettiğinden fazla off alacak. KURAL 3'te hard tavan")
     print("       KALDIRILDI, o yüzden infeasible olmaz; fark w31_fazla_off'ta borç olarak durur.")
 
-# ---------- 6) Hamile/süt: W31 Temmuz'unda AÇIKLANAMAYAN hafta içi 'off' ----------
-# *_izinli_flg gününe denk gelen 'off'lar hücre 28'de zaten haftalık izne çevrildi;
-# burada kalanlar gerçek anomalidir (hamile/süt agent hafta içi off alamaz).
-dbg6_hs_off = []
+# ---------- 6) Hamile/süt: W31 Temmuz'unda hafta içi 'off' ----------
+# Süt izni düzeninde agent tam gün çalışıp haftanın bir gününü izinli geçirebilir.
+# df_tam'daki *_izinli_flg bunu söyler. Bayrakla açıklanan günler ANOMALİ DEĞİLDİR.
+_FLG_WD = {"pazartesi_izinli_flg": 0, "sali_izinli_flg": 1, "carsamba_izinli_flg": 2,
+           "persembe_izinli_flg": 3, "cuma_izinli_flg": 4}
+_GUN_TR = ["Pzt", "Sal", "Çrş", "Prş", "Cum", "Cmt", "Paz"]
+
+_flg_wd_map = {}          # agent -> {weekday, ...}
+for _, _r in df_tam.iterrows():
+    _c = str(_r["agent_user_code"]).strip()
+    _w = {wd for f, wd in _FLG_WD.items()
+          if pd.to_numeric(_r.get(f, 0), errors="coerce") == 1}
+    if _w:
+        _flg_wd_map[_c] = _w
+
+dbg6_aciklanan = []        # bayraklı gününe denk geliyor -> normal
+dbg6_bayrakli_farkli = []  # bayrağı var ama başka güne denk gelmiş -> bilgi
+dbg6_hs_off = []           # hiç bayrağı yok -> GERÇEK anomali
+
 for a in sorted(_hamile_sut):
-    hafta_ici_off = sorted(d for d in (gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-                           if d.weekday() < 5)
-    if hafta_ici_off:
-        dbg6_hs_off.append((a, hafta_ici_off))
-print(f"\n[6] Hamile/süt izinli olup W31 Temmuz'unda HAFTA İÇİ 'off' kaydı olan agent: {len(dbg6_hs_off)}")
-for a, gs in dbg6_hs_off[:30]:
-    print(f"    {a}: {[str(g) for g in gs]}")
-_hs_haftalik = sum(len(gecmis_haftalik_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-                   for a in _hamile_sut)
-print(f"    (bilgi: hamile/süt agentlarda *_izinli_flg'e denk gelip haftalık izne "
-      f"çevrilen gün: {_hs_haftalik})")
+    _wd_set = _flg_wd_map.get(a, set())
+    _tum_off = (gecmis_off_gunleri.get(a, set())
+                | gecmis_haftalik_izin_gunleri.get(a, set())) & W31_TEMMUZ_SET
+    _offs = sorted(d for d in _tum_off if d.weekday() < 5)
+    if not _offs:
+        continue
+    _uyan = [d for d in _offs if d.weekday() in _wd_set]
+    _uymayan = [d for d in _offs if d.weekday() not in _wd_set]
+    if _uyan:
+        dbg6_aciklanan.append((a, _uyan, sorted(_wd_set)))
+    if _uymayan:
+        if _wd_set:
+            dbg6_bayrakli_farkli.append((a, _uymayan, sorted(_wd_set)))
+        else:
+            dbg6_hs_off.append((a, _uymayan))
+
+print(f"\n[6] Hamile/süt agentlarda W31 Temmuz hafta içi 'off' incelemesi")
+print(f"    *_izinli_flg bayrağı olan agent (tüm df_tam): {len(_flg_wd_map)}")
+print(f"    [6a] bayrakla AÇIKLANAN (normal, sorun yok)      : {len(dbg6_aciklanan)}")
+for a, gs, wds in dbg6_aciklanan[:10]:
+    print(f"         {a}: off {[_GUN_TR[d.weekday()] for d in gs]} | bayrak {[_GUN_TR[w] for w in wds]}")
+print(f"    [6b] bayrağı var ama BAŞKA güne denk gelmiş      : {len(dbg6_bayrakli_farkli)}")
+for a, gs, wds in dbg6_bayrakli_farkli[:15]:
+    print(f"         {a}: off {[(str(d), _GUN_TR[d.weekday()]) for d in gs]} | bayrak {[_GUN_TR[w] for w in wds]}")
+if dbg6_bayrakli_farkli:
+    print("         -> O hafta istisnai olarak başka gün izin kullanılmış olabilir. Bilgi amaçlı.")
+print(f"    [6c] HİÇ bayrağı yok - açıklanamayan             : {len(dbg6_hs_off)}")
+for a, gs in dbg6_hs_off[:20]:
+    print(f"         {a}: {[(str(d), _GUN_TR[d.weekday()]) for d in gs]}")
 if dbg6_hs_off:
-    print("    -> Bu günler bir bayrakla açıklanamıyor. Hamile/süt agent hafta içi off alamaz;")
-    print("       veriyi kontrol et ya da ilgili *_izinli_flg'i df_tam'da işaretle.")
+    print("         -> Hamile/süt agent hafta içi off alamaz ve bunu açıklayan bir bayrak yok.")
+    print("            df_tam'da ilgili *_izinli_flg eksik olabilir; veriyi kontrol et.")
 
 # ---------- 7) Hamile/süt: Ağustos'ta hafta içi off_t / off_t2 ----------
 dbg7_hs_offt = []
@@ -373,8 +406,10 @@ _toplam = (len(dbg1_kayitsiz) + len(dbg2_eksik) + len(gecmis_taninmayan_vardiya)
            + len(dbg4_fazla) + len(dbg5_cakisma) + len(dbg6_hs_off) + len(dbg7_hs_offt))
 print(f"DEBUG ÖZET -> [1] {len(dbg1_kayitsiz)} | [2] {len(dbg2_eksik)} | [3] {len(gecmis_taninmayan_vardiya)} | "
       f"[4] {len(dbg4_fazla)} | [5] {len(dbg5_cakisma)} | [6] {len(dbg6_hs_off)} | [7] {len(dbg7_hs_offt)}")
-print("Kritik olanlar: [6] ve [7] -> infeasible sebebi. [3] -> veri kaybı. Diğerleri bilgi amaçlı.")
+print("[6] = sadece bayrakla AÇIKLANAMAYAN hamile/süt hafta içi off sayısı (6c).")
+print("Kritik olanlar: [6] ve [7]. [3] -> veri kaybı. Diğerleri bilgi amaçlı.")
 print("=" * 78)
+
 
 
 

@@ -1,4 +1,357 @@
-# %% [HÜCRE 12] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA (TEMMUZ DAHİL) [+IIS teşhisi]
+# ================= 2026-08-03 EKLENEN - KURAL 3 (W31 haftalik off dengesi) =================
+    "HAFTALIK_OFF_KOTASI": 2,      # hafta basina verilmesi gereken off gunu (izin off sayilmaz)
+    "W31_EKSIK_OFF_W": 50000,      # kotadan eksik verilen her off gunu icin ceza (soft)
+    # ==========================================================================================
+
+
+
+# ================= 2026-08-03 EKLENEN - KURAL 3 =================
+HAFTALIK_OFF_KOTASI = CONFIG["HAFTALIK_OFF_KOTASI"]
+W31_EKSIK_OFF_W = CONFIG["W31_EKSIK_OFF_W"]
+# ================================================================
+
+
+# %% [HÜCRE 3B] - TEMMUZ GEÇMİŞİ - VERİ ÇEKME (SQL)
+# NOT: Diğer SQL çekme hücreleriyle birlikte EN ÜSTTE tutulur (df_agents/df_off/df_izin yanı).
+# Sadece sync_engine + pd yeterli; başka bağımlılığı yok.
+#
+# BEKLENEN ŞEMA:
+#   agent_user_code | tarih | vardiya
+#   vardiya kolonu 3 değer alır:
+#       "08:00-17:00" gibi saat aralığı -> o gün ÇALIŞMIŞ (bitiş saati de burada, türetme yok)
+#       "off"                           -> o gün OFF   (haftalık off kotasından düşer)
+#       "izin"                          -> o gün İZİN  (off kotasından DÜŞMEZ)
+
+TEMMUZ_GECMIS_TABLE = "BNS_VP_TEMMUZ_SON_HAFTA_GECMIS"  # <-- KENDİ TABLO ADINLA DEĞİŞTİR
+
+query = f"SELECT * FROM {TEMMUZ_GECMIS_TABLE}"
+chunks = pd.read_sql(query, sync_engine, chunksize=10000)
+df_gecmis = pd.concat(chunks, ignore_index=True)
+df_gecmis.columns = [str(c).strip().lower() for c in df_gecmis.columns]
+
+print(f"df_gecmis: {df_gecmis.shape[0]} satır x {df_gecmis.shape[1]} kolon")
+print(f"kolonlar: {list(df_gecmis.columns)}")
+
+_eksik = [c for c in ["agent_user_code", "tarih", "vardiya"] if c not in df_gecmis.columns]
+if _eksik:
+    print(f"!! Beklenen kolon(lar) yok: {_eksik} - işleme hücresi alternatif adları da dener.")
+
+if "vardiya" in df_gecmis.columns:
+    _vc = df_gecmis["vardiya"].astype(str).str.strip().value_counts()
+    print(f"vardiya kolonu {len(_vc)} farklı değer içeriyor:")
+    print(_vc.head(25).to_string())
+if "tarih" in df_gecmis.columns:
+    _t = pd.to_datetime(df_gecmis["tarih"], errors="coerce")
+    print(f"tarih aralığı: {_t.min()} .. {_t.max()} | boş/bozuk tarih: {int(_t.isna().sum())}")
+if "agent_user_code" in df_gecmis.columns:
+    print(f"benzersiz agent: {df_gecmis['agent_user_code'].astype(str).str.strip().nunique()}")
+
+
+
+
+# %% [HÜCRE] - TEMMUZ GEÇMİŞİ - İŞLEME (HISTORY / CONTEXT)
+# Ağustos 1 Cumartesi -> W31 (27 Tem - 2 Ağu) devamlılığı Temmuz'dan gelir.
+# df_gecmis yukarıda (SQL çekme bölümünde) yüklenmiş olmalı.
+#
+# vardiya kolonu 3 durumu birden taşır:
+#   "08:00-17:00"  -> ÇALIŞMA (başlangıç VE bitiş veriden gelir, 8/9 saat türetmesi YOK)
+#   "off"          -> OFF   (haftalık off kotasından düşer)
+#   "izin"         -> İZİN  (off kotasından DÜŞMEZ - off yerine geçmez)
+#
+# Bu geçmiş SABİTTİR; karar değişkeni oluşturulmaz. Üretilen çıktılar:
+#   gecmis_calisma          agent -> {date: (bas, bit)}  -> 11h kuralı   (HÜCRE 15)
+#   gecmis_calisma_gunleri  agent -> set(date)           -> max-6 kuralı (HÜCRE 12)
+#   gecmis_off_gunleri      agent -> set(date)           -> W31 off kotası (KURAL 3)
+#   gecmis_izin_gunleri     agent -> set(date)           -> kotadan düşmez, ayrı tutulur
+#   gecmis_kapsam           agent -> set(date)           -> kaydı olan günler (veri boşluğu tespiti)
+#   GECMIS_MIN_DATE / GECMIS_MAX_DATE
+
+if "df_gecmis" not in globals():
+    raise SystemExit("df_gecmis yok - önce 'TEMMUZ GEÇMİŞİ - VERİ ÇEKME' hücresini çalıştır.")
+
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+
+import re
+
+
+def _pick_col(cands):
+    for c in cands:
+        if c in df_gecmis.columns:
+            return c
+    return None
+
+
+col_agent   = _pick_col(["agent_user_code"])
+col_date    = _pick_col(["tarih", "date"])
+col_vardiya = _pick_col(["vardiya", "shift", "durum"])
+
+if col_agent is None or col_date is None or col_vardiya is None:
+    raise SystemExit(
+        f"df_gecmis kolonları eksik -> agent:{col_agent} tarih:{col_date} vardiya:{col_vardiya}"
+    )
+
+# Sadece modele giren agentlar (df_tam) tutulur; df_gecmis'te fazladan agent olabilir.
+_model_agents = set(df_tam["agent_user_code"].astype(str).str.strip())
+
+_TR = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
+_ARALIK_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})$")
+_OFF_KELIMELERI = {"off", "tatil", "haftatatili", "hafta_tatili"}
+_IZIN_KELIMELERI = {"izin", "yillikizin", "yillik_izin", "ucretsizizin", "ucretsiz_izin",
+                    "idariizin", "idari_izin", "dogumizni", "dogum_izni", "sutizni",
+                    "sut_izni", "rapor", "istirahat"}
+
+
+def _parse_vardiya(v):
+    """-> ('calisma', '08:00', '17:00') | ('off', None, None) | ('izin', None, None) | (None, ...)"""
+    try:
+        if v is None or pd.isna(v):
+            return (None, None, None)
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if s == "" or s.lower() in ("nan", "nat", "none"):
+        return (None, None, None)
+
+    m = _ARALIK_RE.match(s)
+    if m:
+        bas = f"{int(m.group(1)):02d}:{m.group(2)}"
+        bit = f"{int(m.group(3)):02d}:{m.group(4)}"
+        return ("calisma", bas, bit)
+
+    k = re.sub(r"[\s\-]+", "", s.translate(_TR).lower())
+    if k in _OFF_KELIMELERI:
+        return ("off", None, None)
+    if k in _IZIN_KELIMELERI:
+        return ("izin", None, None)
+    return (None, None, None)
+
+
+gecmis_calisma = {}          # agent -> {date: (bas, bit)}
+gecmis_calisma_gunleri = {}  # agent -> set(date)
+gecmis_off_gunleri = {}      # agent -> set(date)
+gecmis_izin_gunleri = {}     # agent -> set(date)
+gecmis_kapsam = {}           # agent -> set(date)
+
+_stat = {"ham": 0, "agent_disi": 0, "tarih_bozuk": 0, "plan_icinde": 0,
+         "calisma": 0, "off": 0, "izin": 0, "taninmayan": 0}
+gecmis_taninmayan_vardiya = {}   # ham deger -> [(agent, date), ...]
+
+for _, row in df_gecmis.iterrows():
+    _stat["ham"] += 1
+    a = str(row[col_agent]).strip()
+    if a not in _model_agents:
+        _stat["agent_disi"] += 1
+        continue
+    d = pd.to_datetime(row[col_date], errors="coerce")
+    if pd.isna(d):
+        _stat["tarih_bozuk"] += 1
+        continue
+    d = d.date()
+    if d >= PLAN_START_DATE:      # Ağustos ve sonrası history değil
+        _stat["plan_icinde"] += 1
+        continue
+
+    durum, bas, bit = _parse_vardiya(row[col_vardiya])
+
+    if durum == "calisma":
+        gecmis_calisma.setdefault(a, {})[d] = (bas, bit)
+        gecmis_calisma_gunleri.setdefault(a, set()).add(d)
+        gecmis_kapsam.setdefault(a, set()).add(d)
+        _stat["calisma"] += 1
+    elif durum == "off":
+        gecmis_off_gunleri.setdefault(a, set()).add(d)
+        gecmis_kapsam.setdefault(a, set()).add(d)
+        _stat["off"] += 1
+    elif durum == "izin":
+        gecmis_izin_gunleri.setdefault(a, set()).add(d)
+        gecmis_kapsam.setdefault(a, set()).add(d)
+        _stat["izin"] += 1
+    else:
+        # Tanınmayan değer -> KAPSAMA ALINMAZ (veri boşluğu sayılır), debug hücresinde listelenir
+        _stat["taninmayan"] += 1
+        gecmis_taninmayan_vardiya.setdefault(str(row[col_vardiya]).strip(), []).append((a, d))
+
+_tum_gunler = sorted({d for s in gecmis_kapsam.values() for d in s})
+GECMIS_MIN_DATE = _tum_gunler[0] if _tum_gunler else None
+GECMIS_MAX_DATE = _tum_gunler[-1] if _tum_gunler else None
+
+print(f"df_gecmis ham satır: {_stat['ham']} | modeldeki agent (df_tam): {len(_model_agents)}")
+print(f"  kolonlar -> agent:'{col_agent}' tarih:'{col_date}' vardiya:'{col_vardiya}'")
+print(f"  elenen -> agent dışı: {_stat['agent_disi']} | tarih bozuk: {_stat['tarih_bozuk']} | plan içi: {_stat['plan_icinde']}")
+print(f"  çalışma: {_stat['calisma']} | off: {_stat['off']} | izin: {_stat['izin']} | TANINMAYAN: {_stat['taninmayan']}")
+if gecmis_taninmayan_vardiya:
+    print(f"  !! tanınmayan vardiya değerleri: {list(gecmis_taninmayan_vardiya.keys())[:15]}")
+
+print(f"Geçmiş kaydı olan agent: {len(gecmis_kapsam)}")
+if GECMIS_MIN_DATE is not None:
+    print(f"Geçmiş gün aralığı: {GECMIS_MIN_DATE} .. {GECMIS_MAX_DATE} ({len(_tum_gunler)} gün)")
+
+_ornek = sorted({(bas, bit) for g in gecmis_calisma.values() for (bas, bit) in g.values()})
+print(f"Görülen vardiya aralıkları ({len(_ornek)} adet):")
+for _b, _e in _ornek:
+    print(f"  {_b} - {_e}")
+
+
+
+
+# %% [DEBUG] - TEMMUZ GEÇMİŞİ VERİ DENETİMİ (solve'dan ÖNCE bakılacak)
+# Bu hücre modele HİÇBİR kısıt eklemez, sadece rapor basar.
+# 7 kontrol: veri boşlukları + W31 off kotası çakışmaları.
+from datetime import timedelta
+
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+
+HAFTALIK_OFF_KOTASI = CONFIG.get("HAFTALIK_OFF_KOTASI", 2)
+
+_plan_date_set = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER}
+
+# --- W31 = planın ilk gününü içeren ISO hafta ---
+W31_PAZARTESI = PLAN_START_DATE - timedelta(days=PLAN_START_DATE.weekday())
+W31_GUNLER    = [W31_PAZARTESI + timedelta(days=k) for k in range(7)]
+W31_TEMMUZ    = [d for d in W31_GUNLER if d < PLAN_START_DATE]              # 27-31 Tem
+W31_AGUSTOS   = [d for d in W31_GUNLER if d in _plan_date_set]              # 1-2 Ağu
+W31_TEMMUZ_SET = set(W31_TEMMUZ)
+
+_model_agents = sorted(set(df_tam["agent_user_code"].astype(str).str.strip()))
+_hamile_sut = set(
+    df_tam.loc[
+        (pd.to_numeric(df_tam.get("hamile_flg", 0), errors="coerce").fillna(0).astype(int) == 1)
+        | (pd.to_numeric(df_tam.get("sut_izni_flg", 0), errors="coerce").fillna(0).astype(int) == 1),
+        "agent_user_code",
+    ].astype(str).str.strip()
+)
+
+print("=" * 78)
+print(f"W31 = {W31_GUNLER[0]} .. {W31_GUNLER[-1]}   "
+      f"| Temmuz tarafı: {len(W31_TEMMUZ)} gün ({W31_TEMMUZ[0]}..{W31_TEMMUZ[-1]})   "
+      f"| Ağustos tarafı: {[str(d) for d in W31_AGUSTOS]}")
+print(f"Haftalık off kotası: {HAFTALIK_OFF_KOTASI} | df_tam agent: {len(_model_agents)} | hamile/süt: {len(_hamile_sut)}")
+print("=" * 78)
+
+
+def _tip(a, d):
+    return str(tip_map.get(a, {}).get(d, "")).strip().lower()
+
+
+# ---------- 1) df_tam'da olup Temmuz verisinde HİÇ kaydı olmayan agentlar ----------
+dbg1_kayitsiz = [a for a in _model_agents if not gecmis_kapsam.get(a)]
+print(f"\n[1] Temmuz verisinde HİÇ kaydı olmayan agent: {len(dbg1_kayitsiz)} / {len(_model_agents)}")
+if dbg1_kayitsiz:
+    print(f"    {dbg1_kayitsiz[:40]}{' ...' if len(dbg1_kayitsiz) > 40 else ''}")
+    print("    -> Bu agentlar için W31 off kotası kuralı UYGULANMAZ (veri yok, varsayım yapılmaz).")
+    print("       max-6 ve 11h açısından da Temmuz'da hiç çalışmamış gibi davranılır.")
+
+# ---------- 2) Kaydı var ama W31 Temmuz günleri eksik olan agentlar ----------
+dbg2_eksik = {}
+for a in _model_agents:
+    kapsam = gecmis_kapsam.get(a, set())
+    if not kapsam:
+        continue
+    eksik = W31_TEMMUZ_SET - kapsam
+    if eksik:
+        dbg2_eksik[a] = sorted(eksik)
+print(f"\n[2] Kaydı olup W31 Temmuz günü eksik olan agent: {len(dbg2_eksik)}")
+for a, gs in list(dbg2_eksik.items())[:20]:
+    print(f"    {a}: eksik {[str(g) for g in gs]}")
+if dbg2_eksik:
+    print("    -> Eksik gün 'off mu, veri yok mu' ayırt edilemez; off kotası eksik sayılır.")
+
+# ---------- 3) Tanınmayan vardiya değerleri ----------
+print(f"\n[3] Tanınmayan 'vardiya' değeri: {len(gecmis_taninmayan_vardiya)} farklı değer")
+for deger, kayitlar in list(gecmis_taninmayan_vardiya.items())[:20]:
+    ornek = [f"{a}@{d}" for a, d in kayitlar[:3]]
+    print(f"    '{deger}': {len(kayitlar)} satır | örnek: {ornek}")
+if gecmis_taninmayan_vardiya:
+    print("    -> Bu satırlar hiçbir kategoriye girmedi. İşleme hücresindeki")
+    print("       _OFF_KELIMELERI / _IZIN_KELIMELERI listelerine ekle ya da veriyi düzelt.")
+
+# ---------- 4) W31 Temmuz'unda kotadan FAZLA off almış agentlar ----------
+dbg4_fazla = []
+for a in _model_agents:
+    t_off = len(gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+    if t_off > HAFTALIK_OFF_KOTASI:
+        t_izin = len(gecmis_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+        t_cal = len(gecmis_calisma_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+        dbg4_fazla.append((a, t_off, t_izin, t_cal))
+print(f"\n[4] W31 Temmuz'unda {HAFTALIK_OFF_KOTASI}'den FAZLA off almış agent: {len(dbg4_fazla)}")
+for a, o, i, c in dbg4_fazla[:30]:
+    print(f"    {a}: off={o} izin={i} çalışma={c} -> {[str(d) for d in W31_AGUSTOS]} ÇALIŞMA olacak")
+if dbg4_fazla:
+    print("    -> Kotadan fazlası telafi edilmez; Ağustos tarafı tamamen çalışmaya zorlanır.")
+
+# ---------- 5) 1-2 Ağustos çakışması (izin / off_t / off_t2) ----------
+dbg5_cakisma = []
+for a in _model_agents:
+    if not (gecmis_kapsam.get(a, set()) & W31_TEMMUZ_SET):
+        continue                      # veri yok -> kural uygulanmayacak
+    t_off = len(gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+    kalan_off = min(max(HAFTALIK_OFF_KOTASI - t_off, 0), len(W31_AGUSTOS))
+    gereken_calisma = len(W31_AGUSTOS) - kalan_off
+    if gereken_calisma <= 0:
+        continue
+    engelli = [(d, _tip(a, d)) for d in W31_AGUSTOS if _tip(a, d) in ("izin", "off_t", "off_t2")]
+    musait = len(W31_AGUSTOS) - len(engelli)
+    if musait < gereken_calisma:
+        dbg5_cakisma.append((a, t_off, gereken_calisma, musait, engelli))
+print(f"\n[5] 1-2 Ağustos çakışması (çalışması gerekiyor ama izin/off_t/off_t2 var): {len(dbg5_cakisma)}")
+for a, t_off, gerek, musait, engelli in dbg5_cakisma[:30]:
+    print(f"    {a}: temmuz_off={t_off} -> {gerek} gün çalışmalı, müsait {musait} gün | "
+          f"engel: {[(str(d), t) for d, t in engelli]}")
+if dbg5_cakisma:
+    print("    -> Bu agentlarda W31 kotası KAPANAMAZ. Kural hard '<=' yönünde olduğu için")
+    print("       model infeasible OLMAZ, ama agent hak ettiğinden fazla off almış olur.")
+
+# ---------- 6) Hamile/süt: W31 Temmuz'unda hafta içi 'off' (veri anomalisi) ----------
+dbg6_hs_off = []
+for a in sorted(_hamile_sut):
+    hafta_ici_off = sorted(d for d in (gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+                           if d.weekday() < 5)
+    if hafta_ici_off:
+        dbg6_hs_off.append((a, hafta_ici_off))
+print(f"\n[6] Hamile/süt izinli olup W31 Temmuz'unda HAFTA İÇİ 'off' kaydı olan agent: {len(dbg6_hs_off)}")
+for a, gs in dbg6_hs_off[:30]:
+    print(f"    {a}: {[str(g) for g in gs]}")
+if dbg6_hs_off:
+    print("    -> Bu agentlar hafta içi off alamaz. Kural 3 onları 1-2 Ağustos'ta çalışmaya")
+    print("       zorlarken HÜCRE 14 hafta sonu çalışmayı yasaklıyor -> INFEASIBLE riski.")
+    print("       Veriyi düzelt ya da bu günleri 'izin' olarak işaretle.")
+
+# ---------- 7) Hamile/süt: Ağustos'ta hafta içi off_t / off_t2 ----------
+dbg7_hs_offt = []
+_agustos_hafta_ici = sorted(d for d in _plan_date_set if d.weekday() < 5)
+for a in sorted(_hamile_sut):
+    gunler = [(d, _tip(a, d)) for d in _agustos_hafta_ici if _tip(a, d) in ("off_t", "off_t2")]
+    if gunler:
+        dbg7_hs_offt.append((a, gunler))
+print(f"\n[7] Hamile/süt izinli olup Ağustos'ta HAFTA İÇİ off_t/off_t2 talebi olan agent: {len(dbg7_hs_offt)}")
+for a, gunler in dbg7_hs_offt[:30]:
+    print(f"    {a}: {[(str(d), t) for d, t in gunler]}")
+if dbg7_hs_offt:
+    print(f"    -> Bu agentlar hafta sonu çalışamıyor; aylık minimumları {len(_agustos_hafta_ici)} hafta içi")
+    print("       gününe tam oturuyor (pay yok). Hafta içi bir talep-off doğrudan INFEASIBLE yapar.")
+
+print("\n" + "=" * 78)
+_toplam = (len(dbg1_kayitsiz) + len(dbg2_eksik) + len(gecmis_taninmayan_vardiya)
+           + len(dbg4_fazla) + len(dbg5_cakisma) + len(dbg6_hs_off) + len(dbg7_hs_offt))
+print(f"DEBUG ÖZET -> [1] {len(dbg1_kayitsiz)} | [2] {len(dbg2_eksik)} | [3] {len(gecmis_taninmayan_vardiya)} | "
+      f"[4] {len(dbg4_fazla)} | [5] {len(dbg5_cakisma)} | [6] {len(dbg6_hs_off)} | [7] {len(dbg7_hs_offt)}")
+print("Kritik olanlar: [6] ve [7] -> infeasible sebebi. [3] -> veri kaybı. Diğerleri bilgi amaçlı.")
+print("=" * 78)
+
+
+
+
+# %% [HÜCRE 12] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA (TEMMUZ DAHİL)
+# "6 gün üst üste" = "her WINDOW_DAYS(7) günlük pencerede en fazla MAX_CONSECUTIVE(6) çalışma günü".
+# Temmuz sabit olduğu için pencerenin Temmuz kısmı sağ tarafı küçülten bir SABİT'tir.
+#
+# Temmuz günü:
+#   çalışma ("08:00-17:00")  -> penceredeki limiti düşürür
+#   off                      -> çalışma değil, limiti düşürmez
+#   izin                     -> çalışma değil, limiti düşürmez
+#   kayıt yok                -> çalışmamış sayılır (DEBUG [1]/[2] bunları listeler)
 from datetime import timedelta
 
 if "PLAN_START_DATE" not in globals():
@@ -8,13 +361,6 @@ if "PLAN_END_DATE" not in globals():
 
 gecmis_calisma_gunleri = globals().get("gecmis_calisma_gunleri", {})
 
-# MAX6_DIAG=True iken SADECE Temmuz'lu (limit<6) pencereler assumption literal'ine bağlanır.
-# Böylece IIS core'u yalnızca gerçek suçlu pencereleri verir. Teşhis bitince False yap.
-MAX6_DIAG = True
-
-max_consecutive_constraints = 0
-gecmis_pencere_katki = 0
-max6_enforce_map = {}   # lit.Index() -> (agent, window_start, limit, temmuz_gun_pencerede)
 plan_date_set_mc = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER}
 date_to_ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
 
@@ -25,31 +371,264 @@ while d <= son_start:
     window_starts.append(d)
     d += timedelta(days=1)
 
+max_consecutive_constraints = 0
+gecmis_pencere_katki = 0
+atlanan_baglayici_degil = 0
+max6_sifir_limit = []   # (agent, pencere_baslangic, kapatilan_agustos_gun_sayisi)
+
 for a_raw in AGENTS:
     a = str(a_raw).strip()
-    gecmis_gunler_a = gecmis_calisma_gunleri.get(a, set())
+    worked_a = gecmis_calisma_gunleri.get(a, set())
+
     for ws in window_starts:
         window_dates = [ws + timedelta(days=k) for k in range(WINDOW_DAYS)]
+
         aug_vars = [
             work[(a, date_to_ds[dd])]
             for dd in window_dates
             if dd in plan_date_set_mc and (a, date_to_ds[dd]) in work
         ]
         if not aug_vars:
+            continue   # tamamen geçmişte kalan pencere - kısıtlanacak değişken yok
+
+        gecmis_calismis = sum(1 for dd in window_dates if dd < PLAN_START_DATE and dd in worked_a)
+        limit = MAX_CONSECUTIVE_WORK_DAYS - gecmis_calismis
+
+        # Bağlayıcı olmayan pencereyi modele hiç ekleme (limit >= mevcut değişken sayısı).
+        # Semantik olarak fark yok, sadece gereksiz kısıt üretilmiyor.
+        if limit >= len(aug_vars):
+            atlanan_baglayici_degil += 1
             continue
-        gecmis_calismis = sum(1 for dd in window_dates if dd in gecmis_gunler_a)
-        limit = max(0, MAX_CONSECUTIVE_WORK_DAYS - gecmis_calismis)
-        if MAX6_DIAG and gecmis_calismis > 0:
-            # sadece Temmuz'lu pencereler assumption'a bağlanır
-            _lit = model.NewBoolVar(f"max6_{a}_{ws}")
-            model.Add(sum(aug_vars) <= limit).OnlyEnforceIf(_lit)
-            model.AddAssumption(_lit)
-            max6_enforce_map[_lit.Index()] = (a, str(ws), limit, gecmis_calismis)
-        else:
-            model.Add(sum(aug_vars) <= limit)
+        if limit < 0:
+            limit = 0
+
+        model.Add(sum(aug_vars) <= limit)
         max_consecutive_constraints += 1
+
         if gecmis_calismis > 0:
             gecmis_pencere_katki += 1
+        if limit == 0:
+            max6_sifir_limit.append((a, str(ws), len(aug_vars)))
 
-print(f"max 6 gün üst üste çalışma kısıtı: {max_consecutive_constraints} adet  (MAX6_DIAG={MAX6_DIAG})")
-print(f"  - Temmuz'lu (assumption'a bağlı) pencere: {gecmis_pencere_katki} adet")
+print(f"max 6 gün üst üste kısıtı: {max_consecutive_constraints} adet")
+print(f"  - bağlayıcı olmadığı için atlanan pencere : {atlanan_baglayici_degil}")
+print(f"  - Temmuz çalışması limiti düşüren pencere : {gecmis_pencere_katki}")
+print(f"  - limit=0 (Ağustos günleri tamamen kapanan) pencere: {len(max6_sifir_limit)}")
+for r in max6_sifir_limit[:15]:
+    print(f"      agent={r[0]}  pencere={r[1]}  kapanan Ağustos günü={r[2]}")
+
+
+
+# %% [KISIT] - KURAL 3: W31 HAFTALIK OFF DENGESİ (TEMMUZ - AĞUSTOS SINIRI)
+# Sadece W31'e (planın ilk gününü içeren ISO hafta) uygulanır.
+# Ağustos'un TAM haftalarına uygulanmaz: agent bir hafta 3 off talep edip başka haftada
+# telafi edebilir; oradaki bağlayıcı kısıt HÜCRE 36'daki aylık minimumdur.
+# W31 istisna çünkü Temmuz kapandı, telafi edilecek yer kalmadı.
+#
+#   temmuz_off      = W31'in Temmuz günlerinde 'off' olan gün sayısı   (izin SAYILMAZ)
+#   kalan_off       = clamp(HAFTALIK_OFF_KOTASI - temmuz_off, 0, Ağustos gün sayısı)
+#
+#   HARD: sum(gercek_off[1-2 Ağu]) <= kalan_off
+#         "Borçlu olduğundan fazla off veremezsin."
+#         Temmuz'da 2 off aldıysa kalan_off=0 -> 1-2 Ağustos ÇALIŞMA.
+#   SOFT: eksik kalan off cezalandırılır (W31_EKSIK_OFF_W).
+#         Mesai yazılabilsin diye hard değil - off mesaiye dönüşebiliyor, parası ödeniyor.
+#
+# gercek_off (HÜCRE 40'ta tanımlı) semantiği tam olarak istediğimiz gibi:
+#   izin günü        -> gercek_off = 0  (izin off yerine geçmez)
+#   off_t / off_t2   -> gercek_off = 1  (talep edilen off, off sayılır)
+#   normal gün       -> gercek_off = 1 - work
+from datetime import timedelta
+
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+
+HAFTALIK_OFF_KOTASI = CONFIG.get("HAFTALIK_OFF_KOTASI", 2)
+W31_EKSIK_OFF_W = CONFIG.get("W31_EKSIK_OFF_W", 50000)
+
+_w31_pzt = PLAN_START_DATE - timedelta(days=PLAN_START_DATE.weekday())
+W31_GUNLER  = [_w31_pzt + timedelta(days=k) for k in range(7)]
+W31_TEMMUZ_SET = {d for d in W31_GUNLER if d < PLAN_START_DATE}
+
+_d2ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
+W31_AGUSTOS_DS = [_d2ds[d] for d in W31_GUNLER if d in _d2ds]
+
+w31_eksik_off = {}          # agent -> IntVar (kotadan eksik verilen off)
+w31_kisit_sayisi = 0
+w31_atlanan_veri_yok = 0
+w31_zorunlu_calisma = []    # (agent, temmuz_off, gereken_calisma_gunu)
+w31_debug_rows = []
+
+if not W31_AGUSTOS_DS:
+    print("KURAL 3 atlandı: W31'in Ağustos tarafında plan günü yok.")
+else:
+    for a_raw in AGENTS:
+        a = str(a_raw).strip()
+
+        # Temmuz verisi olmayan agent için varsayım yapmıyoruz (DEBUG [1] listeler).
+        if not (gecmis_kapsam.get(a, set()) & W31_TEMMUZ_SET):
+            w31_atlanan_veri_yok += 1
+            continue
+
+        temmuz_off  = len(gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+        temmuz_izin = len(gecmis_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+        temmuz_cal  = len(gecmis_calisma_gunleri.get(a, set()) & W31_TEMMUZ_SET)
+
+        kalan_off = min(max(HAFTALIK_OFF_KOTASI - temmuz_off, 0), len(W31_AGUSTOS_DS))
+        gereken_calisma = len(W31_AGUSTOS_DS) - kalan_off
+
+        off_vars = [gercek_off[(a, ds)] for ds in W31_AGUSTOS_DS if (a, ds) in gercek_off]
+        if not off_vars:
+            continue
+
+        # HARD: hak ettiğinden fazla off verilemez
+        model.Add(sum(off_vars) <= kalan_off)
+        w31_kisit_sayisi += 1
+        if gereken_calisma > 0:
+            w31_zorunlu_calisma.append((a, temmuz_off, gereken_calisma))
+
+        # SOFT: eksik verilen off cezalandırılır (mesai serbest kalsın diye)
+        if kalan_off > 0:
+            _eksik = model.NewIntVar(0, kalan_off, f"w31_eksik_off_{a}")
+            model.Add(_eksik >= kalan_off - sum(off_vars))
+            w31_eksik_off[a] = _eksik
+
+        w31_debug_rows.append({
+            "agent_user_code": a,
+            "temmuz_calisma": temmuz_cal,
+            "temmuz_off": temmuz_off,
+            "temmuz_izin": temmuz_izin,
+            "kalan_off": kalan_off,
+            "agustos_gereken_calisma": gereken_calisma,
+        })
+
+    w31_debug_df = pd.DataFrame(w31_debug_rows)
+
+    print(f"KURAL 3 - W31 haftalık off dengesi ({W31_GUNLER[0]} .. {W31_GUNLER[-1]})")
+    print(f"  Ağustos tarafı: {W31_AGUSTOS_DS} | off kotası: {HAFTALIK_OFF_KOTASI}")
+    print(f"  hard kısıt kurulan agent : {w31_kisit_sayisi}")
+    print(f"  Temmuz verisi olmadığı için atlanan agent: {w31_atlanan_veri_yok}")
+    print(f"  soft ceza değişkeni (eksik off): {len(w31_eksik_off)} | W31_EKSIK_OFF_W = {W31_EKSIK_OFF_W}")
+    print(f"  1-2 Ağustos'ta ÇALIŞMAYA zorlanan agent: {len(w31_zorunlu_calisma)}")
+    if len(w31_debug_df):
+        print("\n  kalan_off dağılımı:")
+        print(w31_debug_df["kalan_off"].value_counts().sort_index().to_string())
+        print("\n  Örnek (çalışmaya zorlananlar):")
+        for a, t_off, gerek in w31_zorunlu_calisma[:15]:
+            print(f"    {a}: temmuz_off={t_off} -> {gerek} gün çalışacak")
+
+
+
+# %% [HÜCRE 15] - İKİ VARDİYA ARASI MİNİMUM 11 SAAT DİNLENME (TEMMUZ GEÇMİŞİ DAHİL)
+# Ağustos içi   : pairwise yasak -> x[sh1] + x[sh2] <= 1
+# Temmuz köprüsü: geçmiş vardiya SABİT=1 olduğu için doğrudan x == 0 (hard)
+#
+# Temmuz bitiş saati artık VERİDEN geliyor ("08:00-17:00" -> bitiş 17:00).
+# 8/9 saat türetme kuralı KALDIRILDI.
+# Temmuz'da off/izin olan gün vardiya üretmez -> 11h hesabına hiç girmez.
+
+def make_shift_datetime(ds, baslangic, bitis):
+    start_dt = pd.to_datetime(f"{ds} {baslangic}")
+    end_dt = pd.to_datetime(f"{ds} {bitis}")
+    if end_dt <= start_dt:
+        end_dt = end_dt + pd.Timedelta(days=1)
+    return start_dt, end_dt
+
+shift_dt_map = {}
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        baslangic, bitis = saat[(ds, v)]
+        start_dt, end_dt = make_shift_datetime(ds, baslangic, bitis)
+        shift_dt_map[(ds, v)] = {"start_dt": start_dt, "end_dt": end_dt}
+
+# --- Ağustos içi (mevcut mantık, değişmedi) ---
+min_rest_constraints = 0
+for a in AGENTS:
+    agent_shift_options = []
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+            agent_shift_options.append({
+                "ds": ds, "v": v,
+                "start_dt": shift_dt_map[(ds, v)]["start_dt"],
+                "end_dt": shift_dt_map[(ds, v)]["end_dt"],
+            })
+    agent_shift_options = sorted(agent_shift_options, key=lambda r: r["start_dt"])
+    for i in range(len(agent_shift_options)):
+        sh1 = agent_shift_options[i]
+        for j in range(i + 1, len(agent_shift_options)):
+            sh2 = agent_shift_options[j]
+            if sh2["start_dt"] <= sh1["end_dt"]:
+                rest_minutes = -1
+            else:
+                rest_minutes = int((sh2["start_dt"] - sh1["end_dt"]).total_seconds() / 60)
+            if rest_minutes < MIN_REST_MINUTES:
+                model.Add(x[(a, sh1["ds"], sh1["v"])] + x[(a, sh2["ds"], sh2["v"])] <= 1)
+                min_rest_constraints += 1
+            else:
+                break
+
+# --- Temmuz geçmişi (SABİT önceki vardiya) ---
+# rest = a_start - g_end olduğundan, EN GEÇ biten geçmiş vardiya her Ağustos vardiyası için
+# en küçük dinlenmeyi verir. Tüm geçmiş vardiyaları taramak yerine max(g_end) yeterli.
+gecmis_calisma = globals().get("gecmis_calisma", {})
+gecmis_min_rest_constraints = 0
+gecmis_11h_bloklu_agent = {}
+
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    gecmis_shiftler = gecmis_calisma.get(a, {})
+    if not gecmis_shiftler:
+        continue
+
+    g_end_max = None
+    for gtarih, (gbas, gbit) in gecmis_shiftler.items():
+        if gbas is None or gbit is None:
+            continue
+        gds = pd.to_datetime(gtarih).strftime("%Y-%m-%d")
+        _gs, g_end = make_shift_datetime(gds, gbas, gbit)
+        if g_end_max is None or g_end > g_end_max:
+            g_end_max = g_end
+    if g_end_max is None:
+        continue
+
+    esik = g_end_max + pd.Timedelta(minutes=MIN_REST_MINUTES)   # bundan önce başlayan yasak
+
+    for ds in PLAN_GUNLER:
+        if pd.to_datetime(ds) >= esik:
+            continue          # gün tamamen eşiğin sağında -> güvenli
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+            if shift_dt_map[(ds, v)]["start_dt"] < esik:
+                model.Add(x[(a, ds, v)] == 0)
+                gecmis_min_rest_constraints += 1
+                gecmis_11h_bloklu_agent.setdefault(a, []).append((ds, v))
+
+print(f"min 11 saat dinlenme kısıtı (Ağustos içi): {min_rest_constraints} adet")
+print(f"min 11 saat dinlenme kısıtı (Temmuz geçmişi): {gecmis_min_rest_constraints} adet")
+print(f"  - Temmuz yüzünden vardiyası bloklanan agent: {len(gecmis_11h_bloklu_agent)}")
+
+# Bir Ağustos gününde TÜM vardiyaları bloklanan agent = o gün zorunlu off
+_tam_bloklu = []
+for a, bloklar in gecmis_11h_bloklu_agent.items():
+    _gun_sayaci = {}
+    for ds, v in bloklar:
+        _gun_sayaci[ds] = _gun_sayaci.get(ds, 0) + 1
+    for ds, adet in _gun_sayaci.items():
+        _toplam = sum(1 for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x)
+        if _toplam > 0 and adet >= _toplam:
+            _tam_bloklu.append((a, ds, adet))
+print(f"  - Temmuz yüzünden bir Ağustos gününde HİÇ vardiya alamayan (zorunlu off): {len(_tam_bloklu)}")
+for r in _tam_bloklu[:15]:
+    print(f"      agent={r[0]}  gün={r[1]}  bloklanan vardiya={r[2]}")
+
+
+
+
+# KURAL 3 - W31 kotasindan eksik verilen off cezasi
+if "w31_eksik_off" in globals():
+    for a, var in w31_eksik_off.items():
+        objective_terms.append(W31_EKSIK_OFF_W * var)
+print("W31_EKSIK_OFF_W:", W31_EKSIK_OFF_W)

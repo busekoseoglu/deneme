@@ -1,17 +1,25 @@
-# %% [TEŞHİS] - TEMMUZ vs AYLIK MİNİMUM (agent bazında, ana modele dokunmaz)
+# %% [TEŞHİS 2] - ÇİFT-OFF + 11h + MAX-6(TEMMUZ) + MİN (agent bazında)
 from ortools.sat.python import cp_model as _cm
 from datetime import timedelta as _td
 
 assert gecmis_calisma_gunleri, "gecmis_calisma_gunleri BOŞ - İŞLEME'yi Temmuz yüklü çalıştır, test hücresini kaldır."
 
+def _sdt(dcode, bas, bit):
+    base = pd.to_datetime(dcode).strftime('%Y-%m-%d')
+    s = pd.to_datetime(f"{base} {bas}"); e = pd.to_datetime(f"{base} {bit}")
+    if e <= s: e += pd.Timedelta(days=1)
+    return s, e
+
 _plan = sorted({pd.to_datetime(ds).date() for ds in PLAN_GUNLER})
+_d2ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
 _resmi = globals().get("resmi_tatil_date_set", set()) or {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
 _is_dates = {d for d in _plan if d.weekday() < 5 and d not in _resmi}
 _aylik_is = len(_is_dates)
 _hamile_sut = set(df_tam.loc[
-    (pd.to_numeric(df_tam["hamile_flg"], errors="coerce").fillna(0).astype(int) == 1) |
+    (pd.to_numeric(df_tam["hamile_flg"], errors="coerce").fillna(0).
     (pd.to_numeric(df_tam["sut_izni_flg"], errors="coerce").fillna(0).astype(int) == 1),
     "agent_user_code"].astype(str).str.strip())
+_wp = [(pd.to_datetime(s).date(), pd.to_datetime(p).date()) for (s, p) in weekend_pairs]
 
 _sorunlu = []
 for a_raw in AGENTS:
@@ -22,38 +30,56 @@ for a_raw in AGENTS:
     if baz <= 0:
         continue
     jgun = gecmis_calisma_gunleri.get(a, set())
+    jends = [_sdt(gd.isoformat(), gb, gbit)[1] for gd, (gb, gbit) in gecmis_calisma.get(a, {}).items() if gbit is not None]
 
-    m = _cm.CpModel()
-    w = {}
-    yasak = 0
+    blocked = set()
+    if jends:
+        for d in _plan:
+            ds = _d2ds[d]; sh = gun_vardiyalari.get(ds, [])
+            if not sh: continue
+            if all(any((_sdt(ds, *saat[(ds, v)])[0] <= E) or
+                       ((_sdt(ds, *saat[(ds, v)])[0] - E).total_seco
+                       for E in jends) for v in sh):
+                blocked.add(d)
+
+    m = _cm.CpModel(); w = {}
     for d in _plan:
         tip = str(tipd.get(d, "")).strip().lower()
-        hard_off = tip in ("izin", "off_t", "off_t2")
-        hs_ban = (a in _hamile_sut) and (d.weekday() in (5, 6))
-        if hard_off or hs_ban or d in _resmi:
-            w[d] = None; yasak += 1
+        if tip in ("izin", "off_t", "off_t2") or (a in _hamile_sut and d.weekday() in (5, 6)) or d in _resmi or d in blocked:
+            w[d] = None
         else:
             w[d] = m.NewBoolVar(f"w_{d}")
 
-    ws = _plan[0] - _td(days=WINDOW_DAYS - 1)
-    son = _plan[-1] - _td(days=WINDOW_DAYS - 1)
-    d = ws
+    ws = _plan[0] - _td(days=WINDOW_DAYS-1); son = _plan[-1] - _td(days=WINDOW_DAYS-1); d = ws
     while d <= son:
         wd = [d + _td(days=k) for k in range(WINDOW_DAYS)]
-        avars = [w[x] for x in wd if x in w and w[x] is not None]
-        if avars:
+        av = [w[x] for x in wd if x in w and w[x] is not None]
+        if av:
             jc = sum(1 for x in wd if x in jgun)
-            m.Add(sum(avars) <= max(0, MAX_CONSECUTIVE_WORK_DAYS - jc))
+            m.Add(sum(av) <= max(0, MAX_CONSECUTIVE_WORK_DAYS - jc))
         d += _td(days=1)
 
-    calis = [w[d] for d in _plan if w[d] is not None and d not in _resmi]
-    m.Maximize(sum(calis))
-    sol = _cm.CpSolver(); sol.Solve(m)
-    max_work = int(sol.ObjectiveValue())
-    if max_work < baz:
-        _sorunlu.append({"agent": a, "baz_gereken": baz, "max_calisabilir": max_work,
-                         "eksik": baz - max_work, "temmuz_gun": len(jgun), "yasak_gun": yasak})
+    pbs = []
+    for (sd, su) in _wp:
+        if str(tipd.get(sd, "")).strip().lower() == "izin" or str(ti() == "izin":
+            continue
+        p = m.NewBoolVar(f"p_{sd}")
+        for dd in (sd, su):
+            if dd in w and w[dd] is not None:
+                m.Add(w[dd] == 0).OnlyEnforceIf(p)
+        pbs.append(p)
+    tum_izinli = bool(_plan) and all(str(tipd.get(d, "")).strip().lower() == "izin" for d in _plan)
+    if pbs and not tum_izinli:
+        m.Add(sum(pbs) >= 1)
 
-print(f"Aylık-min'i Temmuz altında SAĞLAYAMAYAN agent: {len(_sorunlu)}")
+    calis = [w[d] for d in _plan if w[d] is not None and d not in _resmi]
+    m.Add(sum(calis) >= baz)
+
+    st = _cm.CpSolver().Solve(m)
+    if st not in (_cm.OPTIMAL, _cm.FEASIBLE):
+        _sorunlu.append({"agent": a, "baz": baz, "temmuz_gun": len(jgun),
+                         "11h_bloke_gun": sorted(str(x) for x in blocked), "hafta_sonu_cift": len(pbs)})
+
+print(f"ÇİFT-OFF+11h+MAX6(Temmuz)+MİN altında ÇÖZÜLEMEYEN agent: {len(_sorunlu)}")
 if _sorunlu:
-    display(pd.DataFrame(_sorunlu).sort_values("eksik", ascending=False))
+    display(pd.DataFrame(_sorunlu))            

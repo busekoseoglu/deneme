@@ -772,3 +772,111 @@ for a, gunler in dbg6_hs_off[:15]:
     print(f"  Temmuz off    : {[(str(d), _GUN[d.weekday()]) for d in gunler]}")
 
 print("W31_EKSIK_OFF_W:", W31_EKSIK_OFF_W)
+
+
+
+
+# %% [TEŞHİS] - INFEASIBLE KISIT NUMARASINDAN SUÇLUYU BUL
+# CP-SAT logunda şunu görüyorsan:
+#   "Problem proven infeasible during initial copy of constraint #55024"
+# numarayı aşağıya gir. Model tamamen kurulduktan SONRA (OBJECTIVE dahil) çalıştır.
+# Solve etmeye GEREK YOK - bu hücre sadece model proto'sunu okur.
+
+INFEASIBLE_CONSTRAINT_NO = 55024
+
+proto = model.Proto()
+print(f"model: {len(proto.variables)} değişken | {len(proto.constraints)} kısıt")
+
+if INFEASIBLE_CONSTRAINT_NO >= len(proto.constraints):
+    raise SystemExit(f"Kısıt no {INFEASIBLE_CONSTRAINT_NO} yok (model {len(proto.constraints)} kısıt içeriyor). "
+                     "Modeli baştan kurup log'daki numarayı tekrar al.")
+
+
+def _ad(idx):
+    """Değişken index -> okunabilir ad (negatif index = literalin değili)."""
+    if idx < 0:
+        return f"NOT({_ad(-idx - 1)})"
+    nm = proto.variables[idx].name or f"var{idx}"
+    return f"{nm}#{idx}"
+
+
+def _domain(idx):
+    return list(proto.variables[idx].domain)
+
+
+c = proto.constraints[INFEASIBLE_CONSTRAINT_NO]
+tur = c.WhichOneof("constraint")
+print(f"\n{'=' * 78}\nKISIT #{INFEASIBLE_CONSTRAINT_NO}  (tip: {tur})\n{'=' * 78}")
+if c.enforcement_literal:
+    print("enforcement:", [_ad(l) for l in c.enforcement_literal])
+
+if tur != "linear":
+    print(c)
+    raise SystemExit("Linear değil - yukarıdaki ham çıktıya bak.")
+
+hedef = list(c.linear.vars)
+print("değişkenler :", [_ad(v) for v in hedef])
+print("katsayılar  :", list(c.linear.coeffs))
+print("domain      :", list(c.linear.domain), "  (yani ifadenin alabileceği değer aralığı)")
+print("\nDeğişkenlerin MODELDEKİ tanım aralıkları:")
+for v in hedef:
+    print(f"  {_ad(v)} -> {_domain(v)}")
+
+# ---- bu değişkenlere dokunan tüm kısıtları tara ----
+hedef_set = set(hedef)
+sabitleyen = []      # tek degiskenli, 1'e (ya da sabit bir degere) kilitleyenler
+digerleri = []
+
+for k, cc in enumerate(proto.constraints):
+    if cc.WhichOneof("constraint") != "linear":
+        continue
+    vs = list(cc.linear.vars)
+    if not (hedef_set & set(vs)):
+        continue
+    kayit = (k, [_ad(v) for v in vs], list(cc.linear.coeffs), list(cc.linear.domain),
+             [_ad(l) for l in cc.enforcement_literal])
+    if len(vs) == 1 and len(cc.linear.domain) == 2 and cc.linear.domain[0] == cc.linear.domain[1]:
+        sabitleyen.append(kayit)
+    else:
+        digerleri.append(kayit)
+
+print(f"\n{'=' * 78}")
+print(f"Bu değişkenleri SABİT bir değere kilitleyen kısıt: {len(sabitleyen)}")
+print(f"{'=' * 78}")
+for k, vs, co, dom, enf in sabitleyen:
+    print(f"  #{k}: {vs} * {co} == {dom[0]}" + (f"  [enforce: {enf}]" if enf else ""))
+if sabitleyen:
+    print("\n  ^^^ SUÇLU BUNLAR. Bu kısıtları hangi hücre kuruyorsa çakışma orada.")
+    print("      Değişken adı 'x_<agent>_<yyyymmdd>_<vardiya>' formatında.")
+
+print(f"\nDiğer ilgili kısıtlar: {len(digerleri)} (ilk 25)")
+for k, vs, co, dom, enf in digerleri[:25]:
+    print(f"  #{k}: {vs} * {co} in {dom}" + (f"  [enforce: {enf}]" if enf else ""))
+
+# ---- ilgili agent/gün için tam tablo ----
+import re as _re
+_agentler, _gunler_t = set(), set()
+for v in hedef:
+    m = _re.match(r"^(?:x|work)_(.+?)_(\d{8})(?:_(.+))?$", proto.variables[v].name or "")
+    if m:
+        _agentler.add(m.group(1))
+        _gunler_t.add(m.group(2))
+
+if _agentler:
+    print(f"\n{'=' * 78}")
+    print(f"İLGİLİ AGENT(LER): {sorted(_agentler)} | GÜN(LER): {sorted(_gunler_t)}")
+    print(f"{'=' * 78}")
+    for a in sorted(_agentler):
+        print(f"\n[{a}]")
+        _tip = tip_map.get(a, {})
+        for g in sorted(_gunler_t):
+            _d = pd.to_datetime(g).date()
+            _ds = _d.isoformat()
+            _secenek = [v for v in gun_vardiyalari.get(_ds, []) if (a, _ds, v) in x]
+            print(f"  {_ds} ({['Pzt','Sal','Çrş','Prş','Cum','Cmt','Paz'][_d.weekday()]}): "
+                  f"tip={_tip.get(_d, '-')} | açık vardiya {len(_secenek)}: {_secenek[:8]}")
+        _hs = globals().get("_hamile_sut", set())
+        print(f"  hamile/süt: {a in _hs}")
+        _gc = globals().get("gecmis_calisma", {}).get(a, {})
+        if _gc:
+            print(f"  Temmuz son vardiyalar: {sorted((str(d), v) for d, v in _gc.items())[-3:]}")

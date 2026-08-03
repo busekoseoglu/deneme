@@ -1,8 +1,10 @@
-# %% [TEŞHİS 2] - ÇİFT-OFF + 11h + MAX-6(TEMMUZ) + MİN (agent bazında, paste-safe)
+# %% [TEŞHİS 2] - ÇİFT-OFF + 11h + MAX-6(TEMMUZ) + MİN (agent bazında)
+# Temmuz YÜKLÜ olmalı (İŞLEME çalışmış, gecmis boşaltma test hücresi ÇALIŞMAMIŞ).
+# Ana modele dokunmaz; her agent için mini feasibility kurar.
 from ortools.sat.python import cp_model as _cm
 from datetime import timedelta as _td
 
-assert gecmis_calisma_gunleri, "gecmis bos - Temmuz yuklu calistir (test hucresini kaldir)"
+assert gecmis_calisma_gunleri, "gecmis bos - Temmuz yuklu calistir (test hucresini calistirma)"
 
 def _sdt(dcode, bas, bit):
     base = pd.to_datetime(dcode).strftime("%Y-%m-%d")
@@ -23,10 +25,10 @@ _aylik_is = len(_is_dates)
 _hamile_sut = globals().get("hamile_sut_agents")
 if _hamile_sut is None:
     _hf = pd.to_numeric(df_tam["hamile_flg"], errors="coerce").fillna(0).astype(int)
-    _sf = pd.to_numeric(df_tam["sut_izni_flg"], errors="coerce").fil
+    _sf = pd.to_numeric(df_tam["sut_izni_flg"], errors="coerce").fillna(0).astype(int)
     _hamile_sut = set(df_tam.loc[(_hf == 1) | (_sf == 1), "agent_user_code"].astype(str).str.strip())
 
-_wp = [(pd.to_datetime(s).date(), pd.to_datetime(p).date()) for (s,
+_wp = [(pd.to_datetime(s).date(), pd.to_datetime(p).date()) for (s, p) in weekend_pairs]
 
 def _gun_11h_bloke(ds, jends):
     sh = gun_vardiyalari.get(ds, [])
@@ -49,7 +51,7 @@ _sorunlu = []
 for a_raw in AGENTS:
     a = str(a_raw).strip()
     tipd = tip_map.get(a, {})
-    izin_is = len({d for d, t in tipd.items() if str(t).strip().lowetes})
+    izin_is = len({d for d, t in tipd.items() if str(t).strip().lower() == "izin" and d in _is_dates})
     baz = _aylik_is - izin_is
     if baz <= 0:
         continue
@@ -81,7 +83,7 @@ for a_raw in AGENTS:
     d = ws
     while d <= son:
         wd = [d + _td(days=k) for k in range(WINDOW_DAYS)]
-        av = [w[xx] for xx in wd if (xx in w) and (w[xx] is not None
+        av = [w[xx] for xx in wd if (xx in w) and (w[xx] is not None)]
         if av:
             jc = sum(1 for xx in wd if xx in jgun)
             m.Add(sum(av) <= max(0, MAX_CONSECUTIVE_WORK_DAYS - jc))
@@ -98,7 +100,7 @@ for a_raw in AGENTS:
             if (dd in w) and (w[dd] is not None):
                 m.Add(w[dd] == 0).OnlyEnforceIf(p)
         pbs.append(p)
-    tum_izinli = bool(_plan) and all(str(tipd.get(d, "")).strip().lon)
+    tum_izinli = bool(_plan) and all(str(tipd.get(d, "")).strip().lower() == "izin" for d in _plan)
     if pbs and not tum_izinli:
         m.Add(sum(pbs) >= 1)
 
@@ -107,7 +109,7 @@ for a_raw in AGENTS:
 
     st = _cm.CpSolver().Solve(m)
     if st not in (_cm.OPTIMAL, _cm.FEASIBLE):
-        _sorunlu.append({"agent": a, "baz": baz, "temmuz_gun": len(j
+        _sorunlu.append({"agent": a, "baz": baz, "temmuz_gun": len(jgun),
                          "11h_bloke": len(blocked), "hafta_sonu_cift": len(pbs)})
 
 print("COZULEMEYEN agent:", len(_sorunlu))

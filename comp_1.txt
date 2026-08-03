@@ -1,17 +1,84 @@
-# %% [İZOLASYON] - Temmuz kısıtlarını tek tek aç/kapa (infeasible teşhisi)
-# Bu hücre HÜCRE 12 (max-6) ve HÜCRE 15 (11h) HEMEN ÖNCESİNDE durmalı.
-# Bir değer seç -> HÜCRE 9'dan (CP-SAT model) itibaren aşağı Run-All yap -> solve sonucuna bak.
-#   "ikisi"   : max-6 + 11h ikisi de Temmuz'lu   (baseline, infeasible bekleniyor)
-#   "max6"    : sadece max-6 Temmuz'lu, 11h kapalı
-#   "11h"     : sadece 11h Temmuz'lu, max-6 kapalı
-#   "hicbiri" : ikisi de kapalı                  (feasible bekleniyor = Temmuz'suz)
-IZOLE = "ikisi"
+# %% [HÜCRE 12] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA (TEMMUZ DAHİL) [+IIS teşhisi]
+from datetime import timedelta
 
-if IZOLE in ("max6", "hicbiri"):
-    gecmis_calisma = {}           # 11h Temmuz KAPALI
-if IZOLE in ("11h", "hicbiri"):
-    gecmis_calisma_gunleri = {}   # max-6 Temmuz KAPALI
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+if "PLAN_END_DATE" not in globals():
+    PLAN_END_DATE = max(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
 
-print("IZOLE =", IZOLE,
-      "| 11h(gecmis_calisma) agent:", len(gecmis_calisma),
-      "| max-6(gunleri) agent:", len(gecmis_calisma_gunleri))
+gecmis_calisma_gunleri = globals().get("gecmis_calisma_gunleri", {})
+
+# MAX6_DIAG=True iken her pencere bir assumption literal'i ile bağlanır (IIS için).
+# Teşhis bitince False yap; normal/hızlı çözümde assumption yükü olmaz.
+MAX6_DIAG = True
+
+max_consecutive_constraints = 0
+gecmis_pencere_katki = 0
+max6_enforce_map = {}   # lit.Index() -> (agent, window_start, limit, temmuz_gun_pencerede)
+plan_date_set_mc = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER}
+date_to_ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
+
+window_starts = []
+d = PLAN_START_DATE - timedelta(days=WINDOW_DAYS - 1)
+son_start = PLAN_END_DATE - timedelta(days=WINDOW_DAYS - 1)
+while d <= son_start:
+    window_starts.append(d)
+    d += timedelta(days=1)
+
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    gecmis_gunler_a = gecmis_calisma_gunleri.get(a, set())
+    for ws in window_starts:
+        window_dates = [ws + timedelta(days=k) for k in range(WINDOW_DAYS)]
+        aug_vars = [
+            work[(a, date_to_ds[dd])]
+            for dd in window_dates
+            if dd in plan_date_set_mc and (a, date_to_ds[dd]) in work
+        ]
+        if not aug_vars:
+            continue
+        gecmis_calismis = sum(1 for dd in window_dates if dd in gecmis_gunler_a)
+        limit = max(0, MAX_CONSECUTIVE_WORK_DAYS - gecmis_calismis)
+        if MAX6_DIAG:
+            _lit = model.NewBoolVar(f"max6_{a}_{ws}")
+            model.Add(sum(aug_vars) <= limit).OnlyEnforceIf(_lit)
+            model.AddAssumption(_lit)
+            max6_enforce_map[_lit.Index()] = (a, str(ws), limit, gecmis_calismis)
+        else:
+            model.Add(sum(aug_vars) <= limit)
+        max_consecutive_constraints += 1
+        if gecmis_calismis > 0:
+            gecmis_pencere_katki += 1
+
+print(f"max 6 gün üst üste çalışma kısıtı: {max_consecutive_constraints} adet  (MAX6_DIAG={MAX6_DIAG})")
+print(f"  - Temmuz geçmişinden etkilenen pencere: {gecmis_pencere_katki} adet")
+
+
+
+# %% [IIS TEŞHİS] - max-6 çelişkisini bul (objective'den SONRA çalıştır)
+# MAX6_DIAG=True ve IZOLE="max6" (veya "ikisi") ile modeli baştan kurup buraya gel.
+_s = cp_model.CpSolver()
+_s.parameters.max_time_in_seconds = 120
+_st = _s.Solve(model)
+print("Durum:", _s.StatusName(_st))
+if _st == cp_model.INFEASIBLE:
+    core = _s.SufficientAssumptionsForInfeasibility()
+    print("Çelişen (yeterli) max-6 pencere sayısı:", len(core))
+    rows = []
+    for idx in core:
+        info = max6_enforce_map.get(idx)
+        if info is None:
+            rows.append({"lit_index": idx, "not": "harita_disi"})
+        else:
+            a, ws, lim, jg = info
+            rows.append({"agent": a, "window_start": ws, "limit": lim, "temmuz_gun_pencerede": jg})
+    iis_df = pd.DataFrame(rows)
+    display(iis_df)
+    if "agent" in iis_df.columns:
+        print("IIS'teki farklı agent sayısı:", iis_df["agent"].nunique())
+        print("Agent bazında pencere:")
+        display(iis_df.groupby("agent").size().reset_index(name="pencere_sayisi").sort_values("pencere_sayisi", ascending=False))
+elif _st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    print("Feasible - bu ayarda çelişki yok. IZOLE/MAX6_DIAG değerlerini kontrol et.")
+else:
+    print("Belirsiz durum:", _s.StatusName(_st))

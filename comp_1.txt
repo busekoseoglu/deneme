@@ -8,8 +8,8 @@ if "PLAN_END_DATE" not in globals():
 
 gecmis_calisma_gunleri = globals().get("gecmis_calisma_gunleri", {})
 
-# MAX6_DIAG=True iken her pencere bir assumption literal'i ile bağlanır (IIS için).
-# Teşhis bitince False yap; normal/hızlı çözümde assumption yükü olmaz.
+# MAX6_DIAG=True iken SADECE Temmuz'lu (limit<6) pencereler assumption literal'ine bağlanır.
+# Böylece IIS core'u yalnızca gerçek suçlu pencereleri verir. Teşhis bitince False yap.
 MAX6_DIAG = True
 
 max_consecutive_constraints = 0
@@ -39,7 +39,8 @@ for a_raw in AGENTS:
             continue
         gecmis_calismis = sum(1 for dd in window_dates if dd in gecmis_gunler_a)
         limit = max(0, MAX_CONSECUTIVE_WORK_DAYS - gecmis_calismis)
-        if MAX6_DIAG:
+        if MAX6_DIAG and gecmis_calismis > 0:
+            # sadece Temmuz'lu pencereler assumption'a bağlanır
             _lit = model.NewBoolVar(f"max6_{a}_{ws}")
             model.Add(sum(aug_vars) <= limit).OnlyEnforceIf(_lit)
             model.AddAssumption(_lit)
@@ -51,34 +52,4 @@ for a_raw in AGENTS:
             gecmis_pencere_katki += 1
 
 print(f"max 6 gün üst üste çalışma kısıtı: {max_consecutive_constraints} adet  (MAX6_DIAG={MAX6_DIAG})")
-print(f"  - Temmuz geçmişinden etkilenen pencere: {gecmis_pencere_katki} adet")
-
-
-
-# %% [IIS TEŞHİS] - max-6 çelişkisini bul (objective'den SONRA çalıştır)
-# MAX6_DIAG=True ve IZOLE="max6" (veya "ikisi") ile modeli baştan kurup buraya gel.
-_s = cp_model.CpSolver()
-_s.parameters.max_time_in_seconds = 120
-_st = _s.Solve(model)
-print("Durum:", _s.StatusName(_st))
-if _st == cp_model.INFEASIBLE:
-    core = _s.SufficientAssumptionsForInfeasibility()
-    print("Çelişen (yeterli) max-6 pencere sayısı:", len(core))
-    rows = []
-    for idx in core:
-        info = max6_enforce_map.get(idx)
-        if info is None:
-            rows.append({"lit_index": idx, "not": "harita_disi"})
-        else:
-            a, ws, lim, jg = info
-            rows.append({"agent": a, "window_start": ws, "limit": lim, "temmuz_gun_pencerede": jg})
-    iis_df = pd.DataFrame(rows)
-    display(iis_df)
-    if "agent" in iis_df.columns:
-        print("IIS'teki farklı agent sayısı:", iis_df["agent"].nunique())
-        print("Agent bazında pencere:")
-        display(iis_df.groupby("agent").size().reset_index(name="pencere_sayisi").sort_values("pencere_sayisi", ascending=False))
-elif _st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    print("Feasible - bu ayarda çelişki yok. IZOLE/MAX6_DIAG değerlerini kontrol et.")
-else:
-    print("Belirsiz durum:", _s.StatusName(_st))
+print(f"  - Temmuz'lu (assumption'a bağlı) pencere: {gecmis_pencere_katki} adet")

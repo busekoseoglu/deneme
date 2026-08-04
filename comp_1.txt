@@ -1752,7 +1752,6 @@ print("=" * 84)
 
 
 
-
 # %% [HÜCRE 12] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA (TEMMUZ DAHİL)
 # "6 gün üst üste" = "her WINDOW_DAYS(7) günlük pencerede en fazla MAX_CONSECUTIVE(6) çalışma günü".
 # Temmuz sabit olduğu için pencerenin Temmuz kısmı sağ tarafı küçülten bir SABİT'tir.
@@ -1762,7 +1761,6 @@ print("=" * 84)
 #   off                      -> çalışma değil, limiti düşürmez
 #   izin                     -> çalışma değil, limiti düşürmez
 #   kayıt yok                -> çalışmamış sayılır (DEBUG [1]/[2] bunları listeler)
-model = _kisit_modeli("max6")   # <-- İZOLASYON ANAHTARI
 
 from datetime import timedelta
 
@@ -1843,5 +1841,5 @@ print(f"  - limit=0 (Ağustos günleri tamamen kapanan) pencere: {len(max6_sifir
 for r in max6_sifir_limit[:15]:
     print(f"      agent={r[0]}  pencere={r[1]}  kapanan Ağustos günü={r[2]}")
 
-model = MODEL_GERCEK   # <-- İZOLASYON: anahtarı geri al, sonraki hücreler etkilenmesin
+
 

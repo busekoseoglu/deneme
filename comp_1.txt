@@ -1313,3 +1313,96 @@ else:
                   f"tip={tip_map.get(a, {}).get(_d, '-')} tanımlı vardiya={len(_sec)}")
 print("=" * 78)
 
+
+
+# %% [İZOLASYON] - HARD KISIT GRUP ANAHTARLARI
+# Infeasible teşhisi. Bu hücre CP-SAT MODEL hücresinden HEMEN SONRA çalışmalı.
+#
+# KULLANIM: sadece DENEME sayısını değiştir -> bu hücreden aşağı doğru çalıştır -> solve et.
+#           Solve limitini 20 sn'ye düşür, teşhis için yeter.
+#
+# Kapatılan hücre yine çalışır ve DEĞİŞKENLERİNİ oluşturur; sadece model.Add* çağrıları
+# yutulur. Böylece sonraki hücreler kırılmaz.
+# "gunde_max1" her zaman AÇIK - o temel bağlantı (sum(vardiyalar) == work), kapatılamaz.
+
+DENEME = 0
+
+TUM_GRUPLAR = [
+    "fazla_atama",      # FAZLA ATAMA ÜST LİMİTİ
+    "arife_tatil",      # ARİFE HARD / RESMİ TATİL
+    "aylik_denge",      # AYLIK ÇALIŞMA DENGESİ (min/max)
+    "max6",             # MAKSİMUM 6 GÜN ÜST ÜSTE
+    "partial_end_hs",   # PARTIAL END HAFTA İÇİ HAMİLE/SÜT ÇALIŞMA ZORUNLULUĞU
+    "cift_off",         # AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
+    "sabah",            # SABAH ÇALIŞANLAR
+    "hs_haftasonu",     # HAMİLE VE SÜT İZNİ HAFTA SONU ÇALIŞAMAZ
+    "min11",            # İKİ VARDİYA ARASI MİNİMUM 11 SAAT
+    "takim_kapasite",   # HAFTALIK TAKIM BASE KAPASİTE KORUMASI
+    "takim_base",       # TAKIM HAFTALIK BASE VARDİYA (hafta içi HARD)
+    "gece_aksam",       # AYDA MAX 2 HAFTA GECE / AKŞAM
+]
+
+A_YARISI = TUM_GRUPLAR[:6]    # fazla_atama .. cift_off
+B_YARISI = TUM_GRUPLAR[6:]    # sabah .. gece_aksam
+
+DENEMELER = {
+    0:  ("normal - hepsi açık",            TUM_GRUPLAR),
+    1:  ("hepsi kapalı (araç testi)",      []),
+    2:  ("sadece A yarısı",                A_YARISI),
+    3:  ("sadece B yarısı",                B_YARISI),
+    4:  ("A'nın ilk yarısı",               TUM_GRUPLAR[:3]),
+    5:  ("A'nın ikinci yarısı",            TUM_GRUPLAR[3:6]),
+    6:  ("B'nin ilk yarısı",               TUM_GRUPLAR[6:9]),
+    7:  ("B'nin ikinci yarısı",            TUM_GRUPLAR[9:]),
+    8:  ("sadece takim_base",              ["takim_base"]),
+    9:  ("sadece partial_end_hs",          ["partial_end_hs"]),
+    10: ("sadece min11",                   ["min11"]),
+    11: ("takim_base + partial_end_hs",    ["takim_base", "partial_end_hs"]),
+    12: ("takim_base + takim_kapasite",    ["takim_base", "takim_kapasite"]),
+    13: ("hepsi AÇIK, takim_base KAPALI",  [g for g in TUM_GRUPLAR if g != "takim_base"]),
+    14: ("hepsi AÇIK, partial_end_hs KAPALI", [g for g in TUM_GRUPLAR if g != "partial_end_hs"]),
+    15: ("hepsi AÇIK, min11 KAPALI",       [g for g in TUM_GRUPLAR if g != "min11"]),
+}
+
+DENEME_OZEL = None    # istersen liste yaz, DENEME'yi ezer:  ["max6", "min11"]
+
+if DENEME_OZEL is not None:
+    _ad, _acik = "özel liste", list(DENEME_OZEL)
+else:
+    _ad, _acik = DENEMELER[DENEME]
+
+KISIT_AKTIF = {g: (g in _acik) for g in TUM_GRUPLAR}
+KISIT_AKTIF["gunde_max1"] = True          # her zaman açık
+
+MODEL_GERCEK = model
+
+
+class _BosKisit:
+    def OnlyEnforceIf(self, *a, **k): return self
+    def WithName(self, *a, **k): return self
+    def Name(self, *a, **k): return ""
+
+
+class _Yutucu:
+    """New* çağrılarını gerçek modele geçirir, Add*/Minimize/Maximize çağrılarını yutar."""
+    def __init__(self, gercek): self._g = gercek
+    def __getattr__(self, ad):
+        if ad.startswith("New") or ad in ("Proto", "proto"):
+            return getattr(self._g, ad)
+        def _yut(*a, **k): return _BosKisit()
+        return _yut
+
+
+def _kisit_modeli(ad):
+    if KISIT_AKTIF.get(ad, True):
+        return MODEL_GERCEK
+    print(f"  !! KISIT GRUBU KAPALI: {ad}")
+    return _Yutucu(MODEL_GERCEK)
+
+
+_kapali = [g for g in TUM_GRUPLAR if not KISIT_AKTIF[g]]
+print(f"DENEME = {DENEME}  ->  {_ad}")
+print(f"  AÇIK  ({len(_acik)}): {_acik}")
+print(f"  KAPALI ({len(_kapali)}): {_kapali if _kapali else 'yok'}")
+print("  gunde_max1: her zaman AÇIK")
+

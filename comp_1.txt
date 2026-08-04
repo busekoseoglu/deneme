@@ -1406,3 +1406,188 @@ print(f"  AÇIK  ({len(_acik)}): {_acik}")
 print(f"  KAPALI ({len(_kapali)}): {_kapali if _kapali else 'yok'}")
 print("  gunde_max1: her zaman AÇIK")
 
+
+
+
+# %% [TEŞHİS 4] - MAX-6 TEMMUZ BASKISI: AGENT BAZINDA TAM KAPASİTE KONTROLÜ
+# IZOLE="max6" infeasible, IZOLE="11h" feasible ise suçlu max-6'ya giren Temmuz verisidir.
+# Bu hücre her agent için TÜM agent-bazlı hard kısıtları birlikte hesaba katıp
+# "Ağustos'ta en fazla kaç gün çalışabilir" sorusunu KESİN olarak cevaplar:
+#     - kapalı günler (izin / off_t / off_t2 / 0'a sabitlenmiş vardiyalar)
+#     - max-6 (7 günlük pencere) + TEMMUZ geçmişi
+#     - zorunlu Cumartesi-Pazar çift off        <-- TEŞHİS 2'de EKSİKTİ
+#     - resmi tatil günleri (aylık toplama sayılmaz)
+# ve bunu HÜCRE 'AYLIK ÇALIŞMA DENGESİ'ndeki  toplam_calisma >= baz_gereken  ile karşılaştırır.
+#
+# Model kurulduktan SONRA çalıştır. Solve GEREKMEZ.
+
+MAX_RAPOR = 25
+from datetime import timedelta
+
+proto = model.Proto() if hasattr(model, "Proto") else model.proto
+
+# ---------- 0'a sabitlenmiş değişkenler ----------
+sabit0 = set()
+for i in range(len(proto.variables)):
+    d = list(proto.variables[i].domain)
+    if len(d) == 2 and d[0] == d[1] == 0:
+        sabit0.add(i)
+for k in range(len(proto.constraints)):
+    cc = proto.constraints[k]
+    try:
+        if len(cc.enforcement_literal) > 0:
+            continue
+        L = cc.linear
+        if len(L.vars) != 1:
+            continue
+    except Exception:
+        continue
+    dom, co = list(L.domain), list(L.coeffs)
+    if len(dom) == 2 and dom[0] == dom[1] == 0 and co[0] != 0:
+        sabit0.add(L.vars[0])
+
+ad2idx = {}
+for i in range(len(proto.variables)):
+    nm = proto.variables[i].name
+    if nm:
+        ad2idx[nm] = i
+
+_agents = sorted({str(a).strip() for a in AGENTS})
+_gun_date = [pd.to_datetime(ds).date() for ds in PLAN_GUNLER]
+_n = len(_gun_date)
+_PLAN_START = min(_gun_date)
+_W = WINDOW_DAYS - 1
+_MASK = (1 << _W) - 1
+
+_tatil = {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
+_is_gunu_dates = {d for d in _gun_date if d.weekday() < 5 and d not in _tatil}
+_aylik_is_gunu = len(_is_gunu_dates)
+
+# Cumartesi-Pazar çiftleri (plan içinde ardışık)
+_ciftler = [(i, i + 1) for i in range(_n - 1)
+            if _gun_date[i].weekday() == 5 and _gun_date[i + 1].weekday() == 6]
+
+_worked = globals().get("gecmis_calisma_gunleri", {})
+
+
+def _dp(available, seed):
+    cur = {seed: 0}
+    for i in range(_n):
+        nxt = {}
+        for st, val in cur.items():
+            if available[i] and bin(st).count("1") + 1 <= MAX_CONSECUTIVE_WORK_DAYS:
+                ns = ((st << 1) | 1) & _MASK
+                if nxt.get(ns, -1) < val + 1:
+                    nxt[ns] = val + 1
+            ns = (st << 1) & _MASK
+            if nxt.get(ns, -1) < val:
+                nxt[ns] = val
+        cur = nxt
+    return max(cur.values()) if cur else 0
+
+
+satirlar = []
+for a in _agents:
+    # gün açık mı: en az bir vardiyası 0'a sabitlenmemiş
+    available = []
+    for i, ds in enumerate(PLAN_GUNLER):
+        g = pd.to_datetime(ds).strftime("%Y%m%d")
+        idxs = [ad2idx.get(f"x_{a}_{g}_{v}") for v in gun_vardiyalari.get(ds, [])
+                if (a, ds, v) in x]
+        acik = any(i2 is not None and i2 not in sabit0 for i2 in idxs)
+        available.append(acik and _gun_date[i] not in _tatil)
+
+    seed = 0
+    for k in range(_W):
+        if (_PLAN_START - timedelta(days=k + 1)) in _worked.get(a, set()):
+            seed |= (1 << k)
+
+    tavan_ciftsiz = _dp(available, seed)
+    if _ciftler:
+        tavan = -1
+        for i1, i2 in _ciftler:
+            av = list(available)
+            av[i1] = av[i2] = False
+            tavan = max(tavan, _dp(av, seed))
+    else:
+        tavan = tavan_ciftsiz
+
+    # Temmuz olmadan ne olurdu (karşılaştırma için: seed = 0)
+    if _ciftler:
+        tavan_temmuzsuz = -1
+        for i1, i2 in _ciftler:
+            av = list(available)
+            av[i1] = av[i2] = False
+            tavan_temmuzsuz = max(tavan_temmuzsuz, _dp(av, 0))
+    else:
+        tavan_temmuzsuz = _dp(available, 0)
+
+    izin = len({d for d, t in tip_map.get(a, {}).items()
+                if str(t).strip().lower() == "izin" and d in _is_gunu_dates})
+    baz = _aylik_is_gunu - izin
+
+    satirlar.append({
+        "agent_user_code": a,
+        "baz_gereken": baz,
+        "tavan_ciftoff_dahil": tavan,
+        "acik": tavan - baz,
+        "tavan_ciftoffsuz": tavan_ciftsiz,
+        "tavan_temmuzsuz": tavan_temmuzsuz,
+        "temmuz_kaybi": tavan_temmuzsuz - tavan,
+        "temmuz_seed": bin(seed).count("1"),
+        "acik_gun": sum(1 for v in available if v),
+    })
+
+kapasite_df = pd.DataFrame(satirlar).sort_values("acik")
+_dar = kapasite_df[kapasite_df["acik"] < 0]
+
+print("=" * 82)
+print(f"aylık iş günü = {_aylik_is_gunu} | Cts-Paz çifti = {len(_ciftler)} | agent = {len(kapasite_df)}")
+print("=" * 82)
+print(f"\n[A] Aylık minimumu SAĞLAYAMAYAN agent: {len(_dar)}")
+if len(_dar):
+    print(_dar.head(MAX_RAPOR).to_string(index=False))
+    print("\n  -> INFEASIBLE SEBEBİ BU. 'temmuz_kaybi' sütunu Temmuz'un kaç gün yediğini gösteriyor.")
+    print("     temmuz_kaybi > 0 ve acik < 0 olan agentlarda suçlu doğrudan Temmuz geçmişi.")
+else:
+    print("  Yok. -> Çelişki tek bir agentta değil; agentlar arası (takım base / coverage) olmalı.")
+
+print(f"\n[B] Temmuz yüzünden kapasite kaybeden agent: {int((kapasite_df['temmuz_kaybi'] > 0).sum())}")
+print(kapasite_df[kapasite_df["temmuz_kaybi"] > 0]
+      .sort_values("acik").head(MAX_RAPOR).to_string(index=False))
+
+print(f"\n[C] Çift off zorunluluğunun maliyeti (tavan_ciftoffsuz - tavan_ciftoff_dahil):")
+_c = kapasite_df["tavan_ciftoffsuz"] - kapasite_df["tavan_ciftoff_dahil"]
+print(_c.value_counts().sort_index().to_string())
+
+print(f"\n[D] En dar 15 agent:")
+print(kapasite_df.head(15).to_string(index=False))
+
+# ---------- pencere bazlı Temmuz baskısı ----------
+print("\n" + "=" * 82)
+print("[E] Temmuz'un tavanı düşürdüğü pencereler (en sıkı 25)")
+print("=" * 82)
+_pencereler = []
+_ws = _PLAN_START - timedelta(days=_W)
+_son = max(_gun_date) - timedelta(days=_W)
+_plan_set = set(_gun_date)
+while _ws <= _son:
+    for a in _agents:
+        w = [_ws + timedelta(days=k) for k in range(WINDOW_DAYS)]
+        gecmis = sum(1 for d in w if d < _PLAN_START and d in _worked.get(a, set()))
+        if gecmis == 0:
+            continue
+        agu = [d for d in w if d in _plan_set]
+        if not agu:
+            continue
+        tavan = max(0, MAX_CONSECUTIVE_WORK_DAYS - gecmis)
+        if tavan < len(agu):
+            _pencereler.append((a, str(_ws), gecmis, tavan, len(agu)))
+    _ws += timedelta(days=1)
+
+_pencereler.sort(key=lambda r: (r[3], -r[2]))
+print(f"toplam sıkı pencere: {len(_pencereler)}")
+for a, ws, g, t, n in _pencereler[:MAX_RAPOR]:
+    print(f"  {a}  pencere {ws}: Temmuz'da {g} gün çalışmış -> tavan {t}/{n} Ağustos günü")
+
+

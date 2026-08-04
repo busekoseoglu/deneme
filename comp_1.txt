@@ -1751,3 +1751,97 @@ print("=" * 84)
 
 
 
+
+
+# %% [HÜCRE 12] - MAKSİMUM 6 GÜN ÜST ÜSTE ÇALIŞMA (TEMMUZ DAHİL)
+# "6 gün üst üste" = "her WINDOW_DAYS(7) günlük pencerede en fazla MAX_CONSECUTIVE(6) çalışma günü".
+# Temmuz sabit olduğu için pencerenin Temmuz kısmı sağ tarafı küçülten bir SABİT'tir.
+#
+# Temmuz günü:
+#   çalışma ("08:00-17:00")  -> penceredeki limiti düşürür
+#   off                      -> çalışma değil, limiti düşürmez
+#   izin                     -> çalışma değil, limiti düşürmez
+#   kayıt yok                -> çalışmamış sayılır (DEBUG [1]/[2] bunları listeler)
+model = _kisit_modeli("max6")   # <-- İZOLASYON ANAHTARI
+
+from datetime import timedelta
+
+if "PLAN_START_DATE" not in globals():
+    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+if "PLAN_END_DATE" not in globals():
+    PLAN_END_DATE = max(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+
+gecmis_calisma_gunleri = globals().get("gecmis_calisma_gunleri", {})
+
+# --- TEMMUZ BASKISI AGENT DİLİMİ (infeasible teşhisi / ikili arama) ---
+# Temmuz geçmişi SADECE bu dilimdeki agentlara uygulanır. Diğerleri Temmuz'da hiç
+# çalışmamış sayılır. Amaç: hangi agent(lar) infeasible yapıyor, ikili aramayla bulmak.
+#   (0, 0)            -> Temmuz hiç uygulanmaz  (feasible bekleniyor)
+#   (0, len(AGENTS))  -> hepsine uygulanır      (infeasible bekleniyor)
+# Dilimi yarıya bölerek daralt: infeasible veren yarıda devam et.
+_agents_sirali = sorted({str(a).strip() for a in AGENTS})
+MAX6_TEMMUZ_DILIM = (0, len(_agents_sirali))
+
+_bas, _bit = MAX6_TEMMUZ_DILIM
+_temmuz_uygula = set(_agents_sirali[_bas:_bit])
+print(f"max-6 Temmuz baskısı uygulanan agent dilimi: [{_bas}:{_bit}] "
+      f"-> {len(_temmuz_uygula)} / {len(_agents_sirali)} agent")
+
+plan_date_set_mc = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER}
+date_to_ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
+
+window_starts = []
+d = PLAN_START_DATE - timedelta(days=WINDOW_DAYS - 1)
+son_start = PLAN_END_DATE - timedelta(days=WINDOW_DAYS - 1)
+while d <= son_start:
+    window_starts.append(d)
+    d += timedelta(days=1)
+
+max_consecutive_constraints = 0
+gecmis_pencere_katki = 0
+atlanan_baglayici_degil = 0
+max6_sifir_limit = []   # (agent, pencere_baslangic, kapatilan_agustos_gun_sayisi)
+
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    worked_a = gecmis_calisma_gunleri.get(a, set()) if a in _temmuz_uygula else set()
+
+    for ws in window_starts:
+        window_dates = [ws + timedelta(days=k) for k in range(WINDOW_DAYS)]
+
+        aug_vars = [
+            work[(a, date_to_ds[dd])]
+            for dd in window_dates
+            if dd in plan_date_set_mc and (a, date_to_ds[dd]) in work
+        ]
+        if not aug_vars:
+            continue   # tamamen geçmişte kalan pencere - kısıtlanacak değişken yok
+
+        gecmis_calismis = sum(1 for dd in window_dates if dd < PLAN_START_DATE and dd in worked_a)
+        limit = MAX_CONSECUTIVE_WORK_DAYS - gecmis_calismis
+
+        # Bağlayıcı olmayan pencereyi modele hiç ekleme (limit >= mevcut değişken sayısı).
+        # Semantik olarak fark yok, sadece gereksiz kısıt üretilmiyor.
+        if limit >= len(aug_vars):
+            atlanan_baglayici_degil += 1
+            continue
+        if limit < 0:
+            limit = 0
+
+        model.Add(sum(aug_vars) <= limit)
+        max_consecutive_constraints += 1
+
+        if gecmis_calismis > 0:
+            gecmis_pencere_katki += 1
+        if limit == 0:
+            max6_sifir_limit.append((a, str(ws), len(aug_vars)))
+
+print(f"max 6 gün üst üste kısıtı: {max_consecutive_constraints} adet")
+print(f"  - bağlayıcı olmadığı için atlanan pencere : {atlanan_baglayici_degil}")
+print(f"  - Temmuz çalışması limiti düşüren pencere : {gecmis_pencere_katki}")
+print(f"  - limit=0 (Ağustos günleri tamamen kapanan) pencere: {len(max6_sifir_limit)}")
+for r in max6_sifir_limit[:15]:
+    print(f"      agent={r[0]}  pencere={r[1]}  kapanan Ağustos günü={r[2]}")
+
+model = MODEL_GERCEK   # <-- İZOLASYON: anahtarı geri al, sonraki hücreler etkilenmesin
+

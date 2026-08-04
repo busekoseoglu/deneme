@@ -1591,3 +1591,163 @@ for a, ws, g, t, n in _pencereler[:MAX_RAPOR]:
     print(f"  {a}  pencere {ws}: Temmuz'da {g} gün çalışmış -> tavan {t}/{n} Ağustos günü")
 
 
+
+# %% [TEŞHİS 5] - GÜVERCİN YUVASI: GÜN KAPASİTESİ vs ZORUNLU ÇALIŞMA
+# Tek agentta çelişki yoksa sıkışma agentlar ARASINDADIR. En sert bağ:
+#     FAZLA ATAMA ÜST LİMİTİ ->  assigned(gün,vardiya) <= talep + max_fazla
+# ile
+#     AYLIK ÇALIŞMA DENGESİ  ->  toplam_calisma(agent) >= baz_gereken
+# Temmuz + max-6, agentları ayın BAŞINDA çalışamaz hâle getirir; işi sonraki günlere yığar.
+# Yığılan iş gün kapasitesini aşarsa model çözümsüzdür.
+#
+# Bu hücre her k için şunu kanıt olarak hesaplar:
+#     "1..k günlerinde en fazla şu kadar çalışabilirler -> geri kalanı k+1..31'e düşer"
+#     düşen miktar > o günlerin kapasitesi  =>  KANITLANMIŞ INFEASIBLE
+#
+# Model kurulduktan SONRA çalıştır. Solve GEREKMEZ.
+from datetime import timedelta
+
+proto = model.Proto() if hasattr(model, "Proto") else model.proto
+
+sabit0 = set()
+for i in range(len(proto.variables)):
+    d = list(proto.variables[i].domain)
+    if len(d) == 2 and d[0] == d[1] == 0:
+        sabit0.add(i)
+for k in range(len(proto.constraints)):
+    cc = proto.constraints[k]
+    try:
+        if len(cc.enforcement_literal) > 0:
+            continue
+        L = cc.linear
+        if len(L.vars) != 1:
+            continue
+    except Exception:
+        continue
+    dom, co = list(L.domain), list(L.coeffs)
+    if len(dom) == 2 and dom[0] == dom[1] == 0 and co[0] != 0:
+        sabit0.add(L.vars[0])
+
+ad2idx = {}
+for i in range(len(proto.variables)):
+    nm = proto.variables[i].name
+    if nm:
+        ad2idx[nm] = i
+
+_agents = sorted({str(a).strip() for a in AGENTS})
+_gun_date = [pd.to_datetime(ds).date() for ds in PLAN_GUNLER]
+_n = len(_gun_date)
+_PLAN_START = min(_gun_date)
+_W = WINDOW_DAYS - 1
+_MASK = (1 << _W) - 1
+_tatil = {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
+_is_gunu_dates = {d for d in _gun_date if d.weekday() < 5 and d not in _tatil}
+_aylik_is_gunu = len(_is_gunu_dates)
+_worked = globals().get("gecmis_calisma_gunleri", {})
+
+# ---------- gün kapasitesi ----------
+_partial = globals().get("partial_weeks", set())
+_ust = globals().get("fazla_atama_ust_limiti", {})
+gun_kapasite = []
+for i, ds in enumerate(PLAN_GUNLER):
+    if _gun_date[i] in _tatil:
+        gun_kapasite.append(0)          # aylık toplama sayılmıyor
+        continue
+    wk = day_week[ds]
+    kap = 0
+    for v in gun_vardiyalari.get(ds, []):
+        mf = PARTIAL_WEEK_MAX_FAZLA_ATAMA if wk in _partial else _ust.get((ds, v), GENEL_MAX_FAZLA_ATAMA)
+        kap += int(talep[(ds, v)]) + int(mf)
+    gun_kapasite.append(kap)
+
+print("=" * 84)
+print(f"partial hafta: {sorted(_partial)} | PARTIAL_WEEK_MAX_FAZLA_ATAMA = {PARTIAL_WEEK_MAX_FAZLA_ATAMA}")
+print(f"GENEL_MAX_FAZLA_ATAMA = {GENEL_MAX_FAZLA_ATAMA}")
+print("=" * 84)
+print("\nGün kapasiteleri (talep + izinli fazla):")
+for i, ds in enumerate(PLAN_GUNLER):
+    _t = sum(int(talep[(ds, v)]) for v in gun_vardiyalari.get(ds, []))
+    print(f"  {ds} ({['Pzt','Sal','Çrş','Prş','Cum','Cmt','Paz'][_gun_date[i].weekday()]}) "
+          f"hafta={day_week[ds]}{' [PARTIAL]' if day_week[ds] in _partial else ''}"
+          f"  talep={_t}  kapasite={gun_kapasite[i]}")
+
+
+def _dp_prefix(available, seed):
+    """best[i] = ilk i günde çalışılabilecek MAKSİMUM gün sayısı (i = 0..n)"""
+    cur = {seed: 0}
+    best = [0] * (_n + 1)
+    for i in range(_n):
+        nxt = {}
+        for st, val in cur.items():
+            if available[i] and bin(st).count("1") + 1 <= MAX_CONSECUTIVE_WORK_DAYS:
+                ns = ((st << 1) | 1) & _MASK
+                if nxt.get(ns, -1) < val + 1:
+                    nxt[ns] = val + 1
+            ns = (st << 1) & _MASK
+            if nxt.get(ns, -1) < val:
+                nxt[ns] = val
+        cur = nxt
+        best[i + 1] = max(cur.values()) if cur else 0
+    return best
+
+
+# ---------- agent bazında prefix tavanları ----------
+prefix_best = {}
+baz_gereken = {}
+for a in _agents:
+    available = []
+    for i, ds in enumerate(PLAN_GUNLER):
+        g = pd.to_datetime(ds).strftime("%Y%m%d")
+        idxs = [ad2idx.get(f"x_{a}_{g}_{v}") for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
+        acik = any(j is not None and j not in sabit0 for j in idxs)
+        available.append(acik and _gun_date[i] not in _tatil)
+    seed = 0
+    for k in range(_W):
+        if (_PLAN_START - timedelta(days=k + 1)) in _worked.get(a, set()):
+            seed |= (1 << k)
+    prefix_best[a] = _dp_prefix(available, seed)
+    izin = len({d for d, t in tip_map.get(a, {}).items()
+                if str(t).strip().lower() == "izin" and d in _is_gunu_dates})
+    baz_gereken[a] = _aylik_is_gunu - izin
+
+# ---------- güvercin yuvası ----------
+print("\n" + "=" * 84)
+print("PREFIX ANALİZİ:  1..k günlerinde tavan  ->  kalanı k+1..31'e düşer")
+print("=" * 84)
+print(f"{'k':>3} {'son gün':>12} {'suffix kapasite':>16} {'zorunlu suffix':>15} {'fark':>8}")
+ihlal = []
+for k in range(0, _n):
+    suffix_kap = sum(gun_kapasite[k:])
+    zorunlu = 0
+    for a in _agents:
+        zorunlu += max(0, baz_gereken[a] - prefix_best[a][k])
+    fark = suffix_kap - zorunlu
+    if fark < 0:
+        ihlal.append((k, suffix_kap, zorunlu, fark))
+    if k <= 12 or fark < 0:
+        print(f"{k:>3} {PLAN_GUNLER[k - 1] if k else '-':>12} {suffix_kap:>16} {zorunlu:>15} {fark:>8}"
+              + ("   <-- İHLAL" if fark < 0 else ""))
+
+print("\n" + "=" * 84)
+if ihlal:
+    print(f"KANITLANMIŞ INFEASIBLE: {len(ihlal)} prefix noktasında kapasite yetmiyor")
+    print("=" * 84)
+    k, kap, zor, f = min(ihlal, key=lambda r: r[3])
+    print(f"En kötü nokta k={k} (ilk {k} gün): {PLAN_GUNLER[0]} .. {PLAN_GUNLER[k-1] if k else '-'}")
+    print(f"  {k+1}.günden sonuna kadar kapasite : {kap}")
+    print(f"  oraya düşmek ZORUNDA olan çalışma : {zor}")
+    print(f"  AÇIK                              : {f}")
+    print("\n  En çok yükü iten agentlar (baz_gereken - ilk k gündeki tavanı):")
+    _katki = sorted(((max(0, baz_gereken[a] - prefix_best[a][k]), a) for a in _agents), reverse=True)
+    for v, a in _katki[:20]:
+        _t = bin(0).count("1")
+        print(f"    {a}: {v} gün  (baz={baz_gereken[a]}, ilk {k} günde tavan={prefix_best[a][k]}, "
+              f"Temmuz günü={len(_worked.get(a, set()) & {_PLAN_START - timedelta(days=j+1) for j in range(_W)})})")
+else:
+    print("Prefix güvercin yuvası ihlali YOK.")
+    print("-> Sıkışma toplam kapasitede değil. Sıradaki şüpheli: TAKIM HAFTALIK BASE VARDİYA")
+    print("   (hafta içi her agent takımının o haftaki TEK base vardiyasında çalışabiliyor).")
+print("=" * 84)
+
+
+

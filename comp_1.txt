@@ -1,29 +1,63 @@
+from datetime import timedelta
 _bas, _bit = 280, 290
-_hs = set(df_tam.loc[
-    (pd.to_numeric(df_tam.get("hamile_flg", 0), errors="coerce").fillna(0).astype(int) == 1) |
-    (pd.to_numeric(df_tam.get("sut_izni_flg", 0), errors="coerce").fillna(0).astype(int) == 1),
-    "agent_user_code"].astype(str).str.strip())
-_sabah = set(df_tam.loc[
-    pd.to_numeric(df_tam.get("sabah_calisir_flg", 0), errors="coerce").fillna(0).astype(int) == 1,
-    "agent_user_code"].astype(str).str.strip())
-_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
-                  df_tam["takim"].astype(str).str.strip()))
-_GUN = ["Pzt","Sal","Çrş","Prş","Cum","Cmt","Paz"]
-_agents_sirali = sorted({str(a).strip() for a in AGENTS})
+_p = model.Proto() if hasattr(model, "Proto") else model.proto
 
+# 0'a sabitlenmiş x'ler (11 saat köprüsü dahil)
+_s0 = set()
+for i in range(len(_p.variables)):
+    d = list(_p.variables[i].domain)
+    if len(d) == 2 and d[0] == d[1] == 0: _s0.add(i)
+for k in range(len(_p.constraints)):
+    cc = _p.constraints[k]
+    try:
+        if len(cc.enforcement_literal) > 0: continue
+        L = cc.linear
+        if len(L.vars) != 1: continue
+    except Exception: continue
+    dm, co = list(L.domain), list(L.coeffs)
+    if len(dm) == 2 and dm[0] == dm[1] == 0 and co[0] != 0: _s0.add(L.vars[0])
+_ad = {_p.variables[i].name: i for i in range(len(_p.variables)) if _p.variables[i].name}
+
+_gd = [pd.to_datetime(ds).date() for ds in PLAN_GUNLER]
+_n = len(_gd); _PS = min(_gd); _W = WINDOW_DAYS - 1; _MK = (1 << _W) - 1
+_tat = {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
+_isg = {d for d in _gd if d.weekday() < 5 and d not in _tat}
+_cift = [(i, i+1) for i in range(_n-1) if _gd[i].weekday() == 5 and _gd[i+1].weekday() == 6]
+
+def _dp(av, seed):
+    cur = {seed: 0}
+    for i in range(_n):
+        nx = {}
+        for st, val in cur.items():
+            if av[i] and bin(st).count("1") + 1 <= MAX_CONSECUTIVE_WORK_DAYS:
+                ns = ((st << 1) | 1) & _MK
+                if nx.get(ns, -1) < val + 1: nx[ns] = val + 1
+            ns = (st << 1) & _MK
+            if nx.get(ns, -1) < val: nx[ns] = val
+        cur = nx
+    return max(cur.values())
+
+_as = sorted({str(a).strip() for a in AGENTS})
 for k in range(_bas, _bit):
-    a = _agents_sirali[k]
-    _cal = sorted(gecmis_calisma_gunleri.get(a, set()))
-    _off = sorted(gecmis_off_gunleri.get(a, set()))
-    _t = tip_map.get(a, {})
-    _izin = sorted(d for d, v in _t.items() if str(v).strip().lower() == "izin")
-    _offt = sorted((str(d), str(v)) for d, v in _t.items()
-                   if str(v).strip().lower() in ("off_t", "off_t2"))
-    print(f"\n[{k}] {a} | takım={_takim.get(a)} | hamile/süt={a in _hs} | sabah={a in _sabah}")
-    print(f"   Temmuz çalışma ({len(_cal)}): {[(str(d), _GUN[d.weekday()]) for d in _cal[-8:]]}")
-    print(f"   Temmuz off     ({len(_off)}): {[(str(d), _GUN[d.weekday()]) for d in _off[-8:]]}")
-    print(f"   Ağustos izin ({len(_izin)}): {[str(d) for d in _izin[:10]]}")
-    print(f"   Ağustos off_t ({len(_offt)}): {_offt[:10]}")
+    a = _as[k]
+    av = []
+    for i, ds in enumerate(PLAN_GUNLER):
+        g = pd.to_datetime(ds).strftime("%Y%m%d")
+        ix = [_ad.get(f"x_{a}_{g}_{v}") for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
+        av.append(any(j is not None and j not in _s0 for j in ix) and _gd[i] not in _tat)
+    seed = 0
+    for j in range(_W):
+        if (_PS - timedelta(days=j+1)) in gecmis_calisma_gunleri.get(a, set()): seed |= (1 << j)
+    t_ile = max(_dp([False if i in p else av[i] for i in range(_n)], seed) for p in _cift)
+    t_siz = max(_dp([False if i in p else av[i] for i in range(_n)], 0)    for p in _cift)
+    izin = len({d for d, v in tip_map.get(a, {}).items()
+                if str(v).strip().lower() == "izin" and d in _isg})
+    baz = len(_isg) - izin
+    kapali = [str(_gd[i]) for i in range(_n) if not av[i]]
+    print(f"[{k}] {a}  baz={baz}  tavan={t_ile}  MARJ={t_ile-baz}"
+          f"  (Temmuz'suz tavan={t_siz}, kayıp={t_siz-t_ile})  temmuz_seed={bin(seed).count('1')}")
+    print(f"      kapalı gün ({len(kapali)}): {kapali[:14]}")
+
 
 
 

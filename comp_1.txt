@@ -1,3 +1,42 @@
+# %% [KONTROL] - ÇÖZÜMÜ ÇIKAR + ORTAK YARDIMCILAR
+assert FEASIBLE_OK, "Çözüm yok, kontroller çalıştırılamaz."
+V = solver.Value
+
+cozum_calisma = {}   # (a, ds) -> 0/1
+cozum_atama = {}     # (a, ds) -> vardiya kodu (çalışıyorsa)
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        w = V(work[(a, ds)]) if (a, ds) in work else 0
+        cozum_calisma[(a, ds)] = int(w)
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) in x and V(x[(a, ds, v)]) == 1:
+                cozum_atama[(a, ds)] = v
+                break
+
+def _dk(t):
+    s = str(t).strip()[:5]; h, m = s.split(":"); return int(h) * 60 + int(m)
+
+def _shift_dt(ds, bas, bit):
+    s = pd.to_datetime(f"{pd.to_datetime(ds).strftime('%Y-%m-%d')} {bas}")
+    e = pd.to_datetime(f"{pd.to_datetime(ds).strftime('%Y-%m-%d')} {bit}")
+    if e <= s: e += pd.Timedelta(days=1)
+    return s, e
+
+ihlal_ozet = []
+def kaydet(kural, adet, tur="HARD"):
+    ihlal_ozet.append({"kural": kural, "tur": tur, "ihlal": adet})
+    etiket = "OK   " if adet == 0 else "İHLAL"
+    print(f"[{etiket}] ({tur}) {kural}: {adet}")
+
+_gecmis_calisma = globals().get("gecmis_calisma", {})
+_gecmis_gunleri = globals().get("gecmis_calisma_gunleri", {})
+print("Çözüm çıkarıldı. Çalışan agent-gün:", sum(cozum_calisma.values()))
+
+
+
+
+
 # %% [KONTROL 1] - GÜNDE MAX 1 VARDİYA + WORK TUTARLILIĞI
 ihlal = []
 for a_raw in AGENTS:

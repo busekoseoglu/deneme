@@ -1,393 +1,283 @@
-"ENABLE_OFF_T_HARD": False,   # 2026-08-05: off_t SOFT'a alindi, ceza = OFF_TALEP_KARSILANMAMA_W
-    "ENABLE_OFF_T2_HARD": True,   # off_t2 HARD kaliyor
-    "OFF_TALEP_KARSILANMAMA_W": 100000,
+# %% [KONTROL 1] - GÜNDE MAX 1 VARDİYA + WORK TUTARLILIĞI
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        atn = [v for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x and V(x[(a, ds, v)]) == 1]
+        if len(atn) > 1:
+            ihlal.append((a, ds, "coklu_vardiya", atn))
+        if (a, ds) in work and V(work[(a, ds)]) != len(atn):
+            ihlal.append((a, ds, "work_uyumsuz", len(atn)))
+kaydet("Günde max 1 vardiya / work tutarlılığı", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
 
 
-ENABLE_OFF_T_HARD = CONFIG["ENABLE_OFF_T_HARD"]
-ENABLE_OFF_T2_HARD = CONFIG["ENABLE_OFF_T2_HARD"]
-OFF_TALEP_KARSILANMAMA_W = CONFIG["OFF_TALEP_KARSILANMAMA_W"]
+# %% [KONTROL 2] - İZİN / OFF_T / OFF_T2 GÜNÜNDE ÇALIŞMA YOK (HARD OFF)
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    for ds in PLAN_GUNLER:
+        d = pd.to_datetime(ds).date()
+        tip = str(tip_map.get(a, {}).get(d, "")).strip().lower()
+        if tip in ("izin", "off_t", "off_t2") and cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, tip, cozum_atama.get((a, ds))))
+kaydet("İzin/off_t/off_t2 gününde çalışma yok", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
 
 
-# %% [HÜCRE 9] - CP-SAT MODEL + ANA KARAR DEĞİŞKENLERİ
-from ortools.sat.python import cp_model
+# %% [KONTROL 3] - COVERAGE (buffer + talep) [RAPOR/SOFT]
+rows = []
+buffer_alti = 0
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari.get(ds, []):
+        assigned = sum(V(x[(str(a).strip(), ds, v)]) for a in AGENTS if (str(a).strip(), ds, v) in x)
+        req = int(talep[(ds, v)])
+        lo = coverage_lower.get((ds, v), req) if "coverage_lower" in globals() else req
+        hi = coverage_upper.get((ds, v), req) if "coverage_upper" in globals() else req
+        durum = "ok"
+        if assigned < lo: durum = "BUFFER_ALTI"; buffer_alti += 1
+        elif assigned < req: durum = "talep_alti"
+        elif assigned > hi: durum = "buffer_ustu"
+        rows.append({"tarih": str(ds), "vardiya": v, "talep": req, "lower": lo, "upper": hi, "atanan": int(assigned), "durum": durum})
+coverage_kontrol_df = pd.DataFrame(rows)
+kaydet("Coverage buffer altı (soft)", buffer_alti, tur="SOFT")
+print("Talep altı gün-vardiya:", int((coverage_kontrol_df["durum"] == "talep_alti").sum()))
+print("Buffer üstü gün-vardiya:", int((coverage_kontrol_df["durum"] == "buffer_ustu").sum()))
+display(coverage_kontrol_df[coverage_kontrol_df["durum"] != "ok"].head(40))
 
-model = cp_model.CpModel()
 
-PLAN_GUNLER = sorted(PLAN_GUNLER)
-ALL_VARDIYALAR = sorted({v for ds in PLAN_GUNLER for v in gun_vardiyalari.get(ds, [])})
-TAKIMLAR = sorted(df_tam["takim"].dropna().astype(str).unique().tolist())
 
-agent_team = dict(zip(
-    df_tam["agent_user_code"].astype(str).str.strip(),
-    df_tam["takim"].astype(str).str.strip(),
-))
-
-def week_key(ds):
-    d = pd.to_datetime(ds)
-    iso = d.isocalendar()
-    return f"{int(iso.year)}-W{int(iso.week):02d}"
-
-day_week = {ds: week_key(ds) for ds in PLAN_GUNLER}
-WEEKS = sorted(set(day_week.values()))
-
-week_vardiyalari = defaultdict(set)
+# %% [KONTROL 4] - FAZLA ATAMA ÜST LİMİTİ (HARD)
+ihlal = []
+partial_weeks_c = globals().get("partial_weeks", set())
 for ds in PLAN_GUNLER:
     wk = day_week[ds]
     for v in gun_vardiyalari.get(ds, []):
-        week_vardiyalari[wk].add(v)
-week_vardiyalari = {wk: sorted(list(vs)) for wk, vs in week_vardiyalari.items()}
+        assigned = sum(V(x[(str(a).strip(), ds, v)]) for a in AGENTS if (str(a).strip(), ds, v) in x)
+        req = int(talep[(ds, v)])
+        if wk in partial_weeks_c:
+            max_fazla = PARTIAL_WEEK_MAX_FAZLA_ATAMA
+        else:
+            max_fazla = fazla_atama_ust_limiti.get((ds, v), GENEL_MAX_FAZLA_ATAMA)
+        # arife özel vardiya cap gevşemesi göz ardı; sadece kaba kontrol
+        if assigned > req + max_fazla and (ds, v) not in globals().get("arife_ozel_vardiyalar", set()):
+            ihlal.append((ds, v, "atanan", int(assigned), "limit", req + max_fazla))
+kaydet("Fazla atama üst limiti", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
-print(f"agent sayısı: {len(AGENTS)}")
-print(f"takım sayısı: {len(TAKIMLAR)}")
-print(f"plan gün sayısı: {len(PLAN_GUNLER)}")
-print(f"hafta sayısı: {len(WEEKS)} -> {WEEKS}")
-print(f"vardiya sayısı: {len(ALL_VARDIYALAR)}")
 
-# ================= 2026-08-05 - off_t SOFT / off_t2 HARD =================
-# off_t artik kapali gun degil: o gunlerde de x yaratilir, model isterse calistirir
-# ve [KISIT] - OFF_T SOFT hucresindeki ceza terimini oder.
-# izin ve off_t2 HARD: o gunlerde hic x yaratilmaz -> gun tamamen kapali.
-_enable_off_t_hard = globals().get("ENABLE_OFF_T_HARD", True)
-_enable_off_t2_hard = globals().get("ENABLE_OFF_T2_HARD", True)
-KAPALI_TIPLER = ["izin"]
-if _enable_off_t_hard:
-    KAPALI_TIPLER.append("off_t")
-if _enable_off_t2_hard:
-    KAPALI_TIPLER.append("off_t2")
-print("Kapali (hard) tipler:", KAPALI_TIPLER)
-# =========================================================================
 
-# Günlük vardiya atamaları
-x = {}
-acilan_off_t_gun = 0
+
+
+# %% [KONTROL 5] - AYLIK ÇALIŞMA DENGESİ (min/max)
+resmi_tatil_ds = globals().get("resmi_tatil_date_set", set())
+aylik_is_dates = globals().get("aylik_is_gunu_dates",
+    {pd.to_datetime(ds).date() for ds in PLAN_GUNLER if pd.to_datetime(ds).weekday() < 5 and pd.to_datetime(ds).date() not in resmi_tatil_ds})
+aylik_is = len(aylik_is_dates)
+
+rows = []; ihlal = 0
 for a_raw in AGENTS:
     a = str(a_raw).strip()
-    for ds in PLAN_GUNLER:
-        ds_date = pd.to_datetime(ds).date()
-        tip = tip_map.get(a, {}).get(ds_date, None)
-        tip_str = str(tip).strip().lower() if tip is not None else None
-        if tip_str in KAPALI_TIPLER:
-            continue
-        if tip_str == "off_t":
-            acilan_off_t_gun += 1
-        for v in gun_vardiyalari.get(ds, []):
-            x[(a, ds, v)] = model.NewBoolVar(
-                f"x_{a}_{pd.to_datetime(ds).strftime('%Y%m%d')}_{v}"
-            )
+    izin_is = len({d for d, t in tip_map.get(a, {}).items() if str(t).strip().lower() == "izin" and d in aylik_is_dates})
+    baz = aylik_is - izin_is
+    toplam = sum(cozum_calisma[(a, ds)] for ds in PLAN_GUNLER if pd.to_datetime(ds).date() not in resmi_tatil_ds)
+    ok = baz <= toplam <= baz + MAX_OVERTIME_PER_MONTH
+    if not ok: ihlal += 1
+    rows.append({"agent": a, "baz_gereken": baz, "toplam_calisma": int(toplam), "mesai": int(toplam - baz), "min": baz, "max": baz + MAX_OVERTIME_PER_MONTH, "ok": ok})
+aylik_denge_kontrol_df = pd.DataFrame(rows)
+kaydet("Aylık çalışma dengesi (min<=toplam<=max)", ihlal)
+display(aylik_denge_kontrol_df[~aylik_denge_kontrol_df["ok"]].head(40))
 
-# Günlük çalışma
-work = {}
+
+
+
+# %% [KONTROL 6] - MAX 6 GÜN ÜST ÜSTE (TEMMUZ GEÇMİŞİ DAHİL)
+from datetime import timedelta
+ihlal = []
 for a_raw in AGENTS:
     a = str(a_raw).strip()
+    worked = set(_gecmis_gunleri.get(a, set()))  # Temmuz gerçek çalışma
     for ds in PLAN_GUNLER:
-        work[(a, ds)] = model.NewBoolVar(
-            f"work_{a}_{pd.to_datetime(ds).strftime('%Y%m%d')}"
-        )
-
-# Takım-hafta base vardiyası
-team_week_base = {}
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        for v in week_vardiyalari[wk]:
-            team_week_base[(t, wk, v)] = model.NewBoolVar(f"team_week_base_{t}_{wk}_{v}")
-
-# Exception değişkeni
-exception = {}
-for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        exception[(a, ds)] = model.NewBoolVar(f"exception_{a}_{ds}")
-
-# Coverage sapma değişkenleri
-under_buffer = {}
-over_buffer = {}
-missing_to_required = {}
-excess_to_required = {}
-MAX_AGENT = len(AGENTS)
-
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        under_buffer[(ds, v)] = model.NewIntVar(0, MAX_AGENT, f"under_buffer_{ds}_{v}")
-        over_buffer[(ds, v)] = model.NewIntVar(0, MAX_AGENT, f"over_buffer_{ds}_{v}")
-        missing_to_required[(ds, v)] = model.NewIntVar(0, MAX_AGENT, f"missing_to_required_{ds}_{v}")
-        excess_to_required[(ds, v)] = model.NewIntVar(0, MAX_AGENT, f"excess_to_required_{ds}_{v}")
-
-print("x karar değişkeni:", len(x))
-print("off_t soft olarak açılan agent-gün:", acilan_off_t_gun)
-print("work değişkeni:", len(work))
-print("team_week_base değişkeni:", len(team_week_base))
-print("exception değişkeni:", len(exception))
-print("under/over buffer kovası:", len(under_buffer))
-
-
-
-
-# %% [KISIT] - AYDA EN AZ 1 GERÇEK CUMARTESİ-PAZAR ÇİFT OFF
-# Aylık minimum çalışmayı bozmayacaksa
-
-if "resmi_tatil_date_set" not in globals():
-    resmi_tatil_date_set = set()
-if "aylik_is_gunu_dates" not in globals():
-    aylik_is_gunu_dates = {pd.to_datetime(ds).date() for ds in PLAN_GUNLER if pd.to_datetime(ds).weekday() in [0,1,2,3,4] and pd.to_datetime(ds).date() not in resmi_tatil_date_set}
-if "aylik_is_gunu" not in globals():
-    aylik_is_gunu = len(aylik_is_gunu_dates)
-
-# ================= 2026-08-05 - off_t SOFT UYARLAMASI =================
-# off_t artik garantili off degil: model o gunu calistirabilir.
-#   - model off talebini verirse  -> work=0 -> gercek_off=1 -> cift off'a sayilir
-#   - model talebi ezip calistirirsa -> gercek_off=0 -> sayilmaz (ayrica ceza oder)
-# off_t2 HARD oldugu icin gercek_off=1'e sabitlenmeye devam eder.
-# Ayrica: iki gunu de hard off (off_t2) olan Cmt-Pzr cifti artik SECILEBILIR
-# sayiliyor. Eskiden listeden cikariliyordu ve agent'a ikinci bir cift off
-# zorunlulugu biniyordu; oysa off_t2 verildiyse cift off da verilmis olur.
-_off_t_hard_cift = globals().get("ENABLE_OFF_T_HARD", True)
-_off_t2_hard_cift = globals().get("ENABLE_OFF_T2_HARD", True)
-print("Çift off - off_t hard mı:", _off_t_hard_cift, "| off_t2 hard mı:", _off_t2_hard_cift)
-# ======================================================================
-
-plan_date_to_ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
-plan_date_set = set(plan_date_to_ds.keys())
-weekend_pairs = []
-for sat_date, sat_ds in plan_date_to_ds.items():
-    if sat_date.weekday() != 5:
+        if cozum_calisma[(a, ds)] == 1:
+            worked.add(pd.to_datetime(ds).date())
+    if not worked:
         continue
-    sun_date = (pd.Timestamp(sat_date) + pd.Timedelta(days=1)).date()
-    if sun_date in plan_date_to_ds:
-        weekend_pairs.append((sat_ds, plan_date_to_ds[sun_date]))
+    tum = sorted(worked)
+    lo, hi = tum[0], tum[-1]
+    d = lo
+    while d <= hi - timedelta(days=WINDOW_DAYS - 1):
+        pencere = [d + timedelta(days=k) for k in range(WINDOW_DAYS)]
+        c = sum(1 for x_ in pencere if x_ in worked)
+        if c > MAX_CONSECUTIVE_WORK_DAYS:
+            ihlal.append((a, str(d), "pencere_calisma", c))
+        d += timedelta(days=1)
+kaydet("Max 6 gün üst üste (Temmuz dahil)", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
-gercek_off = {}
+
+
+# %% [KONTROL 7] - MİN 11 SAAT DİNLENME (TEMMUZ GEÇMİŞİ DAHİL)
+ihlal = []
 for a_raw in AGENTS:
-    a = str(a_raw).strip(); tip_dates = tip_map.get(a, {})
-    izin_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "izin"}
-    off_t_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "off_t"}
-    off_t2_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "off_t2"}
-    garantili_off_gunleri = set()
-    if _off_t_hard_cift:
-        garantili_off_gunleri |= off_t_gunleri
-    if _off_t2_hard_cift:
-        garantili_off_gunleri |= off_t2_gunleri
+    a = str(a_raw).strip()
+    shifts = []
+    for d, (bas, bit) in _gecmis_calisma.get(a, {}).items():
+        if bit is None: continue
+        shifts.append(_shift_dt(d.isoformat(), bas, bit))
     for ds in PLAN_GUNLER:
-        ds_date = pd.to_datetime(ds).date()
-        gercek_off[(a, ds)] = model.NewBoolVar(f"gercek_off_{a}_{ds}")
-        if ds_date in izin_gunleri:
-            model.Add(gercek_off[(a, ds)] == 0)
-        elif ds_date in garantili_off_gunleri:
-            model.Add(gercek_off[(a, ds)] == 1)
-        else:
-            model.Add(gercek_off[(a, ds)] + work[(a, ds)] == 1)
-
-pair_off = {}; cift_off_debug_rows=[]; cift_off_pair_debug_rows=[]
-cift_off_kisit_sayisi=0; cift_off_zorunlulugu_olan_agent=0; cift_off_zorunlulugu_olmayan_agent=0
-for a_raw in AGENTS:
-    a = str(a_raw).strip(); tip_dates = tip_map.get(a, {})
-    izin_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "izin"}
-    off_t_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "off_t"}
-    off_t2_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "off_t2"}
-    plan_ici_izin_gunleri = izin_gunleri & plan_date_set
-    tum_plan_izinli = len(plan_date_set) > 0 and plan_date_set.issubset(plan_ici_izin_gunleri)
-    izin_is_gunu_sayisi_for_cift = len({d for d, tip in tip_dates.items() if str(tip).strip().lower() == "izin" and d in aylik_is_gunu_dates})
-    baz_gereken_calisma_for_cift = aylik_is_gunu - izin_is_gunu_sayisi_for_cift
-    max_calisabilir_gun_for_cift = 0
-    for ds_tmp in PLAN_GUNLER:
-        ds_tmp_date = pd.to_datetime(ds_tmp).date()
-        if ds_tmp_date in resmi_tatil_date_set:
-            continue
-        vars_tmp_day = [x[(a, ds_tmp, v)] for v in gun_vardiyalari.get(ds_tmp, []) if (a, ds_tmp, v) in x]
-        if vars_tmp_day:
-            max_calisabilir_gun_for_cift += 1
-    garantili_off_gunleri = set()
-    if _off_t_hard_cift:
-        garantili_off_gunleri |= off_t_gunleri
-    if _off_t2_hard_cift:
-        garantili_off_gunleri |= off_t2_gunleri
-    agent_pair_vars=[]; selectable_pair_infos=[]
-    for pair_index,(sat_ds,sun_ds) in enumerate(weekend_pairs):
-        pair_off[(a,pair_index)] = model.NewBoolVar(f"pair_off_{a}_{pair_index}")
-        model.Add(pair_off[(a,pair_index)] <= gercek_off[(a,sat_ds)])
-        model.Add(pair_off[(a,pair_index)] <= gercek_off[(a,sun_ds)])
-        model.Add(pair_off[(a,pair_index)] >= gercek_off[(a,sat_ds)] + gercek_off[(a,sun_ds)] - 1)
-        agent_pair_vars.append(pair_off[(a,pair_index)]); cift_off_kisit_sayisi += 3
-        sat_date = pd.to_datetime(sat_ds).date(); sun_date = pd.to_datetime(sun_ds).date()
-        sat_forced_off = sat_date in garantili_off_gunleri
-        sun_forced_off = sun_date in garantili_off_gunleri
-        # 2026-08-05: iki gunu de garantili off olan cift de gecerli bir cift off'tur.
-        is_selectable = True
-        pair_capacity_loss = 0
-        for pair_ds in [sat_ds, sun_ds]:
-            pair_date = pd.to_datetime(pair_ds).date()
-            if pair_date in resmi_tatil_date_set:
-                continue
-            vars_pair_day = [x[(a,pair_ds,v)] for v in gun_vardiyalari.get(pair_ds,[]) if (a,pair_ds,v) in x]
-            if vars_pair_day:
-                pair_capacity_loss += 1
-        max_work_if_this_pair_selected = max_calisabilir_gun_for_cift - pair_capacity_loss
-        is_feasible_selectable = is_selectable and max_work_if_this_pair_selected >= baz_gereken_calisma_for_cift
-        if is_selectable:
-            selectable_pair_infos.append({"pair_var": pair_off[(a,pair_index)], "is_feasible_selectable": is_feasible_selectable})
-        cift_off_pair_debug_rows.append({"agent_user_code":a,"pair_index":pair_index,"sat_date":pd.to_datetime(sat_ds).strftime("%Y-%m-%d"),"sun_date":pd.to_datetime(sun_ds).strftime("%Y-%m-%d"),"sat_forced_off":sat_forced_off,"sun_forced_off":sun_forced_off,"is_selectable":is_selectable,"pair_capacity_loss":pair_capacity_loss,"max_calisabilir_gun":max_calisabilir_gun_for_cift,"baz_gereken_calisma":baz_gereken_calisma_for_cift,"max_work_if_selected":max_work_if_this_pair_selected,"is_feasible_selectable":is_feasible_selectable})
-    feasible_selectable_pair_infos = [info for info in selectable_pair_infos if info["is_feasible_selectable"]]
-    if feasible_selectable_pair_infos and not tum_plan_izinli:
-        model.Add(sum(info["pair_var"] for info in feasible_selectable_pair_infos) >= 1)
-        cift_off_kisit_sayisi += 1; cift_off_zorunlulugu_olan_agent += 1
-        kuruldu=True; skip_reason=""
-    else:
-        cift_off_zorunlulugu_olmayan_agent += 1; kuruldu=False
-        if tum_plan_izinli: skip_reason="tum_plan_izinli"
-        elif not selectable_pair_infos: skip_reason="secilebilir_cift_yok"
-        else: skip_reason="aylik_min_calisma_ile_cakisiyor"
-    cift_off_debug_rows.append({"agent_user_code":a,"izin_gun_sayisi_plan_ici":len(plan_ici_izin_gunleri),"plan_gun_sayisi":len(plan_date_set),"tum_plan_izinli":tum_plan_izinli,"toplam_cift_sayisi":len(agent_pair_vars),"secilebilir_cift_sayisi":len(selectable_pair_infos),"feasible_secilebilir_cift_sayisi":len(feasible_selectable_pair_infos),"max_calisabilir_gun":max_calisabilir_gun_for_cift,"baz_gereken_calisma":baz_gereken_calisma_for_cift,"cift_off_zorunlulugu_kuruldu":kuruldu,"cift_off_skip_reason":skip_reason})
-
-cift_off_debug_df = pd.DataFrame(cift_off_debug_rows)
-cift_off_pair_debug_df = pd.DataFrame(cift_off_pair_debug_rows)
-print("Plan içindeki Cumartesi-Pazar çifti:", len(weekend_pairs))
-print("Gerçek OFF değişkeni:", len(gercek_off))
-print("Pair OFF değişkeni:", len(pair_off))
-print("Çift OFF kısıt sayısı:", cift_off_kisit_sayisi)
-print("Çift OFF zorunluluğu kurulan agent:", cift_off_zorunlulugu_olan_agent)
-print("Çift OFF zorunluluğu kurulmayan agent:", cift_off_zorunlulugu_olmayan_agent)
-if not cift_off_pair_debug_df.empty:
-    _garantili_cift = cift_off_pair_debug_df[
-        cift_off_pair_debug_df["sat_forced_off"] & cift_off_pair_debug_df["sun_forced_off"]
-    ]
-    print("Her iki günü de garantili off olan çift (artık geçerli sayılıyor):", len(_garantili_cift))
+        v = cozum_atama.get((a, ds))
+        if v:
+            bas, bit = saat[(ds, v)]
+            shifts.append(_shift_dt(ds, bas, bit))
+    shifts.sort(key=lambda r: r[0])
+    for i in range(len(shifts) - 1):
+        rest = (shifts[i + 1][0] - shifts[i][1]).total_seconds() / 60
+        if rest < MIN_REST_MINUTES:
+            ihlal.append((a, str(shifts[i][1]), str(shifts[i + 1][0]), int(rest)))
+kaydet("Min 11 saat dinlenme (Temmuz dahil)", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
 
 
-# %% [HÜCRE] - OBJECTIVE
-# 2026-08-05: off_t talepleri SOFT. Karşılanmayan her off_t günü
-# OFF_TALEP_KARSILANMAMA_W ile cezalandırılır ([KISIT] - OFF_T SOFT hücresi).
-# izin ve off_t2 HARD kaldığı için objective'de karşılıkları yoktur.
+# %% [KONTROL 8] - CUMARTESİ-PAZAR GERÇEK ÇİFT OFF
+# Gerçek OFF: izin DEĞİL; (off_t/off_t2) veya (work=0). work=1 -> OFF değil.
+def _gercek_off(a, ds):
+    d = pd.to_datetime(ds).date()
+    tip = str(tip_map.get(a, {}).get(d, "")).strip().lower()
+    if tip == "izin": return False
+    if tip in ("off_t", "off_t2"): return True
+    return cozum_calisma.get((a, ds), 0) == 0
 
-objective_terms = []
-
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        objective_terms.append(UNDER_BUFFER_W * under_buffer[(ds, v)])
-        objective_terms.append(MISSING_TO_REQUIRED_W * missing_to_required[(ds, v)])
-
-        if gece_aksam_vardiyasi_mi[(ds, v)]:
-            excess_weight = EXCESS_GECE_AKSAM_W
-        elif mola_destek_vardiyasi_mi[(ds, v)]:
-            excess_weight = EXCESS_MOLA_DESTEK_W
-        else:
-            excess_weight = EXCESS_NORMAL_W
-
-        objective_terms.append(excess_weight * excess_to_required[(ds, v)])
-        objective_terms.append(OVER_BUFFER_W * over_buffer[(ds, v)])
-
-# İkinci mesai ekstra cezası
-for a in AGENTS:
-    objective_terms.append(IKINCI_MESAI_W * ikinci_mesai_aylik[a])
-
-# Hafta sonu çalışma adil dağıtım cezası
-for a in hafta_sonu_calisma_sayisi.keys():
-    objective_terms.append(HAFTA_SONU_FAZLA_CALISMA_W * fazla_hafta_sonu_calisma[a])
-
-# Arife / resmi tatil mesai ve ihlal cezaları
-if "arife_mesai" in globals() and ARIFE_MESAI_W != 0:
-    for (a, ds, v), var in arife_mesai.items():
-        objective_terms.append(ARIFE_MESAI_W * var)
-
-if "resmi_tatil_mesai" in globals() and RESMI_TATIL_MESAI_W != 0:
-    for (a, ds, v), var in resmi_tatil_mesai.items():
-        objective_terms.append(RESMI_TATIL_MESAI_W * var)
-
-if "resmi_tatil_kisitli_ihlal" in globals():
-    for (a, ds, v), var in resmi_tatil_kisitli_ihlal.items():
-        objective_terms.append(RESMI_TATIL_KISITLI_IHLAL_W * var)
-
-print("ARIFE_MESAI_W:", ARIFE_MESAI_W)
-print("RESMI_TATIL_MESAI_W:", RESMI_TATIL_MESAI_W)
-print("RESMI_TATIL_KISITLI_IHLAL_W:", RESMI_TATIL_KISITLI_IHLAL_W)
-
-# Haftalık hedef sapma cezası - değişkenler varsa
-if "weekly_under" in globals():
-    for (a, wk), var in weekly_under.items():
-        objective_terms.append(WEEKLY_UNDER_W * var)
-if "weekly_over" in globals():
-    for (a, wk), var in weekly_over.items():
-        objective_terms.append(WEEKLY_OVER_W * var)
-
-print("WEEKLY UNDER W:", WEEKLY_UNDER_W)
-print("WEEKLY OVER W:", WEEKLY_OVER_W)
-
-# Günlük fazla atama yığılma cezası
-if "daily_excess_over" in globals():
-    for ds, var in daily_excess_over.items():
-        objective_terms.append(DAILY_EXCESS_OVER_W * var)
-print("DAILY EXCESS SOFT LIMIT:", DAILY_EXCESS_SOFT_LIMIT)
-print("DAILY_EXCESS_OVER_W:", DAILY_EXCESS_OVER_W)
-
-# Partial end week tamamen OFF kalma cezası
-if "partial_end_week_all_off" in globals():
-    for key, var in partial_end_week_all_off.items():
-        objective_terms.append(PARTIAL_END_WEEK_ALL_OFF_W * var)
-print("PARTIAL END WEEK ALL OFF W:", PARTIAL_END_WEEK_ALL_OFF_W)
-
-# off_t soft ceza - değişkenler varsa
-if "off_t_ihlal" in globals():
-    for (a, ds), var in off_t_ihlal.items():
-        objective_terms.append(OFF_TALEP_KARSILANMAMA_W * var)
-    print("off_t soft ceza terimi:", len(off_t_ihlal))
-else:
-    print("off_t_ihlal yok -> off_t cezası objective'e girmedi")
-print("OFF_TALEP_KARSILANMAMA_W:", OFF_TALEP_KARSILANMAMA_W)
-
-model.Minimize(sum(objective_terms))
-
-print("Objective term sayısı:", len(objective_terms))
-print("UNDER_BUFFER_W:", UNDER_BUFFER_W)
-print("MISSING_TO_REQUIRED_W:", MISSING_TO_REQUIRED_W)
-print("OVERTIME_W:", OVERTIME_W)
-print("EXCESS_GECE_AKSAM_W:", EXCESS_GECE_AKSAM_W)
-print("EXCESS_NORMAL_W:", EXCESS_NORMAL_W)
-print("EXCESS_MOLA_DESTEK_W:", EXCESS_MOLA_DESTEK_W)
-print("OVER_BUFFER_W:", OVER_BUFFER_W)
-
-
-
-# %% [KISIT] - OFF_T SOFT: KARŞILANMAYAN OFF TALEBİ
-# off_t artık HARD değil. Model istenen günü off verebilir, veremezse ceza öder.
-# izin ve off_t2 HARD kalır -> [HÜCRE 9] o günlerde zaten hiç x yaratmaz,
-# dolayısıyla burada da ihlal değişkenleri oluşmaz.
-#
-# Ayrı bir ihlal değişkeni YARATILMAZ: off_t gününde ihlal, o günün
-# work[(a, ds)] değişkeninin kendisidir (work=1 -> off talebi karşılanmadı).
-# Bu yüzden bu hücre modele hiç kısıt eklemez, sadece objective'in kullanacağı
-# sözlüğü kurar.
-
-off_t_ihlal = {}
-off_t_talep_gunleri = {}
-off_t_kapali_gun_sayisi = 0
-
+ihlal = []
 for a_raw in AGENTS:
     a = str(a_raw).strip()
     tip_dates = tip_map.get(a, {})
-    off_t_gunleri = {d for d, tip in tip_dates.items() if str(tip).strip().lower() == "off_t"}
-    if not off_t_gunleri:
-        continue
+    plan_izin = {d for d, t in tip_dates.items() if str(t).strip().lower() == "izin"}
+    tum_izinli = len(PLAN_GUNLER) > 0 and all(pd.to_datetime(ds).date() in plan_izin for ds in PLAN_GUNLER)
+    if tum_izinli:
+        continue  # tam-ay izinli agent için zorunluluk kurulmaz
+    var_mi = any(_gercek_off(a, sat) and _gercek_off(a, sun) for sat, sun in weekend_pairs)
+    if not var_mi:
+        ihlal.append(a)
+kaydet("Ayda en az 1 Cmt-Pzr çift OFF", len(ihlal))
+print("   çift OFF'u olmayan agentlar:", ihlal[:30])
+
+
+
+# %% [KONTROL 9] - HAMİLE / SÜT İZNİ HAFTA SONU ÇALIŞMAZ (HARD)
+ozel = set()
+for _, row in df_tam.iterrows():
+    if int(pd.to_numeric(row.get("hamile_flg", 0), errors="coerce") or 0) == 1 or int(pd.to_numeric(row.get("sut_izni_flg", 0), errors="coerce") or 0) == 1:
+        ozel.add(str(row["agent_user_code"]).strip())
+ihlal = []
+for a in ozel:
     for ds in PLAN_GUNLER:
-        ds_date = pd.to_datetime(ds).date()
-        if ds_date not in off_t_gunleri:
-            continue
-        off_t_talep_gunleri.setdefault(a, set()).add(ds)
-        vars_day = [x[(a, ds, v)] for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
-        if not vars_day or (a, ds) not in work:
-            # gün zaten kapalı (off_t hâlâ hard ya da o gün atanabilir vardiya yok)
-            off_t_kapali_gun_sayisi += 1
-            continue
-        off_t_ihlal[(a, ds)] = work[(a, ds)]
-
-off_t_toplam_talep = sum(len(v) for v in off_t_talep_gunleri.values())
-
-print("off_t HARD mı:", globals().get("ENABLE_OFF_T_HARD", True))
-print("off_t toplam talep (agent-gün):", off_t_toplam_talep)
-print("off_t talebi olan agent sayısı:", len(off_t_talep_gunleri))
-print("ihlal edilebilir (soft/açık) off_t günü:", len(off_t_ihlal))
-print("kapalı kalan off_t günü (ihlal imkânsız):", off_t_kapali_gun_sayisi)
-print("OFF_TALEP_KARSILANMAMA_W:", OFF_TALEP_KARSILANMAMA_W)
-print("maksimum olası off_t cezası:", len(off_t_ihlal) * OFF_TALEP_KARSILANMAMA_W)
+        if pd.to_datetime(ds).weekday() in (5, 6) and cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, cozum_atama.get((a, ds))))
+kaydet("Hamile/süt izni hafta sonu çalışmaz", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
 
 
 
+# %% [KONTROL 10] - SABAH ÇALIŞANLAR (bitiş <= SABAH_CALISIR_MAX_BITIS_SAATI)
+LIMIT = _dk(SABAH_CALISIR_MAX_BITIS_SAATI)
+sabah = {str(r["agent_user_code"]).strip() for _, r in df_tam.iterrows() if pd.to_numeric(r.get("sabah_calisir_flg", 0), errors="coerce") == 1}
+ihlal = []
+for a in sabah:
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if not v: continue
+        bas, bit = saat[(ds, v)]
+        bas_dk, bit_dk = _dk(bas), _dk(bit)
+        if bit_dk < bas_dk: bit_dk += 24 * 60
+        if bit_dk > LIMIT:
+            ihlal.append((a, ds, v, bit))
+kaydet("Sabah çalışanlar geç vardiyada değil", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 11] - AYDA MAX 2 HAFTA GECE/AKŞAM
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    gece_haftalar = set()
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if v and night_shift_map.get((ds, v), False):
+            gece_haftalar.add(day_week[ds])
+    if len(gece_haftalar) > MAX_NIGHT_WEEKS_PER_MONTH:
+        ihlal.append((a, sorted(gece_haftalar)))
+kaydet("Ayda max 2 gece/akşam haftası", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 12] - HAFTA İÇİ TAKIM BASE VARDİYASI (HARD)
+# Hafta içi (Pzt-Cuma), arife/resmi tatil hariç: agent yalnızca takımının seçtiği base'de çalışır.
+ozel_tatil = set(globals().get("ozel_tatil_plan_gunleri", []))
+# takım-hafta seçilen base
+secilen_base = {}
+for (t, wk, v), var in team_week_base.items():
+    if V(var) == 1:
+        secilen_base[(t, wk)] = v
+ihlal = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    t = agent_team.get(a)
+    if t is None: continue
+    t = str(t).strip()
+    for ds in PLAN_GUNLER:
+        if ds in ozel_tatil: continue
+        if pd.to_datetime(ds).weekday() >= 5: continue
+        v = cozum_atama.get((a, ds))
+        if not v: continue
+        base = secilen_base.get((t, day_week[ds]))
+        if base is not None and v != base:
+            ihlal.append((a, ds, "atanan", v, "base", base))
+kaydet("Hafta içi takım base vardiyası", len(ihlal))
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL 13] - HAFTA SONU ÇALIŞMA ADALETİ [RAPOR/SOFT]
+hafta_sonu_gunleri_c = sorted(set([s for s, _ in weekend_pairs] + [p for _, p in weekend_pairs]))
+rows = []; asiri = 0
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    cnt = sum(cozum_calisma.get((a, ds), 0) for ds in hafta_sonu_gunleri_c)
+    fazla = max(0, cnt - HAFTA_SONU_CEZA_BASLANGIC_GUN)
+    if fazla > 0: asiri += 1
+    rows.append({"agent": a, "hafta_sonu_calisma": int(cnt), "ceza_esigi": HAFTA_SONU_CEZA_BASLANGIC_GUN, "cezali_gun": int(fazla)})
+hafta_sonu_kontrol_df = pd.DataFrame(rows).sort_values("hafta_sonu_calisma", ascending=False)
+kaydet("Hafta sonu eşik üstü çalışan agent (soft)", asiri, tur="SOFT")
+display(hafta_sonu_kontrol_df.head(30))
+
+
+
+# %% [KONTROL 14] - RESMİ TATİL KISITLI AGENT İHLALİ [RAPOR/SOFT]
+resmi_gunler = globals().get("resmi_tatil_plan_gunleri", [])
+kisitli = globals().get("tatil_kisitli_agents", set())
+ihlal = []
+for a in kisitli:
+    a = str(a).strip()
+    for ds in resmi_gunler:
+        if cozum_calisma.get((a, ds), 0) == 1:
+            ihlal.append((a, ds, cozum_atama.get((a, ds))))
+kaydet("Resmi tatilde kısıtlı agent çalışması (soft)", len(ihlal), tur="SOFT")
+for r in ihlal[:20]: print("   ", r)
+
+
+
+# %% [KONTROL ÖZET] - TÜM KURALLAR TEK TABLODA
+ihlal_ozet_df = pd.DataFrame(ihlal_ozet)
+print("=== KURAL KONTROL ÖZETİ ===")
+display(ihlal_ozet_df)
+hard_ihlal = ihlal_ozet_df[(ihlal_ozet_df["tur"] == "HARD") & (ihlal_ozet_df["ihlal"] > 0)]
+if hard_ihlal.empty:
+    print("TÜM HARD KURALLAR TEMİZ ✅")
+else:
+    print("DİKKAT - HARD İHLAL VAR ⚠️")
+    display(hard_ihlal)

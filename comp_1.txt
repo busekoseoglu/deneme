@@ -5,21 +5,24 @@
 #
 # 2026-08-06 DÜZELTME (arife açılınca ortaya çıktı):
 #   - eski izin_map yapısı kaldırıldı, tip_map kullanılıyor
-#   - off_t artık SOFT: o günlerde x değişkeni VAR, agent çalışabilir.
-#     Bu yüzden off_t "hard off" sayılmaz, forced_count'a dahil edilir.
-#     ENABLE_OFF_T_HARD = True yapılırsa otomatik olarak eski davranışa döner.
 #   - değişken adı fazla_atama_ust_limiti (VARDİYA TİPİ hücresinde üretiliyor)
+#
+# forced_count = arife özel vardiyasına ZORLANACAK kısıtlı agent sayısı.
+# Bu küme [HÜCRE] - ARİFE HARD / RESMİ TATİL SOFT hücresindekiyle BİREBİR AYNI
+# olmak zorunda, yoksa kapasite gevşetmesi yanlış hesaplanır:
+#   izin    -> gün kapalı, x yok
+#   off_t2  -> gün kapalı, x yok
+#   off_t   -> x VAR ama agent ZORLANMAZ. off_t soft bir talep; hard bir kısıtla
+#              çalışmaya zorlarsak talebin karşılanma ihtimali sıfırlanır ve
+#              OFF_TALEP_KARSILANMAMA_W cezası anlamsızlaşır. Model isterse
+#              kendi seçer, cezayı öder.
+ARIFE_ZORLANMAZ_TIPLERI = {"izin", "off_t", "off_t2"}
 
-# Bu gün agent için tamamen kapalı mı? (arife forced_count sayımı için)
-_hard_off_tipleri_fa = {"izin", "off_t2"}
-if globals().get("ENABLE_OFF_T_HARD", True):
-    _hard_off_tipleri_fa.add("off_t")
 
-
-def _fa_hard_off_mu(a, ds):
+def _arife_zorlanmaz_mi(a, ds):
     _d = pd.to_datetime(ds).date()
     _tip = str(tip_map.get(str(a).strip(), {}).get(_d, "")).strip().lower()
-    return _tip in _hard_off_tipleri_fa
+    return _tip in ARIFE_ZORLANMAZ_TIPLERI
 
 
 fazla_atama_cap_constraints = 0
@@ -40,7 +43,7 @@ for ds in PLAN_GUNLER:
             forced_count = 0
             for a in tatil_kisitli_agents:
                 a = str(a).strip()
-                if _fa_hard_off_mu(a, ds):
+                if _arife_zorlanmaz_mi(a, ds):
                     continue
                 if (a, ds, v) in x:
                     forced_count += 1
@@ -60,11 +63,131 @@ for ds in PLAN_GUNLER:
         fazla_atama_cap_constraints += 1
 
 print("Fazla atama üst limit kısıtı:", fazla_atama_cap_constraints)
-print("Arife forced_count'ta hard off sayılan tipler:", sorted(_hard_off_tipleri_fa))
+print("Arife özel vardiyasına zorlanmayan tipler:", sorted(ARIFE_ZORLANMAZ_TIPLERI))
 print("Genel max fazla atama:", GENEL_MAX_FAZLA_ATAMA)
 print("Gece/akşam max fazla atama:", GECE_MAX_FAZLA_ATAMA)
 print("Partial week max fazla atama:", PARTIAL_WEEK_MAX_FAZLA_ATAMA)
 if arife_cap_relax_rows:
     arife_cap_relax_df = pd.DataFrame(arife_cap_relax_rows)
     display(arife_cap_relax_df)
+
+
+
+
+
+# %% [HÜCRE] - ARİFE HARD / RESMİ TATİL SOFT DEBUG ÇALIŞMA KURALLARI
+#
+# 2026-08-06 DÜZELTME:
+#   - eski izin_map yapısı kaldırıldı, tip_map doğrudan okunuyor
+#   - başka hücredeki helper'lara (normalize_agent / agent_hard_no_work_mi_kontrol /
+#     get_tip_from_tip_map) bağımlılık kaldırıldı, hücre tek başına çalışır
+#   - ARIFE_ZORLANMAZ_TIPLERI kümesi [HÜCRE] - FAZLA ATAMA ÜST LİMİTİ ile BİREBİR AYNI:
+#       izin / off_t2 -> gün kapalı, x yok
+#       off_t         -> x VAR ama agent 09:00-13:00'a ZORLANMAZ. off_t soft bir
+#                        talep; hard zorlarsak karşılanma ihtimali sıfırlanır.
+#                        Model isterse kendi atar ve cezayı öder.
+#     13:00 sonrası yasak kuralı off_t'li agenta da UYGULANIR (aşağıdaki döngü
+#     if/else dışında), yani o agent geç vardiyaya giremez.
+
+ARIFE_ZORLANMAZ_TIPLERI = {"izin", "off_t", "off_t2"}
+
+
+def _arife_tip(a, ds):
+    _d = pd.to_datetime(ds).date()
+    return str(tip_map.get(str(a).strip(), {}).get(_d, "")).strip().lower()
+
+
+def _arife_zorlanmaz_mi(a, ds):
+    return _arife_tip(a, ds) in ARIFE_ZORLANMAZ_TIPLERI
+
+
+arife_mesai = {}
+resmi_tatil_mesai = {}
+resmi_tatil_kisitli_ihlal = {}
+
+tatil_constraints = 0
+arife_09_13_zorunlu_constraints = 0
+arife_13_sonrasi_yasak_constraints = 0
+arife_non_kisitli_ozel_vardiya_yasak_constraints = 0
+resmi_tatil_kisitli_soft_constraints = 0
+tatil_skip_rows = []
+
+for a in AGENTS:
+    a = str(a).strip()
+
+    # 1) ARİFE KURALLARI - HARD
+    for ds in arife_plan_gunleri:
+        ds_key_val = tatil_ds_key(ds)
+        ozel_v = ARIFE_GUNLERI[ds_key_val]["ozel_vardiya_kodu"]
+
+        if a in tatil_kisitli_agents:
+            if _arife_zorlanmaz_mi(a, ds):
+                tatil_skip_rows.append({
+                    "agent_user_code": a,
+                    "date": ds,
+                    "rule": "arife_09_13",
+                    "reason": _arife_tip(a, ds) or "tip_yok",
+                })
+            else:
+                if (a, ds, ozel_v) in x:
+                    model.Add(x[(a, ds, ozel_v)] == 1)
+                    arife_09_13_zorunlu_constraints += 1
+                else:
+                    tatil_skip_rows.append({
+                        "agent_user_code": a,
+                        "date": ds,
+                        "rule": "arife_09_13",
+                        "reason": "ozel_09_13_x_yok",
+                    })
+
+            for v in gun_vardiyalari.get(ds, []):
+                if (a, ds, v) not in x:
+                    continue
+                if arife_kisitli_yasak_vardiya_mi.get((ds, v), False):
+                    model.Add(x[(a, ds, v)] == 0)
+                    arife_13_sonrasi_yasak_constraints += 1
+        else:
+            if (a, ds, ozel_v) in x:
+                model.Add(x[(a, ds, ozel_v)] == 0)
+                arife_non_kisitli_ozel_vardiya_yasak_constraints += 1
+
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+            if arife_mesai_vardiyasi_mi.get((ds, v), False):
+                arife_mesai[(a, ds, v)] = model.NewBoolVar(f"arife_mesai_{a}_{ds}_{v}")
+                model.Add(arife_mesai[(a, ds, v)] == x[(a, ds, v)])
+                tatil_constraints += 1
+
+    # 2) RESMİ TATİL KURALLARI - SOFT DEBUG
+    for ds in resmi_tatil_plan_gunleri:
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+
+            if a in tatil_kisitli_agents:
+                resmi_tatil_kisitli_ihlal[(a, ds, v)] = model.NewBoolVar(
+                    f"resmi_tatil_kisitli_ihlal_{a}_{ds}_{v}"
+                )
+                model.Add(resmi_tatil_kisitli_ihlal[(a, ds, v)] >= x[(a, ds, v)])
+                resmi_tatil_kisitli_soft_constraints += 1
+
+            if resmi_tatil_mesai_vardiyasi_mi.get((ds, v), False):
+                resmi_tatil_mesai[(a, ds, v)] = model.NewBoolVar(f"resmi_tatil_mesai_{a}_{ds}_{v}")
+                model.Add(resmi_tatil_mesai[(a, ds, v)] == x[(a, ds, v)])
+                tatil_constraints += 1
+
+print("Arife özel vardiyasına zorlanmayan tipler:", sorted(ARIFE_ZORLANMAZ_TIPLERI))
+print("Arife 09-13 zorunlu atama kısıtı:", arife_09_13_zorunlu_constraints)
+print("Arife 13 sonrası hard yasak kısıtı:", arife_13_sonrasi_yasak_constraints)
+print("Arife non-kısıtlı özel vardiya yasak kısıtı:", arife_non_kisitli_ozel_vardiya_yasak_constraints)
+print("Arife mesai değişken sayısı:", len(arife_mesai))
+print("Resmi tatil kısıtlı soft ihlal kısıtı:", resmi_tatil_kisitli_soft_constraints)
+print("Resmi tatil kısıtlı ihlal değişken sayısı:", len(resmi_tatil_kisitli_ihlal))
+print("Resmi tatil mesai değişken sayısı:", len(resmi_tatil_mesai))
+print("Toplam tatil yardımcı kısıtı:", tatil_constraints)
+
+if tatil_skip_rows:
+    tatil_skip_df = pd.DataFrame(tatil_skip_rows)
+    display(tatil_skip_df.head(50))
 

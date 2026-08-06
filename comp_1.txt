@@ -1,191 +1,189 @@
-# %% [KISIT] - HAFTALIK OFF TAVANI (MODEL 3. OFF'U KENDİ VEREMEZ)
-# Bir agent bir haftada en fazla MODEL_OFF_HAFTALIK_MAX (2) gün off alır.
-# off_t / off_t2 talepleri bu tavanın İÇİNDE sayılır: 2 gün talep karşılandıysa
-# model üstüne ekstra off VEREMEZ.
-#
-# Tavan sabit 2 değil, TABAN 2:
-#     hafta_tavani = max(MODEL_OFF_HAFTALIK_MAX, zorunlu_off_sayisi)
-#     zorunlu_off  = (off_t ∪ off_t2 ∪ agentin o gün hiç çalışamayacağı günler) ∩ hafta
-# Böylece:
-#   - 3 gün off talebi olan agent 3'ünü de alır, 4. off olmaz
-#   - yapısal olarak çalışamayan günleri olan agent (hamile/süt hafta sonu) infeasible olmaz
-#
-# izin günleri sayıma HİÇ girmez (off değil, ayrı kategori) - o günler kotayı da düşürüyor.
-# Kısmi haftalarda (W31: 2 gün, W36: 1 gün) tavan zaten bağlayıcı olmaz, kısıt kurulmaz.
-#
-# Bu hücre [HÜCRE 9] ve [HAZIRLIK / KISIT] - AYLIK ÇALIŞMA DENGESİ'nden SONRA çalışmalıdır.
+# ========== 2026-08-06 EKLENEN - SABAH CALISAN VARDIYA PENCERESI ==========
+SABAH_CALISIR_MAX_BASLANGIC_SAATI = CONFIG["SABAH_CALISIR_MAX_BASLANGIC_SAATI"]
+SABAH_CALISIR_GECE_VARDIYA_YASAK = CONFIG["SABAH_CALISIR_GECE_VARDIYA_YASAK"]
+# ==========================================================================
 
-MODEL_OFF_HAFTALIK_MAX = 2
-MODEL_OFF_HAFTALIK_HARD = True     # infeasible çıkarsa False yap -> soft + objective cezası
-MODEL_OFF_TAVAN_ASIM_W = 200000    # sadece HARD = False iken kullanılır
 
-# --- hafta -> plan günleri ---
-if "day_week" in globals():
-    _dw = day_week
-else:
-    _dw = {}
-    for ds in PLAN_GUNLER:
-        _iso = pd.to_datetime(ds).isocalendar()
-        _dw[ds] = f"{int(_iso.year)}-W{int(_iso.week):02d}"
+# ========== 2026-08-06 EKLENEN - SABAH CALISAN VARDIYA PENCERESI ==========
+    "SABAH_CALISIR_MAX_BASLANGIC_SAATI": "11:00",   # sabah agent en gec bu saatte basalayabilir
+    "SABAH_CALISIR_GECE_VARDIYA_YASAK": True,       # GECE_AKSAM_VARDIYA_SET tamamen yasak
+    # NOT: mevcut SABAH_CALISIR_MAX_BITIS_SAATI ("20:00") gecerli kalir; uc sart birlikte
+    #      uygulanir. Tek basina bitis kontrolu 00:00-08:00 gece vardiyasini kaciriyordu.
+    # ==========================================================================
 
-_hafta_plan_gunleri = {}
+
+
+
+# %% [HÜCRE 13] - SABAH ÇALIŞANLAR
+# sabah_calisir_flg = 1 olan agent SADECE sabah penceresindeki vardiyalarda çalışabilir.
+# Üç şart BİRDEN sağlanmalı:
+#   1) bitiş     <= SABAH_CALISIR_MAX_BITIS_SAATI       (gece aşan vardiyada +24 saat)
+#   2) başlangıç <= SABAH_CALISIR_MAX_BASLANGIC_SAATI
+#   3) GECE_AKSAM_VARDIYA_SET içinde DEĞİL
+#
+# 3. şart şart: 00:00-08:00 gece vardiyası ilk iki şarttan KAÇIYOR - başlangıcı 00:00
+# (<= 11:00), bitişi 08:00 (<= 20:00). Sadece bitişe bakan eski kural bunu serbest
+# bırakıyordu ve model sabah agentlarını gece vardiyasına atayabiliyordu.
+#
+# Parametreler [CONFIG] hücresinden gelir, burada TANIMLANMAZ.
+
+_eksik_cfg = [
+    k for k in ("SABAH_CALISIR_MAX_BITIS_SAATI", "SABAH_CALISIR_MAX_BASLANGIC_SAATI",
+                "SABAH_CALISIR_GECE_VARDIYA_YASAK", "GECE_AKSAM_VARDIYA_SET")
+    if k not in globals()
+]
+if _eksik_cfg:
+    raise SystemExit(f"CONFIG'de tanımlı olmalı, eksik: {_eksik_cfg} -> [CONFIG] hücresini çalıştır.")
+
+
+def dakika(t):
+    s = str(t).strip()[:5]
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _sbh_norm(t):
+    return str(t).strip()[:5]
+
+
+SABAH_BITIS_LIMIT = dakika(SABAH_CALISIR_MAX_BITIS_SAATI)
+SABAH_BASLANGIC_LIMIT = dakika(SABAH_CALISIR_MAX_BASLANGIC_SAATI)
+
+
+def sabah_vardiyasi_uygun_mu(bas, bit):
+    """(uygun_mu, red_sebebi) döner. Sabah agent bu vardiyada çalışabilir mi?"""
+    b, e = _sbh_norm(bas), _sbh_norm(bit)
+    bas_dk, bit_dk = dakika(b), dakika(e)
+    if bit_dk < bas_dk:
+        bit_dk += 24 * 60
+    if SABAH_CALISIR_GECE_VARDIYA_YASAK and (b, e) in GECE_AKSAM_VARDIYA_SET:
+        return False, "gece/akşam vardiyası"
+    if bas_dk > SABAH_BASLANGIC_LIMIT:
+        return False, f"başlangıç > {SABAH_CALISIR_MAX_BASLANGIC_SAATI}"
+    if bit_dk > SABAH_BITIS_LIMIT:
+        return False, f"bitiş > {SABAH_CALISIR_MAX_BITIS_SAATI}"
+    return True, ""
+
+
+sabah_agents = set(
+    df_tam.loc[
+        pd.to_numeric(df_tam["sabah_calisir_flg"], errors="coerce").fillna(0).astype(int) == 1,
+        "agent_user_code",
+    ].astype(str).str.strip()
+)
+
+# --- plandaki her farklı vardiya: sabah agent çalışabilir mi? (solve öncesi göz kontrolü) ---
+_vardiya_gorunum = {}
 for ds in PLAN_GUNLER:
-    _hafta_plan_gunleri.setdefault(_dw[ds], []).append(ds)
-for _wk in _hafta_plan_gunleri:
-    _hafta_plan_gunleri[_wk] = sorted(_hafta_plan_gunleri[_wk], key=lambda s: pd.to_datetime(s))
+    for v in gun_vardiyalari.get(ds, []):
+        _b, _e = saat[(ds, v)]
+        _key = (v, _sbh_norm(_b), _sbh_norm(_e))
+        _vardiya_gorunum[_key] = _vardiya_gorunum.get(_key, 0) + 1
 
-_mk_agents_t = set()
-if "mesaiye_kalamaz_flg" in df_tam.columns:
-    _mk_agents_t = set(
-        df_tam.loc[
-            pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce").fillna(0).astype(int) == 1,
-            "agent_user_code",
-        ].astype(str).str.strip()
-    )
+_sbh_rows = []
+for (_v, _b, _e), _gun in sorted(_vardiya_gorunum.items(), key=lambda kv: (kv[0][1], kv[0][2])):
+    _uygun, _sebep = sabah_vardiyasi_uygun_mu(_b, _e)
+    _sbh_rows.append({
+        "vardiya": _v, "baslangic": _b, "bitis": _e, "gun_sayisi": _gun,
+        "sabah_agent_calisabilir": _uygun, "red_sebebi": _sebep,
+    })
+sabah_vardiya_izin_df = pd.DataFrame(_sbh_rows)
 
-_baz_map_t = {}
-if "aylik_calisma_debug_df" in globals() and not aylik_calisma_debug_df.empty:
-    _baz_map_t = dict(zip(
-        aylik_calisma_debug_df["agent_user_code"].astype(str).str.strip(),
-        aylik_calisma_debug_df["baz_gereken_calisma"].astype(int),
-    ))
-
-model_off_tavan_asim = {}          # (agent, hafta) -> IntVar   (sadece soft modda)
-off_tavan_kisit_sayisi = 0
-off_tavan_atlanan = 0
-off_tavan_debug_rows = []
-off_tavan_marj_rows = []
-
-for a_raw in AGENTS:
-    a = str(a_raw).strip()
-    _tip_a = tip_map.get(a, {})
-    _zorunlu_calisma_toplam = 0
-
-    for _wk, _wk_gunler in _hafta_plan_gunleri.items():
-        # izin günleri sayıma girmez
-        _sayilan = []
-        for ds in _wk_gunler:
-            _tip = str(_tip_a.get(pd.to_datetime(ds).date(), "")).strip().lower()
-            if _tip == "izin":
+# --- kısıt ---
+n = 0
+_sbh_kapali_gun = {}
+for a in sabah_agents:
+    for ds in PLAN_GUNLER:
+        _toplam_var, _acik = 0, 0
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
                 continue
-            _sayilan.append(ds)
-        if not _sayilan:
-            continue
+            _toplam_var += 1
+            _b, _e = saat[(ds, v)]
+            _uygun, _ = sabah_vardiyasi_uygun_mu(_b, _e)
+            if _uygun:
+                _acik += 1
+            else:
+                model.Add(x[(a, ds, v)] == 0)
+                n += 1
+        # gün agent için zaten açıktı ama sabah kuralı hepsini kapattıysa: uyarı
+        if _toplam_var > 0 and _acik == 0:
+            _sbh_kapali_gun[ds] = _sbh_kapali_gun.get(ds, 0) + 1
 
-        # zorunlu off: talep edilmiş (off_t/off_t2) VEYA agentin hiç çalışamayacağı gün
-        _zorunlu = []
-        for ds in _sayilan:
-            _tip = str(_tip_a.get(pd.to_datetime(ds).date(), "")).strip().lower()
-            _var_mi = any((a, ds, v) in x for v in gun_vardiyalari.get(ds, []))
-            if _tip in ("off_t", "off_t2") or not _var_mi:
-                _zorunlu.append(ds)
+print(f"sabah çalışan agent: {len(sabah_agents)}")
+print(f"yasaklanan agent-gün-vardiya: {n}")
+print(f"başlangıç limiti: {SABAH_CALISIR_MAX_BASLANGIC_SAATI} | "
+      f"bitiş limiti: {SABAH_CALISIR_MAX_BITIS_SAATI} | "
+      f"gece vardiyası yasak: {SABAH_CALISIR_GECE_VARDIYA_YASAK}")
+print("\nPlandaki vardiyalar - sabah agent çalışabilir mi:")
+display(sabah_vardiya_izin_df)
 
-        _tavan = max(MODEL_OFF_HAFTALIK_MAX, len(_zorunlu))
-        _min_calisma = len(_sayilan) - _tavan
-        _zorunlu_calisma_toplam += max(0, _min_calisma)
-
-        off_tavan_debug_rows.append({
-            "agent_user_code": a, "hafta": _wk,
-            "sayilan_gun": len(_sayilan), "zorunlu_off": len(_zorunlu),
-            "tavan": _tavan, "min_calisma": max(0, _min_calisma),
-            "kisit_kuruldu": _min_calisma > 0,
-        })
-
-        if _min_calisma <= 0:
-            off_tavan_atlanan += 1      # tavan bağlayıcı değil
-            continue
-
-        _work_vars = [work[(a, ds)] for ds in _sayilan if (a, ds) in work]
-        if len(_work_vars) < len(_sayilan):
-            _min_calisma = len(_work_vars) - _tavan
-            if _min_calisma <= 0:
-                off_tavan_atlanan += 1
-                continue
-
-        if MODEL_OFF_HAFTALIK_HARD:
-            model.Add(sum(_work_vars) >= _min_calisma).WithName(f"off_tavan_{a}_{_wk}")
-        else:
-            _asim = model.NewIntVar(0, len(_work_vars), f"off_tavan_asim_{a}_{_wk}")
-            model_off_tavan_asim[(a, _wk)] = _asim
-            model.Add(sum(_work_vars) + _asim >= _min_calisma).WithName(f"off_tavan_soft_{a}_{_wk}")
-        off_tavan_kisit_sayisi += 1
-
-    # --- solve öncesi marj: haftalık zorunlu minimum vs aylık tavan ---
-    _baz = _baz_map_t.get(a)
-    if _baz is not None:
-        _aylik_tavan = _baz if a in _mk_agents_t else _baz + MAX_OVERTIME_PER_MONTH
-        off_tavan_marj_rows.append({
-            "agent_user_code": a,
-            "mesaiye_kalamaz": a in _mk_agents_t,
-            "haftalik_zorunlu_calisma_toplami": _zorunlu_calisma_toplam,
-            "baz_gereken_calisma": _baz,
-            "aylik_tavan": _aylik_tavan,
-            "marj": _aylik_tavan - _zorunlu_calisma_toplam,
-        })
-
-off_tavan_debug_df = pd.DataFrame(off_tavan_debug_rows)
-off_tavan_marj_df = pd.DataFrame(off_tavan_marj_rows)
-
-print(f"MODEL_OFF_HAFTALIK_MAX : {MODEL_OFF_HAFTALIK_MAX}")
-print(f"mod                    : {'HARD' if MODEL_OFF_HAFTALIK_HARD else 'SOFT (ceza=' + str(MODEL_OFF_TAVAN_ASIM_W) + ')'}")
-print(f"kurulan kısıt          : {off_tavan_kisit_sayisi} agent-hafta")
-print(f"bağlayıcı olmayan      : {off_tavan_atlanan} agent-hafta (kısıt kurulmadı)")
-
-if not off_tavan_debug_df.empty:
-    _gevsek = off_tavan_debug_df[off_tavan_debug_df["tavan"] > MODEL_OFF_HAFTALIK_MAX]
-    print(f"tavanı 2'nin üstüne çıkan agent-hafta: {len(_gevsek)} (3+ zorunlu off var)")
-
-# --- ÖN KONTROL: bu kısıt agentları imkânsız duruma sokuyor mu? ---
-if not off_tavan_marj_df.empty:
-    _negatif = off_tavan_marj_df[off_tavan_marj_df["marj"] < 0]
-    _sifir = off_tavan_marj_df[off_tavan_marj_df["marj"] == 0]
-    print(f"\nÖN KONTROL (haftalık zorunlu minimum vs aylık tavan):")
-    print(f"  marjı NEGATİF agent : {len(_negatif)}   <-- 0 değilse model INFEASIBLE olur")
-    print(f"  marjı SIFIR agent   : {len(_sifir)}")
-    if len(_negatif):
-        print("  !!! Bu agentlar haftalık tavan yüzünden aylık tavanı aşmak zorunda:")
-        display(_negatif.sort_values("marj").head(30))
+if _sbh_kapali_gun:
+    print("\n!!! UYARI: sabah kuralı yüzünden HİÇ uygun vardiya kalmayan agent-gün var.")
+    print("!!! Bu agentlar o gün çalışamaz; aylık minimumu tutturamazlarsa model INFEASIBLE olur:")
+    for _ds, _adet in sorted(_sbh_kapali_gun.items()):
+        print(f"    {pd.to_datetime(_ds).strftime('%Y-%m-%d')}: {_adet} agent")
 else:
-    print("\nÖN KONTROL atlandı: aylik_calisma_debug_df yok "
-          "([HAZIRLIK / KISIT] - AYLIK ÇALIŞMA DENGESİ çalıştı mı?)")
+    print("\nHer sabah agenti için, açık olan her günde en az bir uygun vardiya var.")
 
 
 
+# %% [KONTROL 10] - SABAH ÇALIŞANLAR (sabah vardiya penceresi)
+# Üç şart: bitiş <= limit, başlangıç <= limit, gece/akşam vardiyası değil.
+# Hangi şartın ihlal edildiği de yazılır. Bu hücre modele DOKUNMAZ.
 
-# haftalık off tavanı aşımı - sadece SOFT modda değişken üretilir
-if "model_off_tavan_asim" in globals() and model_off_tavan_asim:
-    for (a, wk), var in model_off_tavan_asim.items():
-        objective_terms.append(MODEL_OFF_TAVAN_ASIM_W * var)
-    print("haftalık off tavanı soft ceza terimi:", len(model_off_tavan_asim))
+_K_BITIS = _dk(SABAH_CALISIR_MAX_BITIS_SAATI)
+_K_BASLANGIC = _dk(globals().get("SABAH_CALISIR_MAX_BASLANGIC_SAATI", "23:59"))
+_K_GECE_YASAK = globals().get("SABAH_CALISIR_GECE_VARDIYA_YASAK", False)
+_K_GECE_SET = globals().get("GECE_AKSAM_VARDIYA_SET", set())
 
 
-# %% [KONTROL 8] - CUMARTESİ-PAZAR GERÇEK ÇİFT OFF
-# Gerçek OFF: izin DEĞİL; garantili off (hard) veya work=0. work=1 -> OFF değil.
-# 2026-08-05: off_t soft olduğu için artık otomatik OFF sayılmıyor;
-# model o günü gerçekten off verdiyse (work=0) zaten aşağıdaki satır True döner.
-_garantili_off_tipleri = set()
-if globals().get("ENABLE_OFF_T_HARD", True):
-    _garantili_off_tipleri.add("off_t")
-if globals().get("ENABLE_OFF_T2_HARD", True):
-    _garantili_off_tipleri.add("off_t2")
+def _k_sabah_sebep(bas, bit):
+    """İhlal sebebini döner, ihlal yoksa None."""
+    b, e = str(bas).strip()[:5], str(bit).strip()[:5]
+    bas_dk, bit_dk = _dk(b), _dk(e)
+    if bit_dk < bas_dk:
+        bit_dk += 24 * 60
+    if _K_GECE_YASAK and (b, e) in _K_GECE_SET:
+        return "gece/akşam vardiyası"
+    if bas_dk > _K_BASLANGIC:
+        return f"başlangıç > {SABAH_CALISIR_MAX_BASLANGIC_SAATI}"
+    if bit_dk > _K_BITIS:
+        return f"bitiş > {SABAH_CALISIR_MAX_BITIS_SAATI}"
+    return None
 
-def _gercek_off(a, ds):
-    d = pd.to_datetime(ds).date()
-    tip = str(tip_map.get(a, {}).get(d, "")).strip().lower()
-    if tip == "izin": return False
-    if tip in _garantili_off_tipleri: return True
-    return cozum_calisma.get((a, ds), 0) == 0
+
+sabah = set(
+    df_tam.loc[
+        pd.to_numeric(df_tam["sabah_calisir_flg"], errors="coerce").fillna(0).astype(int) == 1,
+        "agent_user_code",
+    ].astype(str).str.strip()
+)
 
 ihlal = []
-for a_raw in AGENTS:
-    a = str(a_raw).strip()
-    tip_dates = tip_map.get(a, {})
-    plan_izin = {d for d, t in tip_dates.items() if str(t).strip().lower() == "izin"}
-    tum_izinli = len(PLAN_GUNLER) > 0 and all(pd.to_datetime(ds).date() in plan_izin for ds in PLAN_GUNLER)
-    if tum_izinli:
-        continue  # tam-ay izinli agent için zorunluluk kurulmaz
-    var_mi = any(_gercek_off(a, sat) and _gercek_off(a, sun) for sat, sun in weekend_pairs)
-    if not var_mi:
-        ihlal.append(a)
-kaydet("Ayda en az 1 Cmt-Pzr çift OFF", len(ihlal))
-print("   çift OFF'u olmayan agentlar:", ihlal[:30])
+for a in sabah:
+    for ds in PLAN_GUNLER:
+        v = cozum_atama.get((a, ds))
+        if not v:
+            continue
+        bas, bit = saat[(ds, v)]
+        _sebep = _k_sabah_sebep(bas, bit)
+        if _sebep:
+            ihlal.append({
+                "agent_user_code": a,
+                "tarih": pd.to_datetime(ds).strftime("%Y-%m-%d"),
+                "vardiya": v,
+                "baslangic": str(bas).strip()[:5],
+                "bitis": str(bit).strip()[:5],
+                "sebep": _sebep,
+            })
+
+sabah_ihlal_df = pd.DataFrame(ihlal)
+print(f"sabah çalışan agent: {len(sabah)} | limitler: başlangıç <= "
+      f"{globals().get('SABAH_CALISIR_MAX_BASLANGIC_SAATI', '-')}, "
+      f"bitiş <= {SABAH_CALISIR_MAX_BITIS_SAATI}, gece yasak: {_K_GECE_YASAK}")
+kaydet("Sabah çalışanlar sabah vardiya penceresinde", len(ihlal))
+if ihlal:
+    print("\nİhlal sebebi dağılımı:")
+    print(sabah_ihlal_df["sebep"].value_counts().to_string())
+    display(sabah_ihlal_df.head(50))

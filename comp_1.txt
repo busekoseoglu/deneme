@@ -1242,5 +1242,197 @@ print("OFF_TALEP_KARSILANMAMA_W:", OFF_TALEP_KARSILANMAMA_W)
 if "model_off_tavan_asim" in globals() and model_off_tavan_asim:
     for (a, wk), var in model_off_tavan_asim.items():
         objective_terms.append(MODEL_OFF_TAVAN_ASIM_W * var)
+
+
+
+
+# %% [HÜCRE] - ARİFE HARD / RESMİ TATİL SOFT DEBUG ÇALIŞMA KURALLARI
+#
+# 2026-08-06 DÜZELTME:
+#   - eski izin_map yapısı kaldırıldı, tip_map doğrudan okunuyor
+#   - başka hücredeki helper'lara (normalize_agent / agent_hard_no_work_mi_kontrol /
+#     get_tip_from_tip_map) bağımlılık kaldırıldı, hücre tek başına çalışır
+#   - ARIFE_ZORLANMAZ_TIPLERI kümesi [HÜCRE] - FAZLA ATAMA ÜST LİMİTİ ile BİREBİR AYNI:
+#       izin / off_t2 -> gün kapalı, x yok
+#       off_t         -> x VAR ama agent 09:00-13:00'a ZORLANMAZ. off_t soft bir
+#                        talep; hard zorlarsak karşılanma ihtimali sıfırlanır.
+#                        Model isterse kendi atar ve cezayı öder.
+#     13:00 sonrası yasak kuralı off_t'li agenta da UYGULANIR (aşağıdaki döngü
+#     if/else dışında), yani o agent geç vardiyaya giremez.
+
+ARIFE_ZORLANMAZ_TIPLERI = {"izin", "off_t", "off_t2"}
+
+
+def _arife_tip(a, ds):
+    _d = pd.to_datetime(ds).date()
+    return str(tip_map.get(str(a).strip(), {}).get(_d, "")).strip().lower()
+
+
+def _arife_zorlanmaz_mi(a, ds):
+    return _arife_tip(a, ds) in ARIFE_ZORLANMAZ_TIPLERI
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-10 DÜZELTME - ARİFE HAFTA SONUNA DENK GELİRSE
+# Arife günü Cumartesi/Pazar'a düşerse 09:00-13:00 zorunlu ataması bazı
+# agentlar için DOĞRUDAN ÇELİŞKİ yaratır:
+#   hamile / süt izni  -> [HÜCRE 14] hafta sonu x == 0 diyor, arife x == 1 diyor
+#   mesaiye kalamaz    -> [KISIT] - MESAİYE KALAMAZ work == 0 diyor (arife hafta
+#                         sonu yasağı), arife x == 1 diyor
+# İkisi de model.Add ile HARD olduğu için model INFEASIBLE olur.
+# Çözüm: arife hafta sonundaysa bu agentları ZORLAMA. 13:00 sonrası yasak
+# kuralı aynen uygulanmaya devam eder, yani o gün zaten çalışmazlar.
+# Arife hafta içiyse bu blok hiçbir şey yapmaz.
+# ---------------------------------------------------------------------------
+_hamile_sut_ar = set()
+if "hamile_flg" in df_tam.columns or "sut_izni_flg" in df_tam.columns:
+    _h = pd.to_numeric(df_tam.get("hamile_flg", 0), errors="coerce").fillna(0).astype(int)
+    _s = pd.to_numeric(df_tam.get("sut_izni_flg", 0), errors="coerce").fillna(0).astype(int)
+    _hamile_sut_ar = set(
+        df_tam.loc[(_h == 1) | (_s == 1), "agent_user_code"].astype(str).str.strip()
+    )
+
+_mesaiye_kalamaz_ar = set()
+if "mesaiye_kalamaz_flg" in df_tam.columns:
+    _mk = pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce").fillna(0).astype(int)
+    _mesaiye_kalamaz_ar = set(
+        df_tam.loc[_mk == 1, "agent_user_code"].astype(str).str.strip()
+    )
+
+
+def _arife_haftasonu_engeli(a, ds):
+    """Arife hafta sonundaysa bu agent 09:00-13:00'a zorlanabilir mi?
+    (engel_var_mi, sebep) döner. Hafta içiyse her zaman (False, "")."""
+    if pd.to_datetime(ds).weekday() not in (5, 6):
+        return False, ""
+    if a in _hamile_sut_ar:
+        return True, "hafta_sonu_arife_hamile_sut"
+    if globals().get("ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK", False) and a in _mesaiye_kalamaz_ar:
+        return True, "hafta_sonu_arife_mesaiye_kalamaz"
+    return False, ""
+
+
+arife_haftasonu_zorlama_atlanan = 0
+
+
+arife_mesai = {}
+resmi_tatil_mesai = {}
+resmi_tatil_kisitli_ihlal = {}
+
+tatil_constraints = 0
+arife_09_13_zorunlu_constraints = 0
+arife_13_sonrasi_yasak_constraints = 0
+arife_non_kisitli_ozel_vardiya_yasak_constraints = 0
+resmi_tatil_kisitli_soft_constraints = 0
+tatil_skip_rows = []
+
+for a in AGENTS:
+    a = str(a).strip()
+
+    # 1) ARİFE KURALLARI - HARD
+    for ds in arife_plan_gunleri:
+        ds_key_val = tatil_ds_key(ds)
+        ozel_v = ARIFE_GUNLERI[ds_key_val]["ozel_vardiya_kodu"]
+
+        if a in tatil_kisitli_agents:
+            _hs_engel, _hs_sebep = _arife_haftasonu_engeli(a, ds)
+            if _arife_zorlanmaz_mi(a, ds):
+                tatil_skip_rows.append({
+                    "agent_user_code": a,
+                    "date": ds,
+                    "rule": "arife_09_13",
+                    "reason": _arife_tip(a, ds) or "tip_yok",
+                })
+            elif _hs_engel:
+                # arife hafta sonunda: zorlama YOK (yoksa hard çelişki -> infeasible)
+                arife_haftasonu_zorlama_atlanan += 1
+                tatil_skip_rows.append({
+                    "agent_user_code": a,
+                    "date": ds,
+                    "rule": "arife_09_13",
+                    "reason": _hs_sebep,
+                })
+            else:
+                if (a, ds, ozel_v) in x:
+                    model.Add(x[(a, ds, ozel_v)] == 1)
+                    arife_09_13_zorunlu_constraints += 1
+                else:
+                    tatil_skip_rows.append({
+                        "agent_user_code": a,
+                        "date": ds,
+                        "rule": "arife_09_13",
+                        "reason": "ozel_09_13_x_yok",
+                    })
+
+            for v in gun_vardiyalari.get(ds, []):
+                if (a, ds, v) not in x:
+                    continue
+                if arife_kisitli_yasak_vardiya_mi.get((ds, v), False):
+                    model.Add(x[(a, ds, v)] == 0)
+                    arife_13_sonrasi_yasak_constraints += 1
+        else:
+            if (a, ds, ozel_v) in x:
+                model.Add(x[(a, ds, ozel_v)] == 0)
+                arife_non_kisitli_ozel_vardiya_yasak_constraints += 1
+
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+            if arife_mesai_vardiyasi_mi.get((ds, v), False):
+                arife_mesai[(a, ds, v)] = model.NewBoolVar(f"arife_mesai_{a}_{ds}_{v}")
+                model.Add(arife_mesai[(a, ds, v)] == x[(a, ds, v)])
+                tatil_constraints += 1
+
+    # 2) RESMİ TATİL KURALLARI - SOFT DEBUG
+    for ds in resmi_tatil_plan_gunleri:
+        for v in gun_vardiyalari.get(ds, []):
+            if (a, ds, v) not in x:
+                continue
+
+            if a in tatil_kisitli_agents:
+                resmi_tatil_kisitli_ihlal[(a, ds, v)] = model.NewBoolVar(
+                    f"resmi_tatil_kisitli_ihlal_{a}_{ds}_{v}"
+                )
+                model.Add(resmi_tatil_kisitli_ihlal[(a, ds, v)] >= x[(a, ds, v)])
+                resmi_tatil_kisitli_soft_constraints += 1
+
+            if resmi_tatil_mesai_vardiyasi_mi.get((ds, v), False):
+                resmi_tatil_mesai[(a, ds, v)] = model.NewBoolVar(f"resmi_tatil_mesai_{a}_{ds}_{v}")
+                model.Add(resmi_tatil_mesai[(a, ds, v)] == x[(a, ds, v)])
+                tatil_constraints += 1
+
+_arife_hs_gunleri = [d for d in arife_plan_gunleri if pd.to_datetime(d).weekday() in (5, 6)]
+print("Arife özel vardiyasına zorlanmayan tipler:", sorted(ARIFE_ZORLANMAZ_TIPLERI))
+print("Plan içindeki arife günleri:",
+      [pd.to_datetime(d).strftime("%Y-%m-%d (%a)") for d in arife_plan_gunleri] or "yok")
+print("Bunlardan HAFTA SONUNA denk gelen:",
+      [pd.to_datetime(d).strftime("%Y-%m-%d (%a)") for d in _arife_hs_gunleri] or "yok")
+print("Hafta sonu arife - zorunlu atama atlanan agent-gün:", arife_haftasonu_zorlama_atlanan)
+print("Arife 09-13 zorunlu atama kısıtı:", arife_09_13_zorunlu_constraints)
+print("Arife 13 sonrası hard yasak kısıtı:", arife_13_sonrasi_yasak_constraints)
+print("Arife non-kısıtlı özel vardiya yasak kısıtı:", arife_non_kisitli_ozel_vardiya_yasak_constraints)
+print("Arife mesai değişken sayısı:", len(arife_mesai))
+print("Resmi tatil kısıtlı soft ihlal kısıtı:", resmi_tatil_kisitli_soft_constraints)
+print("Resmi tatil kısıtlı ihlal değişken sayısı:", len(resmi_tatil_kisitli_ihlal))
+print("Resmi tatil mesai değişken sayısı:", len(resmi_tatil_mesai))
+print("Toplam tatil yardımcı kısıtı:", tatil_constraints)
+
+if tatil_skip_rows:
+    tatil_skip_df = pd.DataFrame(tatil_skip_rows)
+    display(tatil_skip_df.head(50))
+
+
+
+# ===== 2026-08-06 EKLENEN - ARIFE HAFTA SONU / MESAIYE KALAMAZ =====
+    "ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK": True,
+    # Arife gunu HAFTA SONUNA denk geldiginde mesaiye_kalamaz_flg = 1 olan agent
+    # o gun calistirilmaz; kotasini hafta ici gunlerden doldurur.
+    # Hafta ici arife gunlerine dokunmaz.
+    # ===================================================================
     print("haftalık off tavanı soft ceza terimi:", len(model_off_tavan_asim))
 
+
+
+# ===== 2026-08-06 EKLENEN - ARIFE HAFTA SONU / MESAIYE KALAMAZ =====
+ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK = CONFIG["ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK"]
+# ===================================================================

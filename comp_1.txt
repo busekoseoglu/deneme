@@ -5,8 +5,13 @@
 # NORM / TELAFİ / MESAİ tanımı:
 #
 # 1) HAFTALIK ADIM - hangi hafta sonu günleri "fazla"?
+#      hafta_kota    = o haftadaki hafta içi (Pzt-Cum) günlerden İZİN ve RESMİ TATİL
+#                      OLMAYANLARIN sayısı. Aydan sarkan haftalarda (W31) Temmuz'un
+#                      hafta içi günleri de sayılır.
+#                      SABİT 5 DEĞİL: izin bir iş gününün yerine geçer, o hafta
+#                      agentin normal çalışması 5 değil 4'tür.
 #      hafta_calisma = o ISO haftada çalışılan gün sayısı
-#      fazla         = max(0, hafta_calisma - NORMAL_WORK_DAYS)
+#      fazla         = max(0, hafta_calisma - hafta_kota)
 #      o haftanın çalışılan hafta sonu günleri tarih sırasına dizilir;
 #      son `fazla` tanesi ADAY, kalanı NORM çalışma.
 #      W31 gibi aydan sarkan haftalarda Temmuz'da çalışılan günler de sayılır.
@@ -93,6 +98,7 @@ _g_kapsam    = globals().get("gecmis_kapsam", {})
 _plan_dates = sorted(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
 _PLAN_BAS = min(_plan_dates)
 _PLAN_BIT = max(_plan_dates)
+_plan_date_set_x = set(_plan_dates)
 
 _resmi_tatil_set = set()
 if "resmi_tatil_plan_gunleri" in globals():
@@ -167,7 +173,24 @@ for a_raw in AGENTS:
         _temmuz_ek = len({d for d in _gecmis_a if d in _hafta_araligi and d < _PLAN_BAS})
 
         _hafta_calisma = len(_calisilan) + _temmuz_ek
-        _fazla = max(0, _hafta_calisma - _NORMAL_WORK_DAYS)
+
+        # --- haftalık kota: izin ve resmi tatil günleri DÜŞÜLÜR ---
+        _kota = 0
+        for _k2 in range(5):                       # Pzt..Cum
+            _d2 = _pzt + _td(days=_k2)
+            if _d2 < _PLAN_BAS:
+                # aydan sarkan hafta (W31): Temmuz'un hafta içi günleri
+                if _d2 not in _g_izin.get(a, set()):
+                    _kota += 1
+            elif _d2 in _plan_date_set_x:
+                if _d2 in _resmi_tatil_set:
+                    continue
+                if str(_tip_map.get(a, {}).get(_d2, "")).strip().lower() == "izin":
+                    continue
+                _kota += 1
+        _kota = min(_NORMAL_WORK_DAYS, _kota)
+
+        _fazla = max(0, _hafta_calisma - _kota)
 
         _hs_calisilan = [ds for ds in _calisilan if pd.to_datetime(ds).weekday() in (5, 6)]
         if _fazla > 0 and _hs_calisilan:
@@ -185,7 +208,7 @@ for a_raw in AGENTS:
             "plan_ici_calisma": len(_calisilan),
             "temmuzdan_gelen_calisma": _temmuz_ek,
             "hafta_toplam_calisma": _hafta_calisma,
-            "kota": _NORMAL_WORK_DAYS,
+            "kota": _kota,
             "fazla": _fazla,
             "hafta_sonu_calisilan": len(_hs_calisilan),
             "norm": len(_norm_bu_hafta),
@@ -418,11 +441,18 @@ print("\nAGENT ÖZET:")
 print("  kotayı TAM dolduran :", int((agent_ozet_df["kota_farki"] == 0).sum()))
 print("  FAZLA çalışan       :", int((agent_ozet_df["kota_farki"] > 0).sum()))
 print("  EKSİK çalışan       :", int((agent_ozet_df["kota_farki"] < 0).sum()))
-_tutarsiz = agent_ozet_df[
-    agent_ozet_df["mesai_hafta_sonu"] > agent_ozet_df["kota_farki"].clip(lower=0)
-]
-print("  MESAİ sayısı kota_farki ile tutarsız agent:", len(_tutarsiz),
-      "(0 olmalı)")
+# MESAİ gün sayısı, kota_farki (aylık fazla çalışma) ile BİREBİR eşit olmalı.
+# Eşit değilse haftalık aday hesabı eksik demektir.
+_beklenen_mesai = agent_ozet_df["kota_farki"].clip(lower=0)
+_tutarsiz = agent_ozet_df[agent_ozet_df["mesai_hafta_sonu"] != _beklenen_mesai]
+print("  MESAİ sayısı kota_farki ile TUTARSIZ agent:", len(_tutarsiz), "(0 olmalı)")
+if len(_tutarsiz):
+    print("  !!! Aşağıdaki agentlarda MESAİ etiketi eksik/fazla:")
+    display(_tutarsiz[[c for c in ["agent_user_code", "agent_name", "takim",
+                                   "kota_baz_gereken_calisma", "sayilan_calisma",
+                                   "kota_farki", "norm_hafta_sonu",
+                                   "telafi_hafta_sonu", "mesai_hafta_sonu"]
+                      if c in _tutarsiz.columns]].head(40))
 
 # ---------------------------------------------------------- COVERAGE TABLOSU
 # Her (gün, vardiya) için: kaç kişi gerekiyordu, kaç kişi atandı, fark ne.

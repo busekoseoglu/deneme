@@ -658,7 +658,17 @@ with pd.ExcelWriter(EXCEL_DOSYA, engine="openpyxl") as writer:
         ws.column_dimensions[get_column_letter(_kol_idx[c])].width = 13
     ws.row_dimensions[1].height = 32
 
-    ws.freeze_panes = ws.cell(row=2, column=len(_kimlik_kolonlari) + 1)
+    # Sadece bu kolonlar sabit kalsın; kalan kimlik/bayrak kolonları kayabilsin.
+    _SABIT_KOLONLAR = ["agent_user_code", "agent_name", "working_main_group", "takim"]
+    _dondurulacak = 0
+    for _c in takvim_df.columns:
+        if _c in _SABIT_KOLONLAR:
+            _dondurulacak += 1
+        else:
+            break
+    ws.freeze_panes = ws.cell(row=2, column=_dondurulacak + 1)
+    print(f"TAKVIM dondurulan kolon: {_dondurulacak} "
+          f"({', '.join(list(takvim_df.columns)[:_dondurulacak])})")
     ws.auto_filter.ref = f"A1:{get_column_letter(len(takvim_df.columns))}1"
 
     # ---------------- LEJANT renk örnekleri

@@ -1,22 +1,3 @@
-# ===== 2026-08-12 EKLENEN - KIDEM / GECE VARDIYASI YASAGI =====
-    "KIDEM_MIN_AY": 6,                          # bu ayin altindaki agent gece vardiyasina giremez
-    "KIDEM_YASAK_VARDIYA_BASLANGIC": ("00:00",),  # yasak vardiyalar BASLANGIC saatinden tanimlanir
-    "KIDEM_EKSIK_VARSAYILAN_AY": 0,             # kidem tablosunda OLMAYAN agent kac ay sayilsin
-                                                # 0 -> kidemsiz sayilir (gece vardiyasina giremez)
-                                                # GUVENLI taraf budur; veri duzelince degistirilebilir
-    # (vardiya kodu aya gore degisebilir, baslangic saati sabit kalir)
-
-
-
-# ===== 2026-08-12 EKLENEN - KIDEM / GECE VARDIYASI YASAGI =====
-KIDEM_MIN_AY = CONFIG["KIDEM_MIN_AY"]
-KIDEM_YASAK_VARDIYA_BASLANGIC = CONFIG["KIDEM_YASAK_VARDIYA_BASLANGIC"]
-KIDEM_EKSIK_VARSAYILAN_AY = CONFIG["KIDEM_EKSIK_VARSAYILAN_AY"]
-# ==============================================================
-
-
-
-
 # %% [KISIT] - KIDEMSİZ AGENT GECE VARDİYASI YASAĞI (HARD)
 # Kıdemi KIDEM_MIN_AY aydan az olan agent, KIDEM_YASAK_VARDIYA_BASLANGIC saatlerinde
 # başlayan vardiyalara (00:00 gece vardiyası) atanamaz. Hafta içi / hafta sonu fark etmez.
@@ -103,9 +84,13 @@ print(f"yasak (gün, vardiya) kovası: {len(set(_yasak_gun_vardiya))}")
 print(f"kurulan kısıt: {kidem_gece_yasak_kisiti}")
 
 # ---------------- 3) ÖN KONTROL: gece vardiyasını kim karşılayacak? ----------------
-# Takım base kilidi yüzünden gece vardiyasına ancak base'i gece olan takımlar girebilir.
-# Kıdemsizi olan bir takım gece base'i alırsa o kişiler o hafta çalışamaz -> model
-# o takımı seçmez. Dolayısıyla gece kapasitesi KIDEMSİZİ OLMAYAN takımlarla sınırlı.
+# Gece vardiyasına ancak base'i gece olan takımlar girebilir (takım kilidi).
+#
+# ENABLE_TAKIM_BASE_MUAFIYET = True  -> kıdemsizi olan takım da gece base alabilir;
+#     kıdemsiz agent o hafta kilitten MUAF olup başka vardiyada çalışır, takımın
+#     geri kalanı geceye girer. Kapasite = TÜM agentlar - kıdemsizler.
+# ENABLE_TAKIM_BASE_MUAFIYET = False -> kıdemsizi olan takım gece base alamaz
+#     (alırsa o kişiler o hafta hiç çalışamaz). Kapasite = kıdemsizi OLMAYAN takımlar.
 _agent_team_k = globals().get("agent_team", {})
 _takim_kidemsiz = {}
 _takim_boyut = {}
@@ -117,7 +102,14 @@ for a in _agents_x:
     if a in kidemsiz_agents:
         _takim_kidemsiz[t] = _takim_kidemsiz.get(t, 0) + 1
 
-_temiz_kapasite = sum(v for t, v in _takim_boyut.items() if _takim_kidemsiz.get(t, 0) == 0)
+_muafiyet_acik = bool(globals().get("ENABLE_TAKIM_BASE_MUAFIYET", False))
+if _muafiyet_acik:
+    # her takım gece base alabilir; sadece kıdemsizler o vardiyaya giremez
+    _temiz_kapasite = sum(_takim_boyut.values()) - sum(_takim_kidemsiz.values())
+    _kapasite_aciklama = "tüm takımlar (muafiyet açık), kıdemsizler hariç"
+else:
+    _temiz_kapasite = sum(v for t, v in _takim_boyut.items() if _takim_kidemsiz.get(t, 0) == 0)
+    _kapasite_aciklama = "sadece kıdemsizi OLMAYAN takımlar (muafiyet kapalı)"
 _cov_low_k = globals().get("coverage_lower", {})
 _gece_max_talep = 0
 for ds, v in _yasak_gun_vardiya:
@@ -126,73 +118,20 @@ for ds, v in _yasak_gun_vardiya:
 
 kidem_takim_df = pd.DataFrame([
     {"takim": t, "agent_sayisi": _takim_boyut[t], "kidemsiz": _takim_kidemsiz.get(t, 0),
-     "gece_base_alabilir": _takim_kidemsiz.get(t, 0) == 0}
+     "gece_base_alabilir": _muafiyet_acik or _takim_kidemsiz.get(t, 0) == 0}
     for t in sorted(_takim_boyut)
 ]).sort_values(["gece_base_alabilir", "kidemsiz"], ascending=[True, False])
 
 print(f"\nÖN KONTROL - gece vardiyası kapasitesi (hafta içi):")
-print(f"  kıdemsizi OLMAYAN takımların toplam mevcudu : {_temiz_kapasite}")
-print(f"  gece vardiyası en yüksek hafta içi talebi   : {_gece_max_talep}")
+print(f"  takım base muafiyeti          : {'AÇIK' if _muafiyet_acik else 'KAPALI'}")
+print(f"  kapasite kaynağı              : {_kapasite_aciklama}")
+print(f"  gece vardiyasına girebilecek  : {_temiz_kapasite} agent")
+print(f"  gece vardiyası en yüksek hafta içi talebi : {_gece_max_talep}")
 if _gece_max_talep > _temiz_kapasite:
-    print("  !!! UYARI: talep, kıdemsizi olmayan takımların kapasitesini AŞIYOR.")
-    print("  !!! Takım base kapasite guard'ı sıkışabilir -> INFEASIBLE riski.")
+    print("  !!! UYARI: talep kapasiteyi AŞIYOR -> takım base kapasite guard'ı sıkışabilir.")
+    print("  !!! INFEASIBLE riski. Muafiyet kapalıysa açmayı dene.")
 else:
     print("  marj:", _temiz_kapasite - _gece_max_talep)
 if len(kidemsiz_agents):
-    print("\nKıdemsizi olan takımlar:")
+    print("\nKıdemsizi olan takımlar (muafiyet açıkken bunlar da gece base alabilir):")
     display(kidem_takim_df[kidem_takim_df["kidemsiz"] > 0])
-
-
-
-
-
-# %% [KONTROL] - KIDEMSİZ AGENT GECE VARDİYASI (HARD)
-# Kıdemi KIDEM_MIN_AY aydan az olan agent gece vardiyasında çalışmamalı.
-# Bu hücre modele DOKUNMAZ, mevcut çözümü denetler.
-
-_K_MIN = globals().get("KIDEM_MIN_AY")
-_K_BAS = {str(b).strip()[:5] for b in globals().get("KIDEM_YASAK_VARDIYA_BASLANGIC", ())}
-_K_MAP = globals().get("kidem_ay_map", {})
-
-if _K_MIN is None or not _K_BAS:
-    print("!!! KIDEM_MIN_AY / KIDEM_YASAK_VARDIYA_BASLANGIC yok - kontrol atlandı.")
-    kidem_ihlal_df = pd.DataFrame()
-else:
-    _K_VARSAYILAN = float(globals().get("KIDEM_EKSIK_VARSAYILAN_AY", 0))
-    _agents_k = [str(a).strip() for a in AGENTS]
-
-    def _kidem_of_k(a):
-        _v = _K_MAP.get(a)
-        return _K_VARSAYILAN if (_v is None or pd.isna(_v)) else float(_v)
-
-    _kidem_yok_k = [a for a in _agents_k if a not in _K_MAP or pd.isna(_K_MAP.get(a))]
-    # kıdem kaydı olmayanlar da varsayılan (0 ay) ile kıdemsiz sayılır -> kontrole dahil
-    _kidemsiz_k = {a for a in _agents_k if _kidem_of_k(a) < float(_K_MIN)}
-
-    _rows = []
-    for a in _kidemsiz_k:
-        for ds in PLAN_GUNLER:
-            v = cozum_atama.get((a, ds))
-            if not v:
-                continue
-            _bas, _bit = saat[(ds, v)]
-            if str(_bas).strip()[:5] in _K_BAS:
-                _rows.append({
-                    "agent_user_code": a,
-                    "kidem_ay": _kidem_of_k(a),
-                    "kidem_kaydi_var": a in _K_MAP and not pd.isna(_K_MAP.get(a)),
-                    "tarih": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                    "vardiya": v,
-                    "baslangic": str(_bas).strip()[:5],
-                    "bitis": str(_bit).strip()[:5],
-                })
-    kidem_ihlal_df = pd.DataFrame(_rows)
-
-    print(f"KIDEM_MIN_AY: {_K_MIN} ay | yasak başlangıç: {sorted(_K_BAS)}")
-    print(f"kıdemsiz agent: {len(_kidemsiz_k)} / {len(_agents_k)}")
-    if _kidem_yok_k:
-        print(f"!!! kıdem kaydı OLMAYAN agent: {len(_kidem_yok_k)} "
-              f"- {_K_VARSAYILAN} ay kabul edilip kıdemsiz sayıldılar (kontrole dahil)")
-    kaydet(f"Kıdemsiz agent gece vardiyasında değil (<{_K_MIN} ay)", len(_rows))
-    if _rows:
-        display(kidem_ihlal_df.sort_values(["agent_user_code", "tarih"]))

@@ -1,35 +1,14 @@
-# =====================================================
-    # ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
-    # Takimlarin gecmiste hangi vardiyada kac gun calistigina bakip bu ayin
-    # dagitimini dengeler. Amac: yil sonunda tum takimlarin ilgili vardiyadaki
-    # calisma gun sayisi birbirine yakin olsun.
-    # Gecmis veri: [HUCRE 3D] - TAKIM VARDIYA GECMISI (SQL) -> takim_vardiya_gecmis_map
-    "ENABLE_TAKIM_VARDIYA_DENGE": True,
-    # Dengelenecek vardiyalar BASLANGIC saatinden tanimlanir (vardiya kodu aya
-    # gore degisir, baslangic saati sabit kalir). Yeni vardiya eklemek icin
-    # tuple'a eklemek yeterli: ("15:00", "17:00")
-    "TAKIM_VARDIYA_DENGE_BASLANGICLARI": ("15:00",),
-    "TAKIM_VARDIYA_DENGE_W": 500,               # kumulatif dengesizlik cezasi (agirlik)
-    "TAKIM_VARDIYA_DENGE_MAX_HAFTA": 2,         # bir takim bu ay en fazla kac hafta alsin
-    "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W": 5000,   # tavan asimi cezasi (SOFT)
-    # Tavan neden SOFT: [HUCRE] - HAFTALIK TAKIM BASE KAPASITE KORUMASI her hafta
-    # o vardiyaya yeterli takim secilmesini ZORUNLU kiliyor. Tavan HARD olsaydi
-    # ikisi celisip INFEASIBLE verebilirdi.
-    "TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN": 0,  # gecmis tabloda olmayan takim kac gun sayilsin
-    # =============================================================
-
-
-
-# ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
-ENABLE_TAKIM_VARDIYA_DENGE = CONFIG["ENABLE_TAKIM_VARDIYA_DENGE"]
-TAKIM_VARDIYA_DENGE_BASLANGICLARI = CONFIG["TAKIM_VARDIYA_DENGE_BASLANGICLARI"]
-TAKIM_VARDIYA_DENGE_W = CONFIG["TAKIM_VARDIYA_DENGE_W"]
-TAKIM_VARDIYA_DENGE_MAX_HAFTA = CONFIG["TAKIM_VARDIYA_DENGE_MAX_HAFTA"]
-TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W = CONFIG["TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W"]
-TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN = CONFIG["TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN"]
 # =============================================================
-
-
+    # ===== 2026-08-12 EKLENEN - TAKIM BUTUNLUGU (BASE YASAGI) =====
+    # Bir vardiyada takimin bu orandan FAZLASI calisamiyorsa, o vardiya o takima
+    # base olarak verilemez. Amac: herkesin sabah_calisir_flg'i 1 olan ekipte
+    # model gec base secip TUM ekibi muaf birakmasin -> ekip bolunmesin.
+    # Bolunme sadece KARMA ekiplerde (flg 1 olan + olmayan bir arada) olsun.
+    #   0.5  -> cogunluk calisamiyorsa o base kapali (onerilen)
+    #   0.99 -> sadece TAMAMI calisamiyorsa kapali
+    #   1.0  -> kural DEVRE DISI (12 Agustos oncesi davranis)
+    "TAKIM_BASE_MAX_YASAKLI_ORAN": 0.5,
+    # ==============================================================
 
 
 # %% [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL)
@@ -160,6 +139,7 @@ else:
     print("\nNOT: TAKIM_VARDIYA_DENGE_BASLANGICLARI yok (CONFIG çalışmamış) - dağılım atlandı.")
 
 display(df_takim_vardiya_gecmis.head())
+
 
 
 
@@ -405,7 +385,6 @@ if "takim_vardiya_denge_asim" in globals() and takim_vardiya_denge_asim:
 
 
 
-
 # %% [KONTROL] - TAKIM VARDİYA GEÇMİŞ DENGESİ [RAPOR/SOFT]
 # Ön koşul: [KONTROL 0] - SOLVER  +  [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ
 # Denge SOFT'tur: burada "ihlal" yoktur, DENGESİZLİK ölçülür.
@@ -506,7 +485,6 @@ else:
 
     print(f"\nDetay: takim_vardiya_denge_sonuc_df ({takim_vardiya_denge_sonuc_df.shape[0]} satır) "
           f"-> Excel TAKIM_VARDIYA_DENGE sayfası")
-
 
 
 
@@ -1122,6 +1100,7 @@ _ham_sheetler = [
     # 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI
     ("TAKIM_VARDIYA_DENGE", globals().get("takim_vardiya_denge_sonuc_df")),
     ("TAKIM_VARDIYA_GECMIS_HAM", globals().get("df_takim_vardiya_gecmis")),
+    ("TAKIM_BASE_YASAK", globals().get("takim_base_yasak_df")),
 ]
 
 _kural_df = globals().get("ihlal_ozet_df")

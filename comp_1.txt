@@ -314,10 +314,13 @@ def plan_denetle(calisma, saat_atama, etiket):
                                "agent_user_code": _a, "tarih": str(_d),
                                "vardiya": f"önceki {_p[0]}-{_p[1]} / bugün {_st[0]}-{_st[1]}"})
 
-        # --- ardışık 7+ gün (önceki ay dahil, AMA sadece plana taşan seriler) ---
-        # Önceki ayın planı BAŞKASININ sorumluluğu. Seri tamamen önceki ayda
-        # kalıyorsa (örn. 25-31 Temmuz) bu ayın planıyla ilgisi yok, SAYILMAZ.
-        # Seri plan dönemine taşıyorsa sayılır: plan o günü vermemeliydi.
+        # --- ardışık 7+ gün (önceki ay dahil, AMA 7. gün plan döneminde olmalı) ---
+        # Önceki ayın planı BAŞKASININ sorumluluğu. Belirleyici olan serinin
+        # 7. GÜNÜNÜN nerede olduğu:
+        #   25-31 Tem (7. gün 31 Tem)  -> ihlal ZATEN önceki ayda oluştu.
+        #                                 Bu ayın planı ne yaparsa yapsın değişmez -> SAYILMAZ
+        #   27 Tem-2 Ağu (7. gün 2 Ağu) -> 7. günü BU PLAN yarattı -> SAYILIR
+        #   1-7 Ağu (7. gün 7 Ağu)      -> tamamen bu planın -> SAYILIR
         _tum = sorted(set(_gun_calisilan) | {d for d in _gc if d < _ks_ilk_gun})
         _seriler = []
         _sb = _onc = None
@@ -332,11 +335,16 @@ def plan_denetle(calisma, saat_atama, etiket):
 
         for _sbas, _sson in _seriler:
             _uzunluk = (_sson - _sbas).days + 1
-            if _uzunluk >= 7 and _sson >= _ks_ilk_gun:
-                _max6 += 1
-                _detay.append({"plan": etiket, "kural": "7+ gün aralıksız çalışma",
-                               "agent_user_code": _a, "tarih": str(_sson),
-                               "vardiya": f"{_sbas} .. {_sson} ({_uzunluk} gün)"})
+            if _uzunluk < 7:
+                continue
+            _yedinci = _sbas + timedelta(days=6)      # serinin 7. günü
+            if _yedinci < _ks_ilk_gun:
+                continue                              # ihlal önceki ayda oluşmuş
+            _max6 += 1
+            _detay.append({"plan": etiket, "kural": "7+ gün aralıksız çalışma",
+                           "agent_user_code": _a, "tarih": str(_yedinci),
+                           "vardiya": f"{_sbas} .. {_sson} ({_uzunluk} gün), "
+                                      f"7. gün {_yedinci}"})
 
         # --- haftalık off tavanı ---
         _hafta = {}
@@ -494,3 +502,4 @@ with pd.ExcelWriter(_ks_dosya, engine="openpyxl") as _w:
     if "df_ekip_plani_ay" in globals():
         df_ekip_plani_ay.head(50000).to_excel(_w, sheet_name="EKIP_PLANI_HAM", index=False)
 print(f"\nExcel yazıldı: {_ks_dosya}")
+

@@ -30,7 +30,7 @@ if _eksik:
 
 df_ekip_plani["agent_user_code"] = df_ekip_plani["agent_user_code"].astype(str).str.strip()
 df_ekip_plani["vardiya"] = df_ekip_plani["vardiya"].astype(str).str.strip()
-df_ekip_plani["_date"] = pd.to_datetime(df_ekip_plani["date"], errors="coerce").dt.date
+df_ekip_plani["ep_date"] = pd.to_datetime(df_ekip_plani["date"], errors="coerce").dt.date
 
 
 def _ep_coz(v):
@@ -62,36 +62,39 @@ if len(_bilinmeyen):
     print(f"\n!!! UYARI: ayrıştırılamayan {len(_bilinmeyen)} satır KARŞILAŞTIRMAYA GİRMEYECEK.")
     print(_bilinmeyen["vardiya"].value_counts().head(15).to_string())
 
-_bos_tarih = int(df_ekip_plani["_date"].isna().sum())
+_bos_tarih = int(df_ekip_plani["ep_date"].isna().sum())
 if _bos_tarih:
     print(f"!!! UYARI: tarihi okunamayan {_bos_tarih} satır var.")
 
 # --- plan dönemine kırp ---
 _plan_d = {pd.to_datetime(d).date() for d in PLAN_GUNLER}
 _ds_of_date = {pd.to_datetime(d).date(): d for d in PLAN_GUNLER}
-df_ekip_plani_ay = df_ekip_plani[df_ekip_plani["_date"].isin(_plan_d)].copy()
+df_ekip_plani_ay = df_ekip_plani[df_ekip_plani["ep_date"].isin(_plan_d)].copy()
 
 print(f"\nplan dönemine düşen satır: {len(df_ekip_plani_ay)} "
       f"({df_ekip_plani_ay['agent_user_code'].nunique()} agent)")
-print(f"tarih aralığı: {df_ekip_plani['_date'].min()} .. {df_ekip_plani['_date'].max()}")
+print(f"tarih aralığı: {df_ekip_plani['ep_date'].min()} .. {df_ekip_plani['ep_date'].max()}")
 
 # --- aynı agent-gün için birden fazla satır var mı? (günde tek vardiya kuralı) ---
 _cift = (df_ekip_plani_ay[df_ekip_plani_ay["tip"] == "calisma"]
-         .groupby(["agent_user_code", "_date"]).size())
+         .groupby(["agent_user_code", "ep_date"]).size())
 ekip_cift_vardiya_df = _cift[_cift > 1].reset_index(name="vardiya_sayisi")
 print(f"aynı gün BİRDEN FAZLA vardiya atanmış agent-gün: {len(ekip_cift_vardiya_df)}")
 
 # --- model planıyla aynı yapı: (agent, ds) -> 0/1 ve (agent, ds) -> (bas, bit) ---
 ekip_calisma, ekip_saat = {}, {}
-for _r in df_ekip_plani_ay.itertuples(index=False):
-    _d = getattr(_r, "_date")
+for _a, _d, _tip, _b, _e in zip(df_ekip_plani_ay["agent_user_code"],
+                                df_ekip_plani_ay["ep_date"],
+                                df_ekip_plani_ay["tip"],
+                                df_ekip_plani_ay["baslangic"],
+                                df_ekip_plani_ay["bitis"]):
     _ds = _ds_of_date.get(_d)
     if _ds is None:
         continue
-    _a = str(_r.agent_user_code).strip()
-    if _r.tip == "calisma":
+    _a = str(_a).strip()
+    if _tip == "calisma":
         ekip_calisma[(_a, _ds)] = 1
-        ekip_saat[(_a, _ds)] = (_r.baslangic, _r.bitis)
+        ekip_saat[(_a, _ds)] = (_b, _e)
     else:
         ekip_calisma.setdefault((_a, _ds), 0)
 
@@ -101,9 +104,11 @@ print(f"ekip planındaki agent: {len(ekip_agentlar)}")
 
 # --- ekip planındaki izin günleri (kendi kaydı) ---
 ekip_izin_gunleri = {}
-for _r in df_ekip_plani_ay.itertuples(index=False):
-    if _r.tip == "izin":
-        ekip_izin_gunleri.setdefault(str(_r.agent_user_code).strip(), set()).add(getattr(_r, "_date"))
+for _a, _d, _tip in zip(df_ekip_plani_ay["agent_user_code"],
+                        df_ekip_plani_ay["ep_date"],
+                        df_ekip_plani_ay["tip"]):
+    if _tip == "izin":
+        ekip_izin_gunleri.setdefault(str(_a).strip(), set()).add(_d)
 print(f"ekip planında izin kaydı olan agent: {len(ekip_izin_gunleri)}")
 
 # --- model kapsamıyla kesişim ---
@@ -118,6 +123,7 @@ if not ortak_agentlar:
     print("!!! UYARI: ortak agent YOK - agent_user_code formatları eşleşmiyor olabilir.")
 
 display(df_ekip_plani.head())
+
 
 
 

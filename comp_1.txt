@@ -1,448 +1,1329 @@
-# ==============================================================
-    # ===== 2026-08-19 EKLENEN - MUAF AGENT HAFTALIK TEK VARDIYA =====
-    # Takim base'i kendisine YASAK oldugu icin muaf olan agent, eskiden hafta
-    # boyunca her gun BASKA bir vardiyaya dusebiliyordu (bir gun 15:00, ertesi
-    # gun 11:00, sonra 09:00). Bu kural muaf agente de haftalik BIREYSEL BASE
-    # verir: hafta ici boyunca TEK vardiyada kalir.
-    #   takim_muaf = 0 -> agent takimiyla AYNI vardiyada (bu kural devre disi)
-    #   takim_muaf = 1 -> agent kendi sectigi TEK vardiyada, hafta boyu sabit
-    # Hafta sonu KAPSAM DISI (takim base kilidi de sadece hafta ici).
-    "ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA": True,
-    # ================================================================
-
-
-# ===== 2026-08-19 EKLENEN - MUAF AGENT HAFTALIK TEK VARDIYA =====
-ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA = CONFIG["ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA"]
 # ================================================================
+    # ===== 2026-08-19 EKLENEN - AY GECISI / SARKAN HAFTA SUREKLILIGI =====
+    # Plan basladigi ISO hafta, onceki aydan SARKAR. Ornek: 1 Eylul 2026 Sali ->
+    # W36 haftasi 31 Agustos Pazartesi baslar, o gun ONCEKI ayin planindadir.
+    # Iki model ayni haftayi parca parca planlar ve birbirinden habersizdir:
+    #   1) haftalik off tavani delinir (31 Agustos off + Eylul'de 2 off = 3 off)
+    #   2) takim base'i hafta ortasinda degisir (Pzt 08:00, Sali 15:00)
+    # Bu kural ikisini de gecmis veriden kapatir.
+    #
+    # Sarkan gun sayisi PLAN_GUNLER'den TURETILIR, elle ayar YOK:
+    #   ay Pazartesi baslarsa 0 gun -> kural kendiliginden devre disi
+    #   ay Pazar     baslarsa 6 gun -> en kotu durum (gecmis 7 gun yeterli)
+    "ENABLE_SARKAN_HAFTA_SUREKLILIK": True,
+    # ======================================================================
 
 
+# ===== 2026-08-19 EKLENEN - AY GECISI / SARKAN HAFTA SUREKLILIGI =====
+ENABLE_SARKAN_HAFTA_SUREKLILIK = CONFIG["ENABLE_SARKAN_HAFTA_SUREKLILIK"]
+# ======================================================================
 
 
-
-# %% [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA: HAFTA İÇİ HARD / HAFTA SONU SERBEST
-
-# --- TEŞHİS BAYRAĞI (bu hücrenin kendi içinde, başka hücreye bağımlı değil) ---
-# False yapınca: hafta içi "agent sadece takımının base vardiyasında çalışır" bağlantısı
-# UYGULANMAZ. Takım-hafta tek base seçimi ve diğer her şey aynı kalır.
-TAKIM_BASE_HAFTAICI_HARD = True
-
-# ============ 2026-08-12 - BİREYSEL YASAK OLAN AGENT İÇİN MUAFİYET ============
-# Bir agent takımının o haftaki base vardiyasında FİZİKSEL OLARAK çalışamıyorsa
-# (sabah çalışan + geç base, ya da kıdemsiz + gece base) o hafta takım kilidinden
-# muaf olur ve uygun başka bir vardiyada çalışır.
+# %% [KISIT] - HAFTALIK OFF TAVANI (MODEL 3. OFF'U KENDİ VEREMEZ)
+# Bir agent bir haftada en fazla MODEL_OFF_HAFTALIK_MAX (2) gün off alır.
+# off_t / off_t2 talepleri bu tavanın İÇİNDE sayılır: 2 gün talep karşılandıysa
+# model üstüne ekstra off VEREMEZ.
 #
-# Muafiyet KOŞULLU: base agentin yasak listesindeyse 1, değilse 0.
-#   base 08:00-17:00 -> sabah agentı takımla AYNI vardiyada (muaf = 0)
-#   base 13:00-22:00 -> sabah agentı muaf, takım geç base alabilir (muaf = 1)
+# Tavan sabit 2 değil, TABAN 2:
+#     hafta_tavani = max(MODEL_OFF_HAFTALIK_MAX, zorunlu_off_sayisi)
+#     zorunlu_off  = (off_t ∪ off_t2 ∪ agentin o gün hiç çalışamayacağı günler) ∩ hafta
+# Böylece:
+#   - 3 gün off talebi olan agent 3'ünü de alır, 4. off olmaz
+#   - yapısal olarak çalışamayan günleri olan agent (hamile/süt hafta sonu) infeasible olmaz
 #
-# Böylece tek bir sabah agentı yüzünden 10 kişilik takım geç vardiyalardan
-# mahrum kalmıyor. Arife / resmi tatilde zaten takım kilidi hiç kurulmuyor.
+# izin günleri sayıma HİÇ girmez (off değil, ayrı kategori) - o günler kotayı da düşürüyor.
+# Kısmi haftalarda (W31: 2 gün, W36: 1 gün) tavan zaten bağlayıcı olmaz, kısıt kurulmaz.
 #
-# Hamile / süt izinliler için ayrıca bir şey yapmaya gerek yok: onlarda
-# sabah_calisir_flg zaten 1, yani sabah kuralı üzerinden kapsanıyorlar.
-if "ENABLE_TAKIM_BASE_MUAFIYET" not in globals():
-    raise SystemExit(
-        "CONFIG'de tanımlı olmalı: ENABLE_TAKIM_BASE_MUAFIYET -> [CONFIG] hücresini çalıştır."
-    )
+# Bu hücre [CONFIG], [HÜCRE 9] ve [HAZIRLIK / KISIT] - AYLIK ÇALIŞMA DENGESİ'nden
+# SONRA çalışmalıdır. Ayarlanabilir parametrelerin tamamı CONFIG'de.
 
+# Parametreler [CONFIG] hücresinden gelir, burada TANIMLANMAZ:
+#   MODEL_OFF_HAFTALIK_MAX   haftalık off tavanı (2)
+#   MODEL_OFF_HAFTALIK_HARD  False -> soft + objective cezası
+#   MODEL_OFF_TAVAN_ASIM_W   soft moddaki ceza ağırlığı
+_eksik_cfg = [
+    k for k in ("MODEL_OFF_HAFTALIK_MAX", "MODEL_OFF_HAFTALIK_HARD", "MODEL_OFF_TAVAN_ASIM_W")
+    if k not in globals()
+]
+if _eksik_cfg:
+    raise SystemExit(f"CONFIG'de tanımlı olmalı, eksik: {_eksik_cfg} -> [CONFIG] hücresini çalıştır.")
 
-def _tb_dk(t_):
-    h, m = str(t_).strip()[:5].split(":")
-    return int(h) * 60 + int(m)
+# --- hafta -> plan günleri ---
+if "day_week" in globals():
+    _dw = day_week
+else:
+    _dw = {}
+    for ds in PLAN_GUNLER:
+        _iso = pd.to_datetime(ds).isocalendar()
+        _dw[ds] = f"{int(_iso.year)}-W{int(_iso.week):02d}"
 
+# 2026-08-10: HAFTA İÇİNE denk gelen resmi tatil ve arife sayım dışı.
+# Bunlar "off" DEĞİL, iş günü olmayan günler - izin gibi. Sayıma girerlerse
+# agent o günü çalışmadığında off tavanını yer ve model onu arifede /
+# hafta sonunda çalışmaya zorlar.
+# HAFTA SONUNA denk gelenler sayıma GİRER: o gün zaten iş günü değil, o günü
+# çalışmamak normal hafta sonu off'udur, aylık iş günü sayısını da etkilemez.
+_sayilmayan_ot = set(globals().get("calisma_disi_date_set", set()))
+if not _sayilmayan_ot:
+    if "resmi_tatil_plan_gunleri" in globals():
+        _sayilmayan_ot |= {pd.to_datetime(d).date() for d in resmi_tatil_plan_gunleri}
+    if "arife_plan_gunleri" in globals():
+        _sayilmayan_ot |= {pd.to_datetime(d).date() for d in arife_plan_gunleri}
+_sayilmayan_ot = {d for d in _sayilmayan_ot if d.weekday() in (0, 1, 2, 3, 4)}
 
-# haftalık vardiya saatleri: (hafta, vardiya) -> (bas, bit)
-_tb_wk_saat = {}
-for _ds in PLAN_GUNLER:
-    _wk_ = day_week[_ds]
-    for _v in gun_vardiyalari.get(_ds, []):
-        if (_wk_, _v) not in _tb_wk_saat and (_ds, _v) in saat:
-            _b, _e = saat[(_ds, _v)]
-            _tb_wk_saat[(_wk_, _v)] = (str(_b).strip()[:5], str(_e).strip()[:5])
+_hafta_plan_gunleri = {}
+for ds in PLAN_GUNLER:
+    _hafta_plan_gunleri.setdefault(_dw[ds], []).append(ds)
+for _wk in _hafta_plan_gunleri:
+    _hafta_plan_gunleri[_wk] = sorted(_hafta_plan_gunleri[_wk], key=lambda s: pd.to_datetime(s))
 
-# --- bireysel yasağı olan agentlar ---
-_tb_sabah = set()
-if "sabah_calisir_flg" in df_tam.columns:
-    _tb_sabah = set(
+_mk_agents_t = set()
+if "mesaiye_kalamaz_flg" in df_tam.columns:
+    _mk_agents_t = set(
         df_tam.loc[
-            pd.to_numeric(df_tam["sabah_calisir_flg"], errors="coerce").fillna(0).astype(int) == 1,
+            pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce").fillna(0).astype(int) == 1,
             "agent_user_code",
         ].astype(str).str.strip()
     )
 
-_tb_kidem_map = globals().get("kidem_ay_map", {})
-_tb_kidem_min = globals().get("KIDEM_MIN_AY")
-_tb_kidem_bas = {str(b).strip()[:5] for b in globals().get("KIDEM_YASAK_VARDIYA_BASLANGIC", ())}
-_tb_kidemsiz = set()
-if _tb_kidem_min is not None and _tb_kidem_map:
-    _tb_kidemsiz = {
-        str(a).strip() for a in AGENTS
-        if str(a).strip() in _tb_kidem_map
-        and not pd.isna(_tb_kidem_map[str(a).strip()])
-        and float(_tb_kidem_map[str(a).strip()]) < float(_tb_kidem_min)
-    }
+_baz_map_t = {}
+if "aylik_calisma_debug_df" in globals() and not aylik_calisma_debug_df.empty:
+    _baz_map_t = dict(zip(
+        aylik_calisma_debug_df["agent_user_code"].astype(str).str.strip(),
+        aylik_calisma_debug_df["baz_gereken_calisma"].astype(int),
+    ))
 
-_tb_sabah_bitis = globals().get("SABAH_CALISIR_MAX_BITIS_SAATI")
-_tb_sabah_baslangic = globals().get("SABAH_CALISIR_MAX_BASLANGIC_SAATI")
-_tb_gece_yasak = globals().get("SABAH_CALISIR_GECE_VARDIYA_YASAK", False)
-_tb_gece_set = globals().get("GECE_AKSAM_VARDIYA_SET", set())
+# ===== 2026-08-19 - AY GEÇİŞİ: SARKAN HAFTADA GEÇMİŞ OFF'LAR TAVANA SAYILIR =====
+# Plan başladığı ISO hafta önceki aydan sarkar (1 Eylül Salı -> 31 Ağustos aynı
+# haftada ama ÖNCEKİ ayın planında). O gün off alınmışsa bu haftanın tavanından
+# düşülmeli, yoksa agent haftada 3 off alabilir.
+# Sarkan gün sayısı PLAN_GUNLER'den türetilir: ay Pazartesi başlarsa 0 -> kural yok.
+from datetime import timedelta
 
+_ot_plan_d = sorted(pd.to_datetime(d).date() for d in PLAN_GUNLER)
+_ot_ilk = _ot_plan_d[0]
+_ot_sarkan_gunler = {_ot_ilk - timedelta(days=k) for k in range(_ot_ilk.weekday(), 0, -1)}
+_ot_sarkan_wk = _dw.get(min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s)))
+_ot_gecmis_off = globals().get("gecmis_off_gunleri", {})
+_ot_aktif = bool(globals().get("ENABLE_SARKAN_HAFTA_SUREKLILIK", False)) and bool(_ot_sarkan_gunler)
 
-def _tb_yasak_mi(a, wk, v):
-    """Agent a, wk haftasındaki v vardiyasında ÇALIŞAMAZ mı?"""
-    _st = _tb_wk_saat.get((wk, v))
-    if _st is None:
-        return False
-    b, e = _st
-    if a in _tb_kidemsiz and b in _tb_kidem_bas:
-        return True
-    if a in _tb_sabah and _tb_sabah_bitis is not None:
-        bd, ed = _tb_dk(b), _tb_dk(e)
-        if ed < bd:
-            ed += 24 * 60
-        if _tb_gece_yasak and (b, e) in _tb_gece_set:
-            return True
-        if _tb_sabah_baslangic is not None and bd > _tb_dk(_tb_sabah_baslangic):
-            return True
-        if ed > _tb_dk(_tb_sabah_bitis):
-            return True
-    return False
+# Düşüm SADECE plan tarafında hafta içi günü olan sarkan haftada uygulanır.
+# Ay Cmt/Paz başlarsa (örn. 1 Ağustos 2026 Cumartesi) o haftanın plan tarafı
+# yalnızca hafta sonudur; iş günlerinin tamamı önceki ayda kalmıştır. Düşüm
+# uygulanırsa agent hafta sonu ÇALIŞMAYA ZORLANIR (hamile/süt izinlide doğrudan
+# infeasible). O durumda düşüm yapılmaz, mevcut davranış aynen korunur.
+_ot_sarkan_plan_hi = [
+    ds for ds in PLAN_GUNLER
+    if _dw.get(ds) == _ot_sarkan_wk and pd.to_datetime(ds).weekday() in (0, 1, 2, 3, 4)
+]
+_ot_hafta_ici_var = bool(_ot_sarkan_plan_hi)
 
+# hamile / süt izinli agentlar hafta sonu çalışamaz ([HÜCRE 14]). O hücre x'i
+# YARATIP == 0 zorladığı için aşağıdaki "_var_mi" kontrolü bunu yakalayamıyor;
+# burada df_tam'dan doğrudan türetilir.
+_ot_hs_calisamaz = set()
+for _c1, _c2 in (("hamile_flg", "sut_izni_flg"),):
+    _m = None
+    for _c in (_c1, _c2):
+        if _c in df_tam.columns:
+            _s = pd.to_numeric(df_tam[_c], errors="coerce").fillna(0).astype(int) == 1
+            _m = _s if _m is None else (_m | _s)
+    if _m is not None:
+        _ot_hs_calisamaz = set(df_tam.loc[_m, "agent_user_code"].astype(str).str.strip())
 
-_tb_kisitli = (_tb_sabah | _tb_kidemsiz) if ENABLE_TAKIM_BASE_MUAFIYET else set()
+if not _ot_sarkan_gunler:
+    print("Sarkan hafta YOK (plan Pazartesi başlıyor) - geçmiş off düşümü uygulanmayacak.")
+elif not _ot_aktif:
+    print("ENABLE_SARKAN_HAFTA_SUREKLILIK = False -> geçmiş off düşümü UYGULANMIYOR.")
+elif not _ot_hafta_ici_var:
+    print(f"Sarkan hafta {_ot_sarkan_wk}: plan tarafında HAFTA İÇİ GÜN YOK "
+          f"(ay hafta sonu başlıyor) -> geçmiş off düşümü UYGULANMIYOR.")
+    print("   Sebep: o haftanın iş günleri tamamen önceki ayda; düşüm agentı "
+          "hafta sonu çalışmaya zorlardı.")
+    _ot_aktif = False
+else:
+    print(f"Sarkan hafta: {_ot_sarkan_wk} | sarkan gün: "
+          f"{sorted(str(d) for d in _ot_sarkan_gunler)}")
+    print(f"   plan tarafındaki hafta içi gün: {len(_ot_sarkan_plan_hi)} -> düşüm UYGULANACAK")
+    print(f"   hafta sonu çalışamayan agent (hamile/süt): {len(_ot_hs_calisamaz)}")
+    if not _ot_gecmis_off:
+        print("!!! UYARI: gecmis_off_gunleri yok/boş - geçmiş off düşümü YAPILAMIYOR. "
+              "Önce geçmiş işleme hücresini çalıştır.")
+        _ot_aktif = False
+_ot_dusulen_toplam = 0
 
-# --- 2026-08-19: MUAF AGENT DE HAFTA BOYU TEK VARDIYADA KALIR ---
-# Muaf agent eskiden tamamen serbest kalıyordu (x <= base + muaf; muaf=1 iken
-# sağ taraf her vardiya için >=1). Artık muaf agente BİREYSEL HAFTALIK BASE
-# veriliyor:  Σ_v agent_week_base[(a,wk,v)] == takim_muaf[(a,wk)]
-#   muaf = 0 -> hepsi 0, agent takımıyla aynı vardiyada
-#   muaf = 1 -> tam biri 1, agent hafta boyu O vardiyada
-# Değişken sadece agentin ÇALIŞABİLDİĞİ vardiyalar için üretilir.
-if "ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA" not in globals():
-    raise SystemExit(
-        "CONFIG'de tanımlı olmalı: ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA "
-        "-> [CONFIG] hücresini çalıştır."
-    )
+model_off_tavan_asim = {}          # (agent, hafta) -> IntVar   (sadece soft modda)
+off_tavan_kisit_sayisi = 0
+off_tavan_atlanan = 0
+off_tavan_debug_rows = []
+off_tavan_marj_rows = []
 
-takim_muaf = {}
-takim_muaf_debug_rows = []
-agent_week_base = {}          # (agent, hafta, vardiya) -> BoolVar
-_awb_kurulan = set()          # (agent, hafta) - bireysel base kurulanlar
-_awb_uygun_yok = []           # agentin o hafta hiç uygun vardiyası yok
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    _tip_a = tip_map.get(a, {})
+    _zorunlu_calisma_toplam = 0
 
-for a in AGENTS:
-    a = str(a).strip()
-    if a not in _tb_kisitli:
-        continue
-    t = agent_team.get(a)
-    if t is None or pd.isna(t):
-        continue
-    t = str(t).strip()
-    for wk in WEEKS:
-        _yasak_vars = [
-            team_week_base[(t, wk, v)]
-            for v in week_vardiyalari.get(wk, [])
-            if (t, wk, v) in team_week_base and _tb_yasak_mi(a, wk, v)
-        ]
-        if not _yasak_vars:
+    for _wk, _wk_gunler in _hafta_plan_gunleri.items():
+        # izin günleri sayıma girmez
+        _sayilan = []
+        for ds in _wk_gunler:
+            _d_ot = pd.to_datetime(ds).date()
+            _tip = str(_tip_a.get(_d_ot, "")).strip().lower()
+            if _tip == "izin" or _d_ot in _sayilmayan_ot:
+                continue
+            _sayilan.append(ds)
+        if not _sayilan:
             continue
-        _muaf = model.NewBoolVar(f"takim_muaf_{a}_{wk}")
-        model.Add(_muaf == sum(_yasak_vars))
-        takim_muaf[(a, wk)] = _muaf
-        takim_muaf_debug_rows.append({
-            "agent_user_code": a, "takim": t, "hafta": wk,
-            "yasak_base_adedi": len(_yasak_vars),
-            "toplam_base_secenegi": len([v for v in week_vardiyalari.get(wk, [])
-                                         if (t, wk, v) in team_week_base]),
+
+        # zorunlu off: talep edilmiş (off_t/off_t2) VEYA agentin hiç çalışamayacağı gün
+        _zorunlu = []
+        for ds in _sayilan:
+            _tip = str(_tip_a.get(pd.to_datetime(ds).date(), "")).strip().lower()
+            _var_mi = any((a, ds, v) in x for v in gun_vardiyalari.get(ds, []))
+            if _tip in ("off_t", "off_t2") or not _var_mi:
+                _zorunlu.append(ds)
+
+        _tavan = max(MODEL_OFF_HAFTALIK_MAX, len(_zorunlu))
+
+        # --- sarkan haftada geçmişte alınan off'lar tavandan düşülür ---
+        # Sadece OFF sayılır; geçmişteki izin / haftalık izin sayılmaz (plan
+        # tarafında da izin sayıma girmiyor). Kaydı olmayan gün de sayılmaz.
+        _gecmis_off_sayisi = 0
+        _tavan_kalan = _tavan          # diğer tüm haftalarda davranış DEĞİŞMEZ
+        if _ot_aktif and _wk == _ot_sarkan_wk:
+            _gecmis_off_sayisi = len(_ot_sarkan_gunler & set(_ot_gecmis_off.get(a, set())))
+            _ot_dusulen_toplam += _gecmis_off_sayisi
+            # Agentin FİİLEN çalışamayacağı günler düşümden KORUNUR: o günler için
+            # off "harcamak" zorunda değil. Hamile/süt izinli agentın hafta sonu
+            # günleri de buraya dahil (yukarıdaki _zorunlu bunları yakalayamıyor).
+            _korunan = set(_zorunlu)
+            if a in _ot_hs_calisamaz:
+                _korunan |= {ds for ds in _sayilan
+                             if pd.to_datetime(ds).weekday() in (5, 6)}
+            _tavan_kalan = max(len(_korunan), _tavan - _gecmis_off_sayisi)
+
+        _min_calisma = len(_sayilan) - _tavan_kalan
+        _zorunlu_calisma_toplam += max(0, _min_calisma)
+
+        off_tavan_debug_rows.append({
+            "agent_user_code": a, "hafta": _wk,
+            "sayilan_gun": len(_sayilan), "zorunlu_off": len(_zorunlu),
+            "tavan": _tavan, "gecmis_off": _gecmis_off_sayisi, "tavan_kalan": _tavan_kalan,
+            "min_calisma": max(0, _min_calisma),
+            "kisit_kuruldu": _min_calisma > 0,
         })
 
-        # ---- bireysel haftalık base ----
-        if not ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA:
+        if _min_calisma <= 0:
+            off_tavan_atlanan += 1      # tavan bağlayıcı değil
             continue
-        _uygun = [
-            v for v in week_vardiyalari.get(wk, [])
-            if v not in arife_ozel_vardiya_kodlari and not _tb_yasak_mi(a, wk, v)
-        ]
-        if not _uygun:
-            # hiç uygun vardiya yok -> Σ == muaf kısıtı agenti çalışamaz yapar,
-            # infeasible olmasın diye ESKİ davranışa (serbest) bırakılır
-            _awb_uygun_yok.append({"agent_user_code": a, "takim": t, "hafta": wk})
-            continue
-        _awb_vars = []
-        for v in _uygun:
-            _b = model.NewBoolVar(f"agent_week_base_{a}_{wk}_{v}")
-            agent_week_base[(a, wk, v)] = _b
-            _awb_vars.append(_b)
-        model.Add(sum(_awb_vars) == _muaf)
-        _awb_kurulan.add((a, wk))
 
-takim_muaf_debug_df = pd.DataFrame(takim_muaf_debug_rows)
-agent_week_base_uygun_yok_df = pd.DataFrame(_awb_uygun_yok)
+        _work_vars = [work[(a, ds)] for ds in _sayilan if (a, ds) in work]
+        if len(_work_vars) < len(_sayilan):
+            _min_calisma = len(_work_vars) - _tavan_kalan
+            if _min_calisma <= 0:
+                off_tavan_atlanan += 1
+                continue
 
-print(f"ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA = {ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA}")
-print(f"Bireysel haftalık base kurulan agent-hafta: {len(_awb_kurulan)} "
-      f"({len(agent_week_base)} değişken)")
-if _awb_uygun_yok:
-    print(f"!!! UYARI: {len(_awb_uygun_yok)} agent-haftada agentin HİÇ uygun vardiyası yok "
-          f"-> o agent-hafta eski davranışta (serbest) bırakıldı.")
-    print(agent_week_base_uygun_yok_df.head(10).to_string(index=False))
-# ==============================================================================
+        if MODEL_OFF_HAFTALIK_HARD:
+            model.Add(sum(_work_vars) >= _min_calisma).WithName(f"off_tavan_{a}_{_wk}")
+        else:
+            _asim = model.NewIntVar(0, len(_work_vars), f"off_tavan_asim_{a}_{_wk}")
+            model_off_tavan_asim[(a, _wk)] = _asim
+            model.Add(sum(_work_vars) + _asim >= _min_calisma).WithName(f"off_tavan_soft_{a}_{_wk}")
+        off_tavan_kisit_sayisi += 1
 
-# ====== 2026-08-12 - TAKIM BÜTÜNLÜĞÜ: ÇOĞUNLUK ÇALIŞAMIYORSA BASE OLMAZ ======
-# Muafiyet kuralı AZINLIK için tasarlandı ("tek sabah agentı takımı engellemesin").
-# Ama takımın TAMAMI kısıtlıysa (örn. uydu lokasyon, herkesin sabah_calisir_flg'i 1)
-# model geç bir base seçtiği anda HERKES aynı anda muaf oluyor, kilit tümüyle
-# kalkıyor ve ekip dağılıyor - biri 09:00, biri 11:00.
+    # --- solve öncesi marj: haftalık zorunlu minimum vs aylık tavan ---
+    _baz = _baz_map_t.get(a)
+    if _baz is not None:
+        _aylik_tavan = _baz if a in _mk_agents_t else _baz + MAX_OVERTIME_PER_MONTH
+        off_tavan_marj_rows.append({
+            "agent_user_code": a,
+            "mesaiye_kalamaz": a in _mk_agents_t,
+            "haftalik_zorunlu_calisma_toplami": _zorunlu_calisma_toplam,
+            "baz_gereken_calisma": _baz,
+            "aylik_tavan": _aylik_tavan,
+            "marj": _aylik_tavan - _zorunlu_calisma_toplam,
+        })
+
+off_tavan_debug_df = pd.DataFrame(off_tavan_debug_rows)
+off_tavan_marj_df = pd.DataFrame(off_tavan_marj_rows)
+
+print(f"MODEL_OFF_HAFTALIK_MAX : {MODEL_OFF_HAFTALIK_MAX}")
+print(f"mod                    : {'HARD' if MODEL_OFF_HAFTALIK_HARD else 'SOFT (ceza=' + str(MODEL_OFF_TAVAN_ASIM_W) + ')'}")
+print(f"kurulan kısıt          : {off_tavan_kisit_sayisi} agent-hafta")
+print(f"bağlayıcı olmayan      : {off_tavan_atlanan} agent-hafta (kısıt kurulmadı)")
+
+if not off_tavan_debug_df.empty:
+    _gevsek = off_tavan_debug_df[off_tavan_debug_df["tavan"] > MODEL_OFF_HAFTALIK_MAX]
+    print(f"tavanı 2'nin üstüne çıkan agent-hafta: {len(_gevsek)} (3+ zorunlu off var)")
+
+# --- ÖN KONTROL: bu kısıt agentları imkânsız duruma sokuyor mu? ---
+if not off_tavan_marj_df.empty:
+    _negatif = off_tavan_marj_df[off_tavan_marj_df["marj"] < 0]
+    _sifir = off_tavan_marj_df[off_tavan_marj_df["marj"] == 0]
+    print(f"\nÖN KONTROL (haftalık zorunlu minimum vs aylık tavan):")
+    print(f"  marjı NEGATİF agent : {len(_negatif)}   <-- 0 değilse model INFEASIBLE olur")
+    print(f"  marjı SIFIR agent   : {len(_sifir)}")
+    if len(_negatif):
+        print("  !!! Bu agentlar haftalık tavan yüzünden aylık tavanı aşmak zorunda:")
+        display(_negatif.sort_values("marj").head(30))
+else:
+    print("\nÖN KONTROL atlandı: aylik_calisma_debug_df yok "
+          "([HAZIRLIK / KISIT] - AYLIK ÇALIŞMA DENGESİ çalıştı mı?)")
+
+
+
+# %% [KISIT] - AY GEÇİŞİ: SARKAN HAFTADA BASE SÜREKLİLİĞİ (HARD)
+# Plan başladığı ISO hafta önceki aydan SARKAR. Örnek: 1 Eylül 2026 Salı ->
+# W36 haftası 31 Ağustos Pazartesi başlar ama o gün ÖNCEKİ ayın planındadır.
+# İki model aynı haftayı parça parça planlar; bu hücre olmadan takımın base
+# vardiyası hafta ortasında değişir (Pzt 08:00-17:00, Salı 15:00-00:00).
 #
-# Çözüm: bir vardiyada takımın TAKIM_BASE_MAX_YASAKLI_ORAN'dan fazlası
-# çalışamıyorsa o vardiya o takıma base olarak VERİLEMEZ.
+# KURAL: sarkan günlerde takım hangi vardiyadaysa, o hafta boyunca O DEVAM EDER.
 #
-#   herkes sabah (%100 yasaklı) -> geç base kapalı -> model sabah base seçer
-#                                  -> HERKES AYNI VARDİYADA, bölünme yok
-#   karma ekip (%20 yasaklı)    -> geç base açık -> o azınlık muaf, bölünme burada
+# ÖN KOŞUL: [HÜCRE] - TEMMUZ GEÇMİŞİ - İŞLEME  -> gecmis_calisma
+#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA -> team_week_base, agent_week_base
 #
-# GÜVENLİK: bir takım-haftada TÜM base seçenekleri yasaklanacak olursa
-# (sum(vars_base) == 1 kısıtı infeasible olurdu) en düşük yasaklı orana sahip
-# olan(lar) serbest bırakılır ve uyarı basılır.
-if "TAKIM_BASE_MAX_YASAKLI_ORAN" not in globals():
+# SARKAN GÜN SAYISI PLAN_GUNLER'DEN TÜRETİLİR - elle ayar YOK:
+#   ay Pazartesi başlarsa 0 gün -> kural kendiliğinden kurulmaz
+#   ay Pazar    başlarsa 6 gün  -> en kötü durum (geçmiş 7 gün her zaman yeter)
+#
+# EŞLEŞTİRME vardiya KODUNDAN değil SAAT ARALIĞINDAN yapılır; vardiya kodları
+# aydan aya değişebilir, saat aralığı sabit kalır.
+#
+# SABİTLEME YAPILMAYAN DURUMLAR (hepsinde model kendi seçer, rapor edilir):
+#   - takım sarkan günlerde hiç çalışmamış (hepsi off/izin) -> base yok
+#   - geçmiş saat aralığı bu ayın vardiyaları arasında yok  -> eşleşme yok
+#   - o base takım bütünlüğü kuralınca kapatılmış           -> çelişki olurdu
+#   - takımın o hafta hiç base seçeneği yok
+
+if "ENABLE_SARKAN_HAFTA_SUREKLILIK" not in globals():
     raise SystemExit(
-        "CONFIG'de tanımlı olmalı: TAKIM_BASE_MAX_YASAKLI_ORAN -> [CONFIG] hücresini çalıştır."
+        "CONFIG'de tanımlı olmalı: ENABLE_SARKAN_HAFTA_SUREKLILIK -> [CONFIG] hücresini çalıştır."
     )
 
-_tb_uyeler = {}
-for _a in AGENTS:
-    _a = str(_a).strip()
-    _t = agent_team.get(_a)
-    if _t is None or pd.isna(_t):
-        continue
-    _tb_uyeler.setdefault(str(_t).strip(), []).append(_a)
+from datetime import timedelta
 
-team_base_yasak_constraints = 0
-takim_base_yasak_rows = []
-_tb_tumu_yasak_uyari = []
+sarkan_hafta_base_rows = []      # sabitlenen / atlanan takımlar
+sarkan_agent_base_rows = []      # muaf agentların bireysel base'i
+sarkan_takim_base_kisiti = 0
+sarkan_agent_base_kisiti = 0
 
-for _t, _uy in _tb_uyeler.items():
-    _n = len(_uy)
-    if _n == 0:
-        continue
-    for _wk in WEEKS:
-        _adaylar = []
-        for _v in week_vardiyalari.get(_wk, []):
-            if (_t, _wk, _v) not in team_week_base or _v in arife_ozel_vardiya_kodlari:
+# --- sarkan gün ve hafta (PLAN_GUNLER'den türetilir) ---
+_sh_plan_d = sorted(pd.to_datetime(d).date() for d in PLAN_GUNLER)
+_sh_ilk = _sh_plan_d[0]
+_sh_sarkan = sorted(_sh_ilk - timedelta(days=k) for k in range(_sh_ilk.weekday(), 0, -1))
+_sh_ilk_ds = min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
+_sh_wk = day_week[_sh_ilk_ds]
+
+if not ENABLE_SARKAN_HAFTA_SUREKLILIK:
+    print("ENABLE_SARKAN_HAFTA_SUREKLILIK = False -> ay geçişi süreklilik kuralı KURULMADI.")
+elif not _sh_sarkan:
+    print(f"Sarkan hafta YOK - plan {_sh_ilk} Pazartesi başlıyor, "
+          f"hafta ay sınırından sarkmıyor. Kural kurulmadı (normal).")
+else:
+    _sh_gecmis = globals().get("gecmis_calisma", {})
+    if not _sh_gecmis:
+        raise SystemExit(
+            "gecmis_calisma yok/boş. Önce [HÜCRE] - TEMMUZ GEÇMİŞİ - İŞLEME hücresini "
+            "çalıştır. (Kuralı bilinçli kapatmak için CONFIG'de "
+            "ENABLE_SARKAN_HAFTA_SUREKLILIK = False yap.)"
+        )
+
+    print(f"Sarkan hafta : {_sh_wk}")
+    print(f"Sarkan günler: {[str(d) for d in _sh_sarkan]}  ({len(_sh_sarkan)} gün)")
+    print(f"Plan ilk günü: {_sh_ilk} ({['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][_sh_ilk.weekday()]})")
+
+    # --- bu ayın sarkan haftasındaki vardiyalar: saat -> vardiya kodu ---
+    _sh_saat_v = {}
+    for _ds in PLAN_GUNLER:
+        if day_week[_ds] != _sh_wk:
+            continue
+        for _v in gun_vardiyalari.get(_ds, []):
+            if _v in globals().get("arife_ozel_vardiya_kodlari", set()):
                 continue
-            _yasakli = sum(1 for _a in _uy if _tb_yasak_mi(_a, _wk, _v))
-            _adaylar.append((_v, _yasakli, _yasakli / _n))
-        if not _adaylar:
+            if (_ds, _v) in saat:
+                _st = (str(saat[(_ds, _v)][0]).strip()[:5], str(saat[(_ds, _v)][1]).strip()[:5])
+                _sh_saat_v.setdefault(_st, _v)
+
+    # --- takım bütünlüğü kuralının kapattığı base'ler ---
+    _sh_yasak = set()
+    _yd = globals().get("takim_base_yasak_df")
+    if _yd is not None and not _yd.empty:
+        _sh_yasak = {(str(r["takim"]).strip(), r["hafta"], r["vardiya"])
+                     for _, r in _yd.iterrows()}
+
+    # --- agent -> takım ---
+    _sh_takim_uye = {}
+    for _a in AGENTS:
+        _a = str(_a).strip()
+        _t = agent_team.get(_a)
+        if _t is None or pd.isna(_t):
+            continue
+        _sh_takim_uye.setdefault(str(_t).strip(), []).append(_a)
+
+    # ============ 1) TAKIM BASE SÜREKLİLİĞİ ============
+    for _t, _uyeler in sorted(_sh_takim_uye.items()):
+        # sarkan günlerde takımın çalıştığı saat aralıkları (agent-gün sayısıyla)
+        _sayac = {}
+        for _a in _uyeler:
+            _gc = _sh_gecmis.get(_a, {})
+            for _d in _sh_sarkan:
+                if _d not in _gc:
+                    continue
+                _st = (str(_gc[_d][0]).strip()[:5], str(_gc[_d][1]).strip()[:5])
+                _sayac[_st] = _sayac.get(_st, 0) + 1
+
+        if not _sayac:
+            # EDGE CASE: takım sarkan günlerde hiç çalışmamış (off / izin / kayıt yok)
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": None, "vardiya": None,
+                "agent_gun": 0, "durum": "GEÇMİŞ ÇALIŞMA YOK - model serbest seçer"})
             continue
 
-        _kapatilacak = [x for x in _adaylar if x[2] > TAKIM_BASE_MAX_YASAKLI_ORAN]
-        if len(_kapatilacak) == len(_adaylar):
-            # hepsi kapanacaktı -> en az yasaklı olan(lar) açık kalsın
-            _min_oran = min(x[2] for x in _adaylar)
-            _kapatilacak = [x for x in _adaylar if x[2] > _min_oran]
-            _tb_tumu_yasak_uyari.append({
-                "takim": _t, "hafta": _wk,
-                "en_dusuk_yasakli_oran": round(_min_oran, 3),
-                "acik_birakilan": len(_adaylar) - len(_kapatilacak),
-            })
+        _gecmis_st = max(_sayac.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        _agent_gun = _sayac[_gecmis_st]
+        _v = _sh_saat_v.get(_gecmis_st)
 
-        for _v, _ys, _or in _kapatilacak:
-            model.Add(team_week_base[(_t, _wk, _v)] == 0)
-            team_base_yasak_constraints += 1
-            _st = _tb_wk_saat.get((_wk, _v), ("", ""))
-            takim_base_yasak_rows.append({
-                "takim": _t, "hafta": _wk, "vardiya": _v,
-                "baslangic": _st[0], "bitis": _st[1],
-                "takim_mevcut": _n, "yasakli_agent": _ys,
-                "yasakli_oran": round(_or, 3),
-            })
+        if _v is None:
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": None, "agent_gun": _agent_gun,
+                "durum": "SAAT EŞLEŞMEDİ - bu ayın vardiyaları arasında yok"})
+            continue
+        if (_t, _sh_wk, _v) not in team_week_base:
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": _v, "agent_gun": _agent_gun,
+                "durum": "TAKIM İÇİN BASE SEÇENEĞİ YOK"})
+            continue
+        if (_t, _sh_wk, _v) in _sh_yasak:
+            # bütünlük kuralı bu base'i kapatmış -> == 1 dersek infeasible olur
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": _v, "agent_gun": _agent_gun,
+                "durum": "BÜTÜNLÜK KURALI KAPATMIŞ - kadro/kıdem değişmiş olabilir"})
+            continue
 
-takim_base_yasak_df = pd.DataFrame(takim_base_yasak_rows)
-takim_base_yasak_uyari_df = pd.DataFrame(_tb_tumu_yasak_uyari)
+        model.Add(team_week_base[(_t, _sh_wk, _v)] == 1)
+        sarkan_takim_base_kisiti += 1
+        sarkan_hafta_base_rows.append({
+            "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+            "vardiya": _v, "agent_gun": _agent_gun, "durum": "SABİTLENDİ"})
 
-print(f"TAKIM_BASE_MAX_YASAKLI_ORAN = {TAKIM_BASE_MAX_YASAKLI_ORAN}")
-print(f"Bütünlük gereği KAPATILAN takım-hafta-vardiya base seçeneği: {team_base_yasak_constraints}")
-if not takim_base_yasak_df.empty:
-    _tam_kapali = takim_base_yasak_df[takim_base_yasak_df["yasakli_oran"] >= 1.0]
-    print(f"  bunlardan TAMAMEN uygunsuz (oran = 1.0): {len(_tam_kapali)}")
-    print("  etkilenen takım sayısı:", takim_base_yasak_df["takim"].nunique())
-    print("  takım bazında kapatılan seçenek (ilk 10):")
-    print(takim_base_yasak_df.groupby("takim").size().sort_values(ascending=False)
-          .head(10).to_string())
-if _tb_tumu_yasak_uyari:
-    print(f"\n!!! UYARI: {len(_tb_tumu_yasak_uyari)} takım-haftada TÜM base seçenekleri "
-          f"eşiği aşıyordu; infeasible olmasın diye en az yasaklı olan(lar) açık bırakıldı.")
-    print("    Bu takımlar o hafta yine bölünecek - eşiği yükseltmek çözmez, "
-          "vardiya arzı o takıma uygun değil.")
-    print(takim_base_yasak_uyari_df.head(10).to_string(index=False))
-# ==============================================================================
+    # ============ 2) MUAF AGENT BİREYSEL BASE SÜREKLİLİĞİ ============
+    # agent_week_base sadece muaf OLABİLECEK agent-haftalar için üretilir.
+    # Sabitleme KOŞULLU yapılır:  agent_week_base[v] == takim_muaf
+    #   muaf = 1 -> agent geçmişteki v'sinde kalır
+    #   muaf = 0 -> takım base'i artık ona uygun (kıdemi dolmuş olabilir),
+    #               bireysel base sıfırlanır ve agent TAKIMA KATILIR
+    # Böylece "== 1" ile sabitleyip infeasible üretme riski yok.
+    _awb = globals().get("agent_week_base", {})
+    _tmuaf = globals().get("takim_muaf", {})
+    if _awb:
+        for _a in sorted({a for (a, wk, v) in _awb if wk == _sh_wk}):
+            _gc = _sh_gecmis.get(_a, {})
+            _sayac_a = {}
+            for _d in _sh_sarkan:
+                if _d not in _gc:
+                    continue
+                _st = (str(_gc[_d][0]).strip()[:5], str(_gc[_d][1]).strip()[:5])
+                _sayac_a[_st] = _sayac_a.get(_st, 0) + 1
+            if not _sayac_a:
+                # EDGE CASE: agent sarkan günlerde off/izinde -> base yok, model seçer
+                sarkan_agent_base_rows.append({
+                    "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": None,
+                    "vardiya": None, "durum": "GEÇMİŞ ÇALIŞMA YOK - model serbest seçer"})
+                continue
+            _st_a = max(_sayac_a.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            _v_a = _sh_saat_v.get(_st_a)
+            if _v_a is None or (_a, _sh_wk, _v_a) not in _awb:
+                sarkan_agent_base_rows.append({
+                    "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": "-".join(_st_a),
+                    "vardiya": _v_a,
+                    "durum": "EŞLEŞME YOK ya da agent o vardiyada çalışamıyor"})
+                continue
+            model.Add(_awb[(_a, _sh_wk, _v_a)] == _tmuaf[(_a, _sh_wk)])
+            sarkan_agent_base_kisiti += 1
+            sarkan_agent_base_rows.append({
+                "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": "-".join(_st_a),
+                "vardiya": _v_a, "durum": "KOŞULLU SABİTLENDİ (muaf ise geçmiş vardiyası)"})
 
-team_base_constraints = 0
-team_weekday_link_constraints = 0
-team_muaf_link_constraints = 0
-weekend_free_count = 0
-tatil_team_base_skip_count = 0
+sarkan_hafta_base_df = pd.DataFrame(sarkan_hafta_base_rows)
+sarkan_agent_base_df = pd.DataFrame(sarkan_agent_base_rows)
 
-# Her takım-her hafta için tek base vardiya seç
-for t in TAKIMLAR:
-    for wk in WEEKS:
-        vars_base = [
-            team_week_base[(t, wk, v)]
-            for v in week_vardiyalari[wk]
-            if (t, wk, v) in team_week_base and v not in arife_ozel_vardiya_kodlari
+print(f"\nSabitlenen takım base kısıtı        : {sarkan_takim_base_kisiti}")
+print(f"Koşullu sabitlenen agent base kısıtı: {sarkan_agent_base_kisiti}")
+if not sarkan_hafta_base_df.empty:
+    print("\nTakım base süreklilik durumu:")
+    print(sarkan_hafta_base_df["durum"].value_counts().to_string())
+    _atlanan = sarkan_hafta_base_df[sarkan_hafta_base_df["durum"] != "SABİTLENDİ"]
+    if len(_atlanan):
+        print(f"\nSabitlenemeyen {len(_atlanan)} takım (model kendi seçecek):")
+        display(_atlanan.head(20))
+if not sarkan_agent_base_df.empty:
+    print("\nMuaf agent bireysel base durumu:")
+    print(sarkan_agent_base_df["durum"].value_counts().to_string())
+
+
+
+# %% [KONTROL] - AY GEÇİŞİ: SARKAN HAFTA SÜREKLİLİĞİ
+# Ön koşul: [KONTROL] - ÇÖZÜMÜ ÇIKAR + ORTAK YARDIMCILAR
+# İki şeyi doğrular:
+#   1) sarkan haftada takım base'i geçmişteki vardiyayla AYNI mı (süreklilik)
+#   2) sarkan haftada agentin GEÇMİŞ + PLAN toplam off'u tavanı aşıyor mu
+# Sarkan hafta yoksa (ay Pazartesi başlıyorsa) hücre sessizce atlar.
+
+from datetime import timedelta
+
+sarkan_base_ihlal_df = pd.DataFrame()
+sarkan_off_ihlal_df = pd.DataFrame()
+
+_sk_plan_d = sorted(pd.to_datetime(d).date() for d in PLAN_GUNLER)
+_sk_ilk = _sk_plan_d[0]
+_sk_sarkan = sorted(_sk_ilk - timedelta(days=k) for k in range(_sk_ilk.weekday(), 0, -1))
+_sk_wk = day_week[min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))]
+
+if not _sk_sarkan:
+    print(f"Sarkan hafta yok - plan {_sk_ilk} Pazartesi başlıyor. Kontrol atlandı (normal).")
+elif "cozum_atama" not in globals():
+    print("cozum_atama yok - önce [KONTROL] - ÇÖZÜMÜ ÇIKAR hücresini çalıştır.")
+else:
+    _sk_gecmis = globals().get("gecmis_calisma", {})
+    _sk_gecmis_off = globals().get("gecmis_off_gunleri", {})
+    print(f"Sarkan hafta: {_sk_wk} | sarkan günler: {[str(d) for d in _sk_sarkan]}")
+
+    # ---------- 1) TAKIM BASE SÜREKLİLİĞİ ----------
+    # Sabitlenemeyen takımlar (geçmişte off, saat eşleşmedi vb.) İHLAL DEĞİLDİR -
+    # onlarda model zaten serbest seçti. Sadece SABİTLENDİ olanlar kontrol edilir.
+    _sk_sabit = set()
+    _sdf = globals().get("sarkan_hafta_base_df")
+    if _sdf is not None and not _sdf.empty:
+        _sk_sabit = {str(r["takim"]).strip() for _, r in _sdf.iterrows()
+                     if str(r["durum"]).strip() == "SABİTLENDİ"}
+
+    _sk_secilen = {}
+    if "team_week_base" in globals():
+        for (_t, _wk, _v), _var in team_week_base.items():
+            if _wk == _sk_wk and V(_var) == 1:
+                _sk_secilen[str(_t).strip()] = _v
+
+    _sk_rows = []
+    for _t in sorted(_sk_sabit):
+        _v_sec = _sk_secilen.get(_t)
+        _st_sec = None
+        if _v_sec is not None:
+            for _ds in PLAN_GUNLER:
+                if day_week[_ds] == _sk_wk and (_ds, _v_sec) in saat:
+                    _st_sec = (str(saat[(_ds, _v_sec)][0]).strip()[:5],
+                               str(saat[(_ds, _v_sec)][1]).strip()[:5])
+                    break
+        _beklenen = None
+        if _sdf is not None and not _sdf.empty:
+            for _, _r in _sdf.iterrows():
+                if str(_r["takim"]).strip() == _t and str(_r["durum"]).strip() == "SABİTLENDİ":
+                    _beklenen = _r["gecmis_saat"]
+                    break
+        _sec_metni = "-".join(_st_sec) if _st_sec else None
+        if _beklenen != _sec_metni:
+            _sk_rows.append({"takim": _t, "hafta": _sk_wk,
+                             "gecmis_base": _beklenen, "secilen_base": _sec_metni})
+
+    sarkan_base_ihlal_df = pd.DataFrame(_sk_rows)
+    kaydet("Ay geçişi: sarkan haftada takım base sürekliliği", len(_sk_rows))
+    print(f"   sabitlenen takım                : {len(_sk_sabit)}")
+    print(f"   sabitlenemeyen (model serbest)  : "
+          f"{0 if _sdf is None or _sdf.empty else len(_sdf) - len(_sk_sabit)}")
+    if len(_sk_rows):
+        display(sarkan_base_ihlal_df.head(20))
+
+    # ---------- 2) SARKAN HAFTADA TOPLAM OFF ----------
+    # geçmişteki off + plandaki off, haftalık tavanı aşmamalı.
+    _tavan = int(globals().get("MODEL_OFF_HAFTALIK_MAX", 2))
+    _sk_plan_gun = [ds for ds in PLAN_GUNLER if day_week[ds] == _sk_wk]
+    _tip = globals().get("tip_map", {})
+    _sayilmayan = set(globals().get("calisma_disi_date_set", set()))
+    _sayilmayan = {d for d in _sayilmayan if d.weekday() in (0, 1, 2, 3, 4)}
+
+    _off_rows = []
+    for _a_raw in AGENTS:
+        _a = str(_a_raw).strip()
+        _tip_a = _tip.get(_a, {})
+        # plan tarafı: çalışmayan ve izin olmayan günler
+        _plan_off = 0
+        _sayilan = 0
+        for _ds in _sk_plan_gun:
+            _d = pd.to_datetime(_ds).date()
+            if str(_tip_a.get(_d, "")).strip().lower() == "izin" or _d in _sayilmayan:
+                continue
+            _sayilan += 1
+            if cozum_calisma.get((_a, _ds), 0) != 1:
+                _plan_off += 1
+        _g_off = len(set(_sk_sarkan) & set(_sk_gecmis_off.get(_a, set())))
+        # zorunlu off (talep) tavanı yükseltebilir - kısıt hücresiyle aynı mantık
+        _zorunlu = sum(1 for _ds in _sk_plan_gun
+                       if str(_tip_a.get(pd.to_datetime(_ds).date(), "")).strip().lower()
+                       in ("off_t", "off_t2"))
+        _tavan_a = max(_tavan, _zorunlu)
+        if _g_off + _plan_off > _tavan_a:
+            _off_rows.append({"agent_user_code": _a, "hafta": _sk_wk,
+                              "gecmis_off": _g_off, "plan_off": _plan_off,
+                              "toplam_off": _g_off + _plan_off, "tavan": _tavan_a,
+                              "sayilan_plan_gunu": _sayilan})
+
+    sarkan_off_ihlal_df = pd.DataFrame(_off_rows)
+    kaydet("Ay geçişi: sarkan haftada toplam off tavanı", len(_off_rows),
+           tur="HARD" if globals().get("MODEL_OFF_HAFTALIK_HARD") else "SOFT")
+    print(f"   geçmişte off almış agent        : "
+          f"{sum(1 for a in AGENTS if set(_sk_sarkan) & set(_sk_gecmis_off.get(str(a).strip(), set())))}")
+    if len(_off_rows):
+        print(f"   !!! {len(_off_rows)} agent sarkan haftada tavanı aşıyor:")
+        display(sarkan_off_ihlal_df.sort_values("toplam_off", ascending=False).head(20))
+
+
+
+
+# %% [EXCEL] - PLAN ÇIKTISI (RENKLİ TAKVİM + HAM VERİ + KURAL KONTROLÜ)
+# Tek başına çalışır. Zorunlu gereksinim: [KONTROL] - ÇÖZÜMÜ ÇIKAR + ORTAK YARDIMCILAR
+# hücresi (cozum_calisma / cozum_atama). Diğer df'ler yoksa o sheet atlanır, hücre patlamaz.
+#
+# NORM / TELAFİ / MESAİ tanımı:
+#
+# 1) HAFTALIK ADIM - hangi hafta sonu günleri "fazla"?
+#      hafta_kota    = o haftadaki hafta içi (Pzt-Cum) günlerden İZİN ve RESMİ TATİL
+#                      OLMAYANLARIN sayısı. Aydan sarkan haftalarda (W31) Temmuz'un
+#                      hafta içi günleri de sayılır.
+#                      SABİT 5 DEĞİL: izin bir iş gününün yerine geçer, o hafta
+#                      agentin normal çalışması 5 değil 4'tür.
+#      hafta_calisma = o ISO haftada çalışılan gün sayısı (RESMİ TATİL HARİÇ)
+#      fazla         = max(0, hafta_calisma - hafta_kota)
+#      o haftanın çalışılan hafta sonu günleri tarih sırasına dizilir;
+#      son `fazla` tanesi ADAY, kalanı NORM çalışma.
+#      W31 gibi aydan sarkan haftalarda Temmuz'da çalışılan günler de sayılır.
+#
+# 2) AYLIK ADIM - adaylardan hangileri gerçekten ÜCRETLİ mesai?
+#      aylik_fazla = max(0, sayilan_calisma - baz_gereken_calisma)   (resmi tatil hariç)
+#      adaylar kronolojik sırada; son `aylik_fazla` tanesi -> MESAİ
+#                                  kalanı                  -> TELAFİ
+#
+# Neden: agent bir hafta 3 gün off alıp (normali 2) 4 gün çalışırsa 1 gün borçlanır;
+# başka bir hafta 6 gün çalışıp borcu kapatır. Aylık toplam yine baz'dır, yani
+# ÜCRETLİ MESAİ YOKTUR - o gün TELAFİ'dir. Ama agent borcunu kapatıp ÜSTÜNE de
+# fazladan çalışırsa aylik_fazla > 0 olur ve o günler MESAİ olarak kalır.
+#
+# Sonuç: MESAİ gün sayısı = AGENT_OZET sayfasındaki kota_farki ile BİREBİR aynıdır.
+
+import os
+from collections import defaultdict
+from datetime import datetime as _dt, timedelta as _td
+
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ------------------------------------------------------------------ AYARLAR
+EXCEL_KLASOR = os.getcwd()
+EXCEL_DOSYA = os.path.join(
+    EXCEL_KLASOR, f"vardiya_plani_{_dt.now().strftime('%Y%m%d_%H%M')}.xlsx"
+)
+
+RENK = {
+    "izin":        "E4D7F5",   # açık mor
+    "off_t":       "CCE5FF",   # açık mavi
+    "off_t2":      "9FC5E8",   # koyu mavi
+    "off":         "E8E8E8",   # gri
+    "resmi_tatil": "F8CBAD",   # turuncu
+    "arife":       "D0E0E3",   # açık camgöbeği - tatil kısıtlı agent 09:00-13:00
+    "arife_mesai": "D5A6BD",   # pembemsi - diğer agentlar (ücretli arife mesaisi)
+    "norm":        "D9EAD3",   # açık yeşil
+    "mesai":       "FFE599",   # sarı
+    "telafi":      "B6D7A8",   # yeşil (telafi - ücretli mesai DEĞİL)
+    "off_t_ihlal": "F4A6A6",   # kırmızı
+    "g_calisma":   "DDEBF7",   # Temmuz çalışma (geçmiş)
+    "g_izin":      "EDE3F7",   # Temmuz izin
+    "g_h_izin":    "FCE4D6",   # Temmuz haftalık izin (süt izni düzeni)
+    "g_off":       "F2F2F2",   # Temmuz off
+    "baslik":      "D9D9D9",
+    "baslik_gec":  "BFBFBF",   # Temmuz kolon başlığı
+    "hard_ihlal":  "F4A6A6",
+}
+
+LEJANT = [
+    ("İZİN",              "izin",        "Yıllık izin / idari izin - HARD, model değiştiremez"),
+    ("OFF_T",             "off_t",       "Agent off talebi (off_t) - SOFT, model karşıladı"),
+    ("OFF_T2",            "off_t2",      "Agent off talebi (off_t2) - HARD, her zaman karşılanır"),
+    ("OFF",               "off",         "Modelin kendi verdiği off (talep yok)"),
+    ("RESMİ TATİL MESAİ", "resmi_tatil", "Resmi tatil gününde çalışma (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("ARİFE",             "arife",       "Arife günü - hamile/süt/mesaiye kalamaz agent, 09:00-13:00"),
+    ("ARİFE MESAİ",       "arife_mesai", "Arife günü - diğer agentlar (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("NORM + vardiya",    "norm",        "Hafta sonu çalışma, haftalık 5 günlük kota İÇİNDE"),
+    ("MESAİ + vardiya",   "mesai",       "Hafta sonu çalışma, AYLIK kotayı aşan (ücretli mesai)"),
+    ("TELAFİ + vardiya",  "telafi",      "Hafta sonu çalışma, başka haftadaki fazla off'un telafisi (ücretli mesai DEĞİL)"),
+    ("kırmızı hücre",     "off_t_ihlal", "off_t talebi vardı ama KARŞILANMADI - agent o gün çalışıyor"),
+    ("dolgusuz",          None,          "Normal hafta içi çalışma"),
+    ("--- TEMMUZ (geçmiş, plan dışı, salt okunur) ---", None, ""),
+    ("saat aralığı",      "g_calisma",   "Temmuz'da çalışılmış gün"),
+    ("İZİN",              "g_izin",      "Temmuz'da yıllık/idari izin"),
+    ("H.İZİN",            "g_h_izin",    "Temmuz haftalık izin günü (süt izni düzeni), off DEĞİL"),
+    ("OFF",               "g_off",       "Temmuz'da off"),
+    ("boş",               None,          "Temmuz'da o güne ait kayıt yok"),
+]
+
+# ------------------------------------------------------- ÖN KOŞUL KONTROLÜ
+if "cozum_calisma" not in globals() or "cozum_atama" not in globals():
+    raise SystemExit(
+        "cozum_calisma / cozum_atama yok. Önce [KONTROL] - ÇÖZÜMÜ ÇIKAR hücresini çalıştır."
+    )
+
+_NORMAL_WORK_DAYS = globals().get("NORMAL_WORK_DAYS", 5)
+_saat = globals().get("saat", {})
+_tip_map = globals().get("tip_map", {})
+_gecmis_gunleri_x = globals().get("gecmis_calisma_gunleri", {})
+_g_calisma   = globals().get("gecmis_calisma", {})            # agent -> {date: (bas, bit)}
+_g_off       = globals().get("gecmis_off_gunleri", {})
+_g_izin      = globals().get("gecmis_izin_gunleri", {})
+_g_h_izin    = globals().get("gecmis_haftalik_izin_gunleri", {})
+_g_kapsam    = globals().get("gecmis_kapsam", {})
+
+_plan_dates = sorted(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+_PLAN_BAS = min(_plan_dates)
+_PLAN_BIT = max(_plan_dates)
+_plan_date_set_x = set(_plan_dates)
+
+_resmi_tatil_set = set()
+if "resmi_tatil_plan_gunleri" in globals():
+    _resmi_tatil_set = {pd.to_datetime(d).date() for d in resmi_tatil_plan_gunleri}
+elif "RESMI_TATIL_GUNLERI" in globals():
+    _resmi_tatil_set = {pd.to_datetime(d).date() for d in RESMI_TATIL_GUNLERI}
+
+# --- ARİFE: resmi tatille aynı kefede, aylık iş günü sayılmaz ---
+_arife_set = set()
+if "arife_plan_gunleri" in globals():
+    _arife_set = {pd.to_datetime(d).date() for d in arife_plan_gunleri}
+elif globals().get("ENABLE_ARIFE_KURALI", False) and "ARIFE_GUNLERI" in globals():
+    _arife_set = {
+        pd.to_datetime(ds).date() for ds in PLAN_GUNLER
+        if pd.to_datetime(ds).strftime("%Y-%m-%d") in ARIFE_GUNLERI
+    }
+
+# aylık ve haftalık hesaptan çıkarılacak günler (resmi tatil + arife)
+_sayilmayan_set = _resmi_tatil_set | _arife_set
+
+# arifede 09:00-13:00 çalışan grup: hamile / süt izni / mesaiye kalamaz
+_tatil_kisitli_x = globals().get("tatil_kisitli_agents")
+if _tatil_kisitli_x is None:
+    _mk1 = pd.to_numeric(df_tam.get("hamile_flg", 0), errors="coerce").fillna(0).astype(int)
+    _mk2 = pd.to_numeric(df_tam.get("sut_izni_flg", 0), errors="coerce").fillna(0).astype(int)
+    _mk3 = pd.to_numeric(df_tam.get("mesaiye_kalamaz_flg", 0), errors="coerce").fillna(0).astype(int)
+    _tatil_kisitli_x = set(
+        df_tam.loc[(_mk1 == 1) | (_mk2 == 1) | (_mk3 == 1), "agent_user_code"]
+        .astype(str).str.strip()
+    )
+_tatil_kisitli_x = {str(a).strip() for a in _tatil_kisitli_x}
+
+_GUN_ADI = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+
+
+def _vardiya_metni(ds, v):
+    """Vardiya kodunu okunur saat aralığına çevirir."""
+    if v is None:
+        return ""
+    st = _saat.get((ds, v))
+    if st:
+        return f"{str(st[0]).strip()[:5]}-{str(st[1]).strip()[:5]}"
+    return str(v)
+
+
+# ---------------------------------- AYLIK KOTA (baz_gereken_calisma) - agent
+_baz_map_x = {}
+if "aylik_calisma_debug_df" in globals() and not aylik_calisma_debug_df.empty:
+    _baz_map_x = dict(zip(
+        aylik_calisma_debug_df["agent_user_code"].astype(str).str.strip(),
+        aylik_calisma_debug_df["baz_gereken_calisma"].astype(int),
+    ))
+    _izin_map_x = dict(zip(
+        aylik_calisma_debug_df["agent_user_code"].astype(str).str.strip(),
+        aylik_calisma_debug_df["izin_is_gunu_sayisi"].astype(int),
+    ))
+    _aylik_is_gunu_x = int(aylik_calisma_debug_df["aylik_is_gunu"].iloc[0])
+else:
+    _is_gunu_d = {
+        pd.to_datetime(ds).date() for ds in PLAN_GUNLER
+        if pd.to_datetime(ds).weekday() in (0, 1, 2, 3, 4)
+        and pd.to_datetime(ds).date() not in _sayilmayan_set
+    }
+    _aylik_is_gunu_x = len(_is_gunu_d)
+    _baz_map_x, _izin_map_x = {}, {}
+    for a_raw in AGENTS:
+        a = str(a_raw).strip()
+        _izn = {d for d, t in _tip_map.get(a, {}).items()
+                if str(t).strip().lower() == "izin" and d in _is_gunu_d}
+        _izin_map_x[a] = len(_izn)
+        _baz_map_x[a] = _aylik_is_gunu_x - len(_izn)
+
+# --------------------------- HAFTALIK NORM / TELAFİ / MESAİ HESABI (agent)
+_hafta_gunleri = defaultdict(list)
+for ds in PLAN_GUNLER:
+    d = pd.to_datetime(ds).date()
+    _pzt = d - _td(days=d.weekday())
+    _hafta_gunleri[_pzt].append(ds)
+for _k in _hafta_gunleri:
+    _hafta_gunleri[_k] = sorted(_hafta_gunleri[_k], key=lambda s: pd.to_datetime(s))
+
+mesai_gunleri_map = {}   # agent -> {ds}  ücretli mesai
+telafi_gunleri_map = {}  # agent -> {ds}  borç kapatma
+norm_gunleri_map = {}    # agent -> {ds}  kota içi hafta sonu
+hafta_calisma_debug_rows = []
+
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    _gecmis_a = _gecmis_gunleri_x.get(a, set())
+    _aday_a, _norm_a = [], set()   # _aday_a: haftalık kotayı aşan hafta sonu günleri (kronolojik)
+
+    for _pzt, _wk_gunler in sorted(_hafta_gunleri.items()):
+        # RESMİ TATİL günleri haftalık hesaba GİRMEZ: ayrı kategori (RESMİ TATİL MESAİ),
+        # aylık toplama da (sayilan_calisma) girmiyor. Haftalık ve aylık adım aynı
+        # tabanı kullanmazsa resmi tatil günü aday listesinde yer tutup MESAİ slotunu
+        # çalar ve gerçek mesai günü yanlışlıkla TELAFİ olarak etiketlenir.
+        _calisilan = [
+            ds for ds in _wk_gunler
+            if cozum_calisma.get((a, ds), 0) == 1
+            and pd.to_datetime(ds).date() not in _sayilmayan_set
         ]
-        if vars_base:
-            model.Add(sum(vars_base) == 1)
-            team_base_constraints += 1
 
-# Hafta içi agent takımının base vardiyasında çalışır; hafta sonu serbest
-for a in AGENTS:
-    a = str(a).strip()
-    t = agent_team.get(a)
-    if t is None or pd.isna(t):
-        continue
-    t = str(t).strip()
+        # aydan sarkan hafta: plan öncesi (Temmuz) çalışılan günleri de say
+        _hafta_araligi = {_pzt + _td(days=k) for k in range(7)}
+        _temmuz_ek = len({d for d in _gecmis_a if d in _hafta_araligi and d < _PLAN_BAS})
 
-    for ds in PLAN_GUNLER:
-        if ds in ozel_tatil_plan_gunleri:
-            tatil_team_base_skip_count += 1
+        _hafta_calisma = len(_calisilan) + _temmuz_ek
+
+        # --- haftalık kota: izin ve resmi tatil günleri DÜŞÜLÜR ---
+        _kota = 0
+        for _k2 in range(5):                       # Pzt..Cum
+            _d2 = _pzt + _td(days=_k2)
+            if _d2 < _PLAN_BAS:
+                # aydan sarkan hafta (W31): Temmuz'un hafta içi günleri
+                if _d2 not in _g_izin.get(a, set()):
+                    _kota += 1
+            elif _d2 in _plan_date_set_x:
+                if _d2 in _sayilmayan_set:
+                    continue
+                if str(_tip_map.get(a, {}).get(_d2, "")).strip().lower() == "izin":
+                    continue
+                _kota += 1
+        _kota = min(_NORMAL_WORK_DAYS, _kota)
+
+        _fazla = max(0, _hafta_calisma - _kota)
+
+        _hs_calisilan = [ds for ds in _calisilan if pd.to_datetime(ds).weekday() in (5, 6)]
+        if _fazla > 0 and _hs_calisilan:
+            _aday_bu_hafta = list(_hs_calisilan[-_fazla:])
+        else:
+            _aday_bu_hafta = []
+        _norm_bu_hafta = set(_hs_calisilan) - set(_aday_bu_hafta)
+
+        _aday_a.extend(_aday_bu_hafta)
+        _norm_a |= _norm_bu_hafta
+
+        hafta_calisma_debug_rows.append({
+            "agent_user_code": a,
+            "hafta_pzt": str(_pzt),
+            "plan_ici_calisma": len(_calisilan),
+            "temmuzdan_gelen_calisma": _temmuz_ek,
+            "hafta_toplam_calisma": _hafta_calisma,
+            "kota": _kota,
+            "fazla": _fazla,
+            "hafta_sonu_calisilan": len(_hs_calisilan),
+            "norm": len(_norm_bu_hafta),
+            "kota_asan_aday": len(_aday_bu_hafta),
+        })
+
+    # ---- AYLIK ADIM: adaylardan kaçı gerçekten ÜCRETLİ mesai? ----
+    _aday_a = sorted(set(_aday_a), key=lambda d: pd.to_datetime(d))
+    _sayilan_a = sum(
+        1 for ds in PLAN_GUNLER
+        if cozum_calisma.get((a, ds), 0) == 1
+        and pd.to_datetime(ds).date() not in _sayilmayan_set
+    )
+    _aylik_fazla_a = max(0, _sayilan_a - int(_baz_map_x.get(a, 0)))
+    _mesai_sayisi = min(_aylik_fazla_a, len(_aday_a))
+
+    mesai_gunleri_map[a] = set(_aday_a[len(_aday_a) - _mesai_sayisi:]) if _mesai_sayisi else set()
+    telafi_gunleri_map[a] = set(_aday_a) - mesai_gunleri_map[a]
+    norm_gunleri_map[a] = _norm_a
+
+hafta_calisma_debug_df = pd.DataFrame(hafta_calisma_debug_rows)
+
+# --------------------------------------------------- TAKVİM TABLOSU KURULUMU
+# Takım bölünmesini filtrelemek için ilgili bayraklar kimlik kolonlarına dahil.
+_kimlik_kaynak = ["agent_user_code", "agent_name",
+                  "working_main_group", "takim", "lokasyon",
+                  "sabah_calisir_flg", "hamile_flg", "sut_izni_flg",
+                  "mesaiye_kalamaz_flg", "kismi_calisan_flg"]
+_kimlik_df_kolonlari = [c for c in _kimlik_kaynak if c in df_tam.columns]
+_kimlik_df = df_tam[_kimlik_df_kolonlari].copy()
+_kimlik_df["agent_user_code"] = _kimlik_df["agent_user_code"].astype(str).str.strip()
+_kimlik_lookup = _kimlik_df.set_index("agent_user_code").to_dict("index")
+
+# --- kıdem: df_tam'da değil, kidem_ay_map'ten gelir ---
+_kd_map_e = globals().get("kidem_ay_map", {})
+_kd_min_e = globals().get("KIDEM_MIN_AY")
+_kd_vars_e = float(globals().get("KIDEM_EKSIK_VARSAYILAN_AY", 0))
+_kidem_kolonlari = ["kidem_ay", "kidem_kaydi_var", "kidemsiz"] if _kd_map_e else []
+
+# --- takım base muafiyeti: agent kaç haftada kullanmış ---
+_muaf_hafta_sayaci = {}
+_muaf_map_e = globals().get("takim_muaf", {})
+if _muaf_map_e and "solver" in globals():
+    try:
+        for (_ma, _mwk), _mvar in _muaf_map_e.items():
+            if solver.Value(_mvar) == 1:
+                _muaf_hafta_sayaci[_ma] = _muaf_hafta_sayaci.get(_ma, 0) + 1
+    except Exception as _e:
+        print("takim_muaf okunamadı:", _e)
+_muaf_kolonlari = ["takim_muaf_hafta"] if _muaf_map_e else []
+
+_kimlik_kolonlari = _kimlik_df_kolonlari + _kidem_kolonlari + _muaf_kolonlari
+
+_ozet_kolonlari = ["toplam_calisma", "hafta_ici_calisma", "norm_hafta_sonu",
+                   "telafi_hafta_sonu", "mesai_hafta_sonu", "resmi_tatil_calisma",
+                   "arife_calisma", "arife_mesai", "izin_gun",
+                   "off_gun", "off_t_talep", "off_t_karsilanmayan", "off_t2_talep",
+                   "temmuz_calisma"]
+
+# --- TEMMUZ kolonları (26 Temmuz -> plan başlangıcına kadar, salt okunur geçmiş) ---
+TEMMUZ_GUN_SAYISI = 6            # 26 Temmuz'dan itibaren
+_temmuz_tarihleri = [_PLAN_BAS - _td(days=k) for k in range(TEMMUZ_GUN_SAYISI, 0, -1)]
+_temmuz_kolonlari = []
+_temmuz_kolon_date = {}
+for d in _temmuz_tarihleri:
+    _kol = f"{d.day} Tem {_GUN_ADI[d.weekday()]}"
+    _temmuz_kolonlari.append(_kol)
+    _temmuz_kolon_date[_kol] = d
+
+# --- AĞUSTOS (plan) kolonları ---
+_gun_kolonlari = []
+_gun_kolon_ds = {}
+for ds in PLAN_GUNLER:
+    d = pd.to_datetime(ds).date()
+    _kol = f"{d.day} {_GUN_ADI[d.weekday()]}"
+    _gun_kolonlari.append(_kol)
+    _gun_kolon_ds[_kol] = ds
+
+takvim_rows = []
+hucre_renk = {}   # (satir_no_0bazli, kolon_adi) -> RENK anahtari
+
+for _i, a_raw in enumerate(AGENTS):
+    a = str(a_raw).strip()
+    _k = _kimlik_lookup.get(a, {})
+    row = {c: _k.get(c, "") for c in _kimlik_df_kolonlari}
+    row["agent_user_code"] = a
+    if _kidem_kolonlari:
+        _kv = _kd_map_e.get(a)
+        _kv_var = not (_kv is None or pd.isna(_kv))
+        _kv = _kd_vars_e if not _kv_var else float(_kv)
+        row["kidem_ay"] = _kv
+        row["kidem_kaydi_var"] = _kv_var
+        row["kidemsiz"] = bool(_kd_min_e is not None and _kv < float(_kd_min_e))
+    if _muaf_kolonlari:
+        row["takim_muaf_hafta"] = int(_muaf_hafta_sayaci.get(a, 0))
+
+    _tip_dates = _tip_map.get(a, {})
+    _mesai_a = mesai_gunleri_map.get(a, set())
+    _telafi_a = telafi_gunleri_map.get(a, set())
+    _norm_a = norm_gunleri_map.get(a, set())
+
+    _n_calisma = _n_hafta_ici = _n_norm = _n_mesai = _n_telafi = _n_rt = 0
+    _n_arife = _n_arife_mesai = 0
+    _n_izin = _n_off = _n_off_t = _n_off_t_ihlal = _n_off_t2 = 0
+    _n_temmuz_calisma = 0
+
+    # ---- TEMMUZ (geçmiş, plan dışı) ----
+    _gc_a = _g_calisma.get(a, {})
+    for _kol in _temmuz_kolonlari:
+        d = _temmuz_kolon_date[_kol]
+        if d in _gc_a:
+            _bas, _bit = _gc_a[d]
+            row[_kol] = f"{str(_bas).strip()[:5]}-{str(_bit).strip()[:5]}"
+            hucre_renk[(_i, _kol)] = "g_calisma"
+            _n_temmuz_calisma += 1
+        elif d in _g_izin.get(a, set()):
+            row[_kol] = "İZİN"
+            hucre_renk[(_i, _kol)] = "g_izin"
+        elif d in _g_h_izin.get(a, set()):
+            # süt izni düzeni: off DEĞİL, ayrı kategori
+            row[_kol] = "H.İZİN"
+            hucre_renk[(_i, _kol)] = "g_h_izin"
+        elif d in _g_off.get(a, set()):
+            row[_kol] = "OFF"
+            hucre_renk[(_i, _kol)] = "g_off"
+        else:
+            row[_kol] = ""   # kayıt yok
+
+    # ---- AĞUSTOS (plan) ----
+    for _kol in _gun_kolonlari:
+        ds = _gun_kolon_ds[_kol]
+        d = pd.to_datetime(ds).date()
+        tip = str(_tip_dates.get(d, "")).strip().lower()
+        calisiyor = cozum_calisma.get((a, ds), 0) == 1
+        vardiya = _vardiya_metni(ds, cozum_atama.get((a, ds))) if calisiyor else ""
+
+        if tip == "izin":
+            _n_izin += 1
+            row[_kol] = "İZİN"
+            hucre_renk[(_i, _kol)] = "izin"
             continue
 
-        weekday = pd.to_datetime(ds).weekday()
-        wk = day_week[ds]
+        if tip == "off_t":
+            _n_off_t += 1
+        elif tip == "off_t2":
+            _n_off_t2 += 1
 
-        for v in gun_vardiyalari.get(ds, []):
-            if (a, ds, v) not in x:
-                continue
-            if weekday in [0, 1, 2, 3, 4]:
-                if not TAKIM_BASE_HAFTAICI_HARD:
-                    pass                      # TEŞHİS: hafta içi takım bağlantısı kapalı
-                elif (t, wk, v) in team_week_base:
-                    if (a, wk) in takim_muaf:
-                        # base bu agente yasaksa muaf=1 -> kilit gevşer.
-                        # 2026-08-19: gevşeme artık SERBEST BIRAKMIYOR - agent
-                        # kendi bireysel haftalık base'ine bağlanıyor.
-                        if (a, wk) in _awb_kurulan:
-                            _ind = agent_week_base.get((a, wk, v))
-                            if _ind is None:
-                                # v bu agente yasak -> sadece takım base'i geçerli
-                                model.Add(x[(a, ds, v)] <= team_week_base[(t, wk, v)])
-                            else:
-                                model.Add(x[(a, ds, v)]
-                                          <= team_week_base[(t, wk, v)] + _ind)
-                        else:
-                            model.Add(x[(a, ds, v)]
-                                      <= team_week_base[(t, wk, v)] + takim_muaf[(a, wk)])
-                        team_muaf_link_constraints += 1
-                    else:
-                        model.Add(x[(a, ds, v)] <= team_week_base[(t, wk, v)])
-                        team_weekday_link_constraints += 1
-                else:
-                    model.Add(x[(a, ds, v)] == 0)
-                    team_weekday_link_constraints += 1
+        if not calisiyor:
+            if tip == "off_t":
+                row[_kol] = "OFF_T"
+                hucre_renk[(_i, _kol)] = "off_t"
+            elif tip == "off_t2":
+                row[_kol] = "OFF_T2"
+                hucre_renk[(_i, _kol)] = "off_t2"
             else:
-                weekend_free_count += 1
+                _n_off += 1
+                row[_kol] = "OFF"
+                hucre_renk[(_i, _kol)] = "off"
+            continue
 
-print("TAKIM_BASE_HAFTAICI_HARD =", TAKIM_BASE_HAFTAICI_HARD)
-print("Bütünlük gereği kapatılan base seçeneği:", team_base_yasak_constraints)
-print("ENABLE_TAKIM_BASE_MUAFIYET =", ENABLE_TAKIM_BASE_MUAFIYET)
-print("Takım-hafta tek base vardiya kısıtı:", team_base_constraints)
-print("Hafta içi takım hard bağlantı kısıtı:", team_weekday_link_constraints)
-print("Hafta içi MUAFİYETLİ bağlantı kısıtı:", team_muaf_link_constraints)
-print("Bireysel haftalık base değişkeni:", len(agent_week_base))
-print("Hafta sonu serbest bırakılan agent-gün-vardiya opsiyonu:", weekend_free_count)
-print("Arife/resmi tatil takım base skip sayısı:", tatil_team_base_skip_count)
-print(f"Muafiyet üretilen agent-hafta: {len(takim_muaf)} "
-      f"({takim_muaf_debug_df['agent_user_code'].nunique() if not takim_muaf_debug_df.empty else 0} agent)")
-if not takim_muaf_debug_df.empty:
-    print("Muafiyeti olan agent sayısı - takım bazında:")
-    print(takim_muaf_debug_df.groupby("takim")["agent_user_code"].nunique().to_string())
-
-
-
-
-# %% [KONTROL 12] - HAFTA İÇİ TAKIM BASE VARDİYASI (HARD)
-# Hafta içi (Pzt-Cuma), arife/resmi tatil hariç: agent yalnızca takımının seçtiği base'de çalışır.
-# 2026-08-12: takim_muaf[(a, wk)] = 1 olan agent-haftalar İHLAL DEĞİL - base o agente
-# fiziksel olarak yasak olduğu için muaf tutulmuştur (sabah çalışan / kıdemsiz).
-# Çıktı özet; detay Excel'de.
-ozel_tatil = set(globals().get("ozel_tatil_plan_gunleri", []))
-_muaf_map = globals().get("takim_muaf", {})
-_muaf_aktif = {(a, wk) for (a, wk), var in _muaf_map.items() if V(var) == 1}
-
-secilen_base = {}
-for (t, wk, v), var in team_week_base.items():
-    if V(var) == 1:
-        secilen_base[(t, wk)] = v
-
-_ihlal_rows, _muaf_rows = [], []
-for a_raw in AGENTS:
-    a = str(a_raw).strip()
-    t = agent_team.get(a)
-    if t is None: continue
-    t = str(t).strip()
-    for ds in PLAN_GUNLER:
-        if ds in ozel_tatil: continue
-        if pd.to_datetime(ds).weekday() >= 5: continue
-        v = cozum_atama.get((a, ds))
-        if not v: continue
-        wk = day_week[ds]
-        base = secilen_base.get((t, wk))
-        if base is None or v == base: continue
-        _row = {"takim": t, "hafta": wk, "agent_user_code": a,
-                "tarih": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                "atanan_vardiya": v, "takim_base": base}
-        if (a, wk) in _muaf_aktif:
-            _muaf_rows.append(_row)
+        # --- buradan sonrası: agent o gün ÇALIŞIYOR ---
+        _n_calisma += 1
+        if d in _resmi_tatil_set:
+            _n_rt += 1
+            row[_kol] = f"RESMİ TATİL MESAİ\n{vardiya}"
+            _renk = "resmi_tatil"
+        elif d in _arife_set:
+            # tatil kısıtlı agent arifede 09:00-13:00 çalışır -> normal, mesai değil
+            if a in _tatil_kisitli_x:
+                _n_arife += 1
+                row[_kol] = f"ARİFE\n{vardiya}"
+                _renk = "arife"
+            else:
+                _n_arife_mesai += 1
+                row[_kol] = f"ARİFE MESAİ\n{vardiya}"
+                _renk = "arife_mesai"
+        elif ds in _mesai_a:
+            _n_mesai += 1
+            row[_kol] = f"MESAİ\n{vardiya}"
+            _renk = "mesai"
+        elif ds in _telafi_a:
+            _n_telafi += 1
+            row[_kol] = f"TELAFİ\n{vardiya}"
+            _renk = "telafi"
+        elif ds in _norm_a:
+            _n_norm += 1
+            row[_kol] = f"NORM\n{vardiya}"
+            _renk = "norm"
         else:
-            _ihlal_rows.append(_row)
+            _n_hafta_ici += 1
+            row[_kol] = vardiya
+            _renk = None
 
-takim_base_ihlal_df = pd.DataFrame(_ihlal_rows)
-takim_base_muaf_df = pd.DataFrame(_muaf_rows)
+        # off_t talebi vardı ama karşılanmadı -> rengi ezer
+        if tip == "off_t":
+            _n_off_t_ihlal += 1
+            _renk = "off_t_ihlal"
 
-kaydet("Hafta içi takım base vardiyası", len(_ihlal_rows))
-print(f"   muafiyet kullanılan agent-hafta : {len(_muaf_aktif)}")
-print(f"   muafiyetli sapma (agent-gün)    : {len(_muaf_rows)}")
+        if _renk:
+            hucre_renk[(_i, _kol)] = _renk
 
-# ===== 2026-08-19 - MUAF AGENT HAFTA BOYU TEK VARDIYADA MI? =====
-# Muaf agent takım base'inde çalışamıyor; bireysel haftalık base'i olmalı ve
-# hafta içi boyunca O TEK vardiyada kalmalı. Birden fazla vardiya = kural bozuk.
-_mv_sayac = {}
-for a_raw in AGENTS:
-    a = str(a_raw).strip()
-    for ds in PLAN_GUNLER:
-        if ds in ozel_tatil: continue
-        if pd.to_datetime(ds).weekday() >= 5: continue
-        v = cozum_atama.get((a, ds))
-        if not v: continue
-        wk = day_week[ds]
-        if (a, wk) not in _muaf_aktif: continue
-        _mv_sayac.setdefault((a, wk), set()).add(v)
+    row["toplam_calisma"] = _n_calisma
+    row["hafta_ici_calisma"] = _n_hafta_ici
+    row["norm_hafta_sonu"] = _n_norm
+    row["mesai_hafta_sonu"] = _n_mesai
+    row["telafi_hafta_sonu"] = _n_telafi
+    row["resmi_tatil_calisma"] = _n_rt
+    row["arife_calisma"] = _n_arife
+    row["arife_mesai"] = _n_arife_mesai
+    row["izin_gun"] = _n_izin
+    row["off_gun"] = _n_off
+    row["off_t_talep"] = _n_off_t
+    row["off_t_karsilanmayan"] = _n_off_t_ihlal
+    row["off_t2_talep"] = _n_off_t2
+    row["temmuz_calisma"] = _n_temmuz_calisma
 
-muaf_agent_cok_vardiya_df = pd.DataFrame([
-    {"agent_user_code": a, "hafta": wk, "farkli_vardiya": len(vs),
-     "vardiyalar": ", ".join(sorted(str(x) for x in vs))}
-    for (a, wk), vs in _mv_sayac.items() if len(vs) > 1
-])
-_mv_ihlal = len(muaf_agent_cok_vardiya_df)
-kaydet("Muaf agent hafta içi tek vardiya", _mv_ihlal,
-       tur="HARD" if globals().get("ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA") else "RAPOR")
-print(f"   muaf agent-hafta (çalışılan)    : {len(_mv_sayac)}")
-if _mv_ihlal:
-    print(f"   !!! {_mv_ihlal} agent-hafta birden fazla vardiyada:")
-    display(muaf_agent_cok_vardiya_df.sort_values("farkli_vardiya", ascending=False).head(20))
+    takvim_rows.append(row)
 
-if _muaf_rows:
-    print("\n   Muafiyetli sapma - takım x vardiya (adet):")
-    _ozet = (takim_base_muaf_df
-             .groupby(["takim", "takim_base", "atanan_vardiya"])
-             .size().reset_index(name="agent_gun")
-             .sort_values("agent_gun", ascending=False))
-    display(_ozet.head(30))
+takvim_df = pd.DataFrame(
+    takvim_rows,
+    columns=_kimlik_kolonlari + _ozet_kolonlari + _temmuz_kolonlari + _gun_kolonlari,
+)
 
-if _ihlal_rows:
-    print("\n   !!! GERÇEK İHLAL - takım x vardiya (adet):")
-    display(takim_base_ihlal_df.groupby(["takim", "takim_base", "atanan_vardiya"])
-            .size().reset_index(name="agent_gun").sort_values("agent_gun", ascending=False).head(30))
+print("TAKVİM tablosu hazır:", takvim_df.shape)
+print("  toplam çalışma       :", int(takvim_df["toplam_calisma"].sum()))
+print("  NORM hafta sonu      :", int(takvim_df["norm_hafta_sonu"].sum()))
+print("  TELAFİ hafta sonu    :", int(takvim_df["telafi_hafta_sonu"].sum()))
+print("  MESAİ hafta sonu     :", int(takvim_df["mesai_hafta_sonu"].sum()))
+print("  resmi tatil çalışma  :", int(takvim_df["resmi_tatil_calisma"].sum()))
+print("  ARİFE (kısıtlı 9-13) :", int(takvim_df["arife_calisma"].sum()))
+print("  ARİFE MESAİ (diğer)  :", int(takvim_df["arife_mesai"].sum()))
+print("  karşılanmayan off_t  :", int(takvim_df["off_t_karsilanmayan"].sum()))
 
+# ------------------------------------------------------- AGENT ÖZET TABLOSU
+# "21 iş günü kotasını doldurdu mu?" sorusunun cevabı.
+# Kota = baz_gereken_calisma = aylık iş günü - izinli iş günü.
+# Karşılaştırma resmi tatil HARİÇ çalışma ile yapılır ([HAZIRLIK/KISIT] - AYLIK
+# ÇALIŞMA DENGESİ hücresi de resmi tatil günlerini toplama saymıyor).
 
+_ozet_rows = []
+for _r in takvim_rows:
+    a = _r["agent_user_code"]
+    _baz = int(_baz_map_x.get(a, 0))
+    _sayilan = (int(_r["toplam_calisma"]) - int(_r["resmi_tatil_calisma"])
+                - int(_r["arife_calisma"]) - int(_r["arife_mesai"]))
+    _fark = _sayilan - _baz
+    if _fark == 0:
+        _durum = "TAM"
+    elif _fark > 0:
+        _durum = f"FAZLA (+{_fark} mesai günü)"
+    else:
+        _durum = f"EKSİK ({_fark})"
+    _sat = {c: _r.get(c, "") for c in _kimlik_kolonlari}
+    _sat.update({
+        "aylik_is_gunu": _aylik_is_gunu_x,
+        "izin_is_gunu": int(_izin_map_x.get(a, 0)),
+        "kota_baz_gereken_calisma": _baz,
+        "sayilan_calisma": _sayilan,
+        "kota_farki": _fark,
+        "kota_durumu": _durum,
+        "toplam_calisma": int(_r["toplam_calisma"]),
+        "hafta_ici_calisma": int(_r["hafta_ici_calisma"]),
+        "norm_hafta_sonu": int(_r["norm_hafta_sonu"]),
+        "telafi_hafta_sonu": int(_r["telafi_hafta_sonu"]),
+        "mesai_hafta_sonu": int(_r["mesai_hafta_sonu"]),
+        "resmi_tatil_calisma": int(_r["resmi_tatil_calisma"]),
+        "arife_calisma": int(_r["arife_calisma"]),
+        "arife_mesai": int(_r["arife_mesai"]),
+        "izin_gun": int(_r["izin_gun"]),
+        "off_gun": int(_r["off_gun"]),
+        "off_t_talep": int(_r["off_t_talep"]),
+        "off_t_karsilanmayan": int(_r["off_t_karsilanmayan"]),
+        "off_t2_talep": int(_r["off_t2_talep"]),
+        "temmuz_calisma": int(_r["temmuz_calisma"]),
+    })
+    _ozet_rows.append(_sat)
+
+agent_ozet_df = pd.DataFrame(_ozet_rows)
+
+print("\nAGENT ÖZET:")
+print("  kotayı TAM dolduran :", int((agent_ozet_df["kota_farki"] == 0).sum()))
+print("  FAZLA çalışan       :", int((agent_ozet_df["kota_farki"] > 0).sum()))
+print("  EKSİK çalışan       :", int((agent_ozet_df["kota_farki"] < 0).sum()))
+# MESAİ gün sayısı, kota_farki (aylık fazla çalışma) ile BİREBİR eşit olmalı.
+# Eşit değilse haftalık aday hesabı eksik demektir.
+_beklenen_mesai = agent_ozet_df["kota_farki"].clip(lower=0)
+_tutarsiz = agent_ozet_df[agent_ozet_df["mesai_hafta_sonu"] != _beklenen_mesai]
+print("  MESAİ sayısı kota_farki ile TUTARSIZ agent:", len(_tutarsiz), "(0 olmalı)")
+if len(_tutarsiz):
+    print("  !!! Aşağıdaki agentlarda MESAİ etiketi eksik/fazla:")
+    display(_tutarsiz[[c for c in ["agent_user_code", "agent_name", "takim",
+                                   "kota_baz_gereken_calisma", "sayilan_calisma",
+                                   "kota_farki", "norm_hafta_sonu",
+                                   "telafi_hafta_sonu", "mesai_hafta_sonu"]
+                      if c in _tutarsiz.columns]].head(40))
+
+# ---------------------------------------------------------- COVERAGE TABLOSU
+# Her (gün, vardiya) için: kaç kişi gerekiyordu, kaç kişi atandı, fark ne.
+_atanan_sayac = {}
+for (a, ds), v in cozum_atama.items():
+    if cozum_calisma.get((a, ds), 0) == 1:
+        _atanan_sayac[(ds, v)] = _atanan_sayac.get((ds, v), 0) + 1
+
+_cov_lower = globals().get("coverage_lower", {})
+_cov_upper = globals().get("coverage_upper", {})
+_gece_mi = globals().get("gece_aksam_vardiyasi_mi", {})
+_ust_limit = globals().get("fazla_atama_ust_limiti", {})
+_day_week_x = globals().get("day_week", {})
+
+_cov_rows = []
+for ds in PLAN_GUNLER:
+    d = pd.to_datetime(ds).date()
+    for v in gun_vardiyalari.get(ds, []):
+        _req = int(talep[(ds, v)])
+        _asg = int(_atanan_sayac.get((ds, v), 0))
+        _st = _saat.get((ds, v), ("", ""))
+        _cov_rows.append({
+            "tarih": d.strftime("%Y-%m-%d"),
+            "gun": _GUN_ADI[d.weekday()],
+            "hafta": _day_week_x.get(ds, ""),
+            "vardiya": v,
+            "baslangic": str(_st[0]).strip()[:5],
+            "bitis": str(_st[1]).strip()[:5],
+            "gece_aksam_mi": bool(_gece_mi.get((ds, v), False)),
+            "talep": _req,
+            "atanan": _asg,
+            "fark": _asg - _req,
+            "karsilanma_yuzde": round(100 * _asg / _req, 1) if _req else None,
+            "buffer_alt": _cov_lower.get((ds, v)),
+            "buffer_ust": _cov_upper.get((ds, v)),
+            "buffer_altinda": (_asg < _cov_lower[(ds, v)]) if (ds, v) in _cov_lower else None,
+            "buffer_ustunde": (_asg > _cov_upper[(ds, v)]) if (ds, v) in _cov_upper else None,
+            "fazla_atama_ust_limiti": _ust_limit.get((ds, v)),
+        })
+
+coverage_df = pd.DataFrame(_cov_rows)
+
+print("\nCOVERAGE:")
+print("  (gün, vardiya) kova :", len(coverage_df))
+print("  toplam talep        :", int(coverage_df["talep"].sum()))
+print("  toplam atanan       :", int(coverage_df["atanan"].sum()))
+print("  eksik atanan kova   :", int((coverage_df["fark"] < 0).sum()))
+print("  fazla atanan kova   :", int((coverage_df["fark"] > 0).sum()))
+print("  tam karşılanan kova :", int((coverage_df["fark"] == 0).sum()))
+
+# ------------------------------------------------------------- EXCEL YAZIMI
+_lejant_df = pd.DataFrame(
+    [{"gösterim": g, "anlam": ac} for g, _r, ac in LEJANT]
+)
+
+_ham_sheetler = [
+    ("df_tam", globals().get("df_tam")),
+    ("df_off", globals().get("df_off")),
+    ("df_izin", globals().get("df_izin")),
+    ("df_gecmis_temmuz", globals().get("df_gecmis")),
+    ("OFF_T_TALEP", globals().get("off_t_talep_df")),
+    ("HAFTALIK_NORM_MESAI", hafta_calisma_debug_df),
+    ("TAKIM_SAPMA", globals().get("takim_vardiya_sapma_df")),
+    ("TAKIM_VARDIYA_HAFTA", globals().get("takim_vardiya_hafta_df")),
+    ("TAKIM_BASE_MUAFIYET", globals().get("takim_base_muaf_df")),
+    # 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI
+    ("TAKIM_VARDIYA_DENGE", globals().get("takim_vardiya_denge_sonuc_df")),
+    ("TAKIM_VARDIYA_GECMIS_HAM", globals().get("df_takim_vardiya_gecmis")),
+    ("TAKIM_BASE_YASAK", globals().get("takim_base_yasak_df")),
+    # 2026-08-19 EKLENEN - AY GECISI / SARKAN HAFTA
+    ("SARKAN_HAFTA_BASE", globals().get("sarkan_hafta_base_df")),
+    ("SARKAN_AGENT_BASE", globals().get("sarkan_agent_base_df")),
+]
+
+_kural_df = globals().get("ihlal_ozet_df")
+
+with pd.ExcelWriter(EXCEL_DOSYA, engine="openpyxl") as writer:
+    takvim_df.to_excel(writer, sheet_name="TAKVIM", index=False)
+    agent_ozet_df.to_excel(writer, sheet_name="AGENT_OZET", index=False)
+    coverage_df.to_excel(writer, sheet_name="COVERAGE", index=False)
+    _lejant_df.to_excel(writer, sheet_name="LEJANT", index=False)
+    if isinstance(_kural_df, pd.DataFrame) and not _kural_df.empty:
+        _kural_df.to_excel(writer, sheet_name="KURAL_KONTROL", index=False)
+    for _ad, _df in _ham_sheetler:
+        if isinstance(_df, pd.DataFrame) and not _df.empty:
+            _df.to_excel(writer, sheet_name=_ad[:31], index=False)
+        else:
+            print(f"  ! {_ad} yok/boş - sheet atlandı")
+
+    # ---------------- TAKVIM biçimlendirme
+    ws = writer.sheets["TAKVIM"]
+    _kol_idx = {c: i + 1 for i, c in enumerate(takvim_df.columns)}
+    _ince = Side(style="thin", color="BBBBBB")
+    _kenar = Border(left=_ince, right=_ince, top=_ince, bottom=_ince)
+
+    for c in takvim_df.columns:
+        _h = ws.cell(row=1, column=_kol_idx[c])
+        _h.fill = PatternFill("solid", fgColor=RENK["baslik"])
+        _h.font = Font(bold=True, size=9)
+        _h.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    for (_i, _kol), _renk_key in hucre_renk.items():
+        _c = ws.cell(row=_i + 2, column=_kol_idx[_kol])
+        _c.fill = PatternFill("solid", fgColor=RENK[_renk_key])
+
+    for _kol in _temmuz_kolonlari:
+        _h = ws.cell(row=1, column=_kol_idx[_kol])
+        _h.fill = PatternFill("solid", fgColor=RENK["baslik_gec"])
+
+    for _r in range(2, len(takvim_df) + 2):
+        for _kol in _temmuz_kolonlari + _gun_kolonlari:
+            _c = ws.cell(row=_r, column=_kol_idx[_kol])
+            _c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            _c.font = Font(size=8)
+            _c.border = _kenar
+
+    for c in _kimlik_kolonlari:
+        ws.column_dimensions[get_column_letter(_kol_idx[c])].width = 26
+    for c in _ozet_kolonlari:
+        ws.column_dimensions[get_column_letter(_kol_idx[c])].width = 11
+    for c in _temmuz_kolonlari + _gun_kolonlari:
+        ws.column_dimensions[get_column_letter(_kol_idx[c])].width = 13
+    ws.row_dimensions[1].height = 32
+
+    # Sadece bu kolonlar sabit kalsın; kalan kimlik/bayrak kolonları kayabilsin.
+    _SABIT_KOLONLAR = ["agent_user_code", "agent_name", "working_main_group", "takim"]
+    _dondurulacak = 0
+    for _c in takvim_df.columns:
+        if _c in _SABIT_KOLONLAR:
+            _dondurulacak += 1
+        else:
+            break
+    ws.freeze_panes = ws.cell(row=2, column=_dondurulacak + 1)
+    print(f"TAKVIM dondurulan kolon: {_dondurulacak} "
+          f"({', '.join(list(takvim_df.columns)[:_dondurulacak])})")
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(takvim_df.columns))}1"
+
+    # ---------------- LEJANT renk örnekleri
+    ws_l = writer.sheets["LEJANT"]
+    ws_l.column_dimensions["A"].width = 24
+    ws_l.column_dimensions["B"].width = 70
+    ws_l.cell(row=1, column=1).font = Font(bold=True)
+    ws_l.cell(row=1, column=2).font = Font(bold=True)
+    for _j, (_g, _renk_key, _ac) in enumerate(LEJANT):
+        _c = ws_l.cell(row=_j + 2, column=1)
+        if _renk_key:
+            _c.fill = PatternFill("solid", fgColor=RENK[_renk_key])
+        _c.alignment = Alignment(horizontal="center")
+
+    # ---------------- AGENT_OZET / COVERAGE biçimlendirme
+    for _sh, _df_sh in (("AGENT_OZET", agent_ozet_df), ("COVERAGE", coverage_df)):
+        _w = writer.sheets[_sh]
+        for _ci, _cn in enumerate(_df_sh.columns, start=1):
+            _hc = _w.cell(row=1, column=_ci)
+            _hc.fill = PatternFill("solid", fgColor=RENK["baslik"])
+            _hc.font = Font(bold=True, size=9)
+            _hc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            _w.column_dimensions[get_column_letter(_ci)].width = max(12, min(30, len(str(_cn)) + 4))
+        _w.freeze_panes = "A2"
+        _w.auto_filter.ref = f"A1:{get_column_letter(len(_df_sh.columns))}1"
+        _w.row_dimensions[1].height = 30
+
+    # AGENT_OZET: kotayı tutturmayanları boya
+    _wo = writer.sheets["AGENT_OZET"]
+    _kf_idx = list(agent_ozet_df.columns).index("kota_farki") + 1
+    _kd_idx = list(agent_ozet_df.columns).index("kota_durumu") + 1
+    for _j, _kf in enumerate(agent_ozet_df["kota_farki"].tolist()):
+        if _kf != 0:
+            _fill = PatternFill("solid", fgColor=RENK["mesai"] if _kf > 0 else RENK["off_t_ihlal"])
+            _wo.cell(row=_j + 2, column=_kf_idx).fill = _fill
+            _wo.cell(row=_j + 2, column=_kd_idx).fill = _fill
+
+    # COVERAGE: eksik/fazla atanan kovaları boya
+    _wc = writer.sheets["COVERAGE"]
+    _fk_idx = list(coverage_df.columns).index("fark") + 1
+    for _j, _fk in enumerate(coverage_df["fark"].tolist()):
+        if _fk < 0:
+            _wc.cell(row=_j + 2, column=_fk_idx).fill = PatternFill("solid", fgColor=RENK["off_t_ihlal"])
+        elif _fk > 0:
+            _wc.cell(row=_j + 2, column=_fk_idx).fill = PatternFill("solid", fgColor=RENK["mesai"])
+
+    # ---------------- KURAL_KONTROL renklendirme
+    if "KURAL_KONTROL" in writer.sheets:
+        ws_k = writer.sheets["KURAL_KONTROL"]
+        ws_k.column_dimensions["A"].width = 55
+        ws_k.column_dimensions["B"].width = 10
+        ws_k.column_dimensions["C"].width = 10
+        _kk = _kural_df.reset_index(drop=True)
+        for _j in range(len(_kk)):
+            _hard = str(_kk.loc[_j, "tur"]).strip().upper() == "HARD"
+            _ihl = int(_kk.loc[_j, "ihlal"]) > 0
+            if _hard and _ihl:
+                for _cc in range(1, len(_kk.columns) + 1):
+                    ws_k.cell(row=_j + 2, column=_cc).fill = PatternFill(
+                        "solid", fgColor=RENK["hard_ihlal"]
+                    )
+
+print(f"\nExcel yazıldı: {EXCEL_DOSYA}")
+print("Sheet'ler:", ", ".join(["TAKVIM", "AGENT_OZET", "COVERAGE", "LEJANT"] +
+      (["KURAL_KONTROL"] if isinstance(_kural_df, pd.DataFrame) and not _kural_df.empty else []) +
+      [ad for ad, d in _ham_sheetler if isinstance(d, pd.DataFrame) and not d.empty]))

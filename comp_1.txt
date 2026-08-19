@@ -162,6 +162,7 @@ _ks_tip = globals().get("tip_map", {})
 _ks_gecmis = globals().get("gecmis_calisma", {})
 _ks_dw = globals().get("day_week", {})
 _ks_sayilmayan = set(globals().get("calisma_disi_date_set", set()))
+_ks_ilk_gun = min(_ks_tarih.values())      # plan dönemi başlangıcı
 
 
 def _ks_dk(t):
@@ -313,17 +314,29 @@ def plan_denetle(calisma, saat_atama, etiket):
                                "agent_user_code": _a, "tarih": str(_d),
                                "vardiya": f"önceki {_p[0]}-{_p[1]} / bugün {_st[0]}-{_st[1]}"})
 
-        # --- ardışık 7+ gün (geçmiş dahil) ---
-        _tum = sorted(set(_gun_calisilan) | {d for d in _gc if d < min(_ks_tarih.values())})
-        _seri = 0
-        _onc = None
+        # --- ardışık 7+ gün (önceki ay dahil, AMA sadece plana taşan seriler) ---
+        # Önceki ayın planı BAŞKASININ sorumluluğu. Seri tamamen önceki ayda
+        # kalıyorsa (örn. 25-31 Temmuz) bu ayın planıyla ilgisi yok, SAYILMAZ.
+        # Seri plan dönemine taşıyorsa sayılır: plan o günü vermemeliydi.
+        _tum = sorted(set(_gun_calisilan) | {d for d in _gc if d < _ks_ilk_gun})
+        _seriler = []
+        _sb = _onc = None
         for _d in _tum:
-            _seri = _seri + 1 if (_onc is not None and (_d - _onc).days == 1) else 1
+            if _onc is None or (_d - _onc).days != 1:
+                if _sb is not None:
+                    _seriler.append((_sb, _onc))
+                _sb = _d
             _onc = _d
-            if _seri == 7:
+        if _sb is not None:
+            _seriler.append((_sb, _onc))
+
+        for _sbas, _sson in _seriler:
+            _uzunluk = (_sson - _sbas).days + 1
+            if _uzunluk >= 7 and _sson >= _ks_ilk_gun:
                 _max6 += 1
                 _detay.append({"plan": etiket, "kural": "7+ gün aralıksız çalışma",
-                               "agent_user_code": _a, "tarih": str(_d)})
+                               "agent_user_code": _a, "tarih": str(_sson),
+                               "vardiya": f"{_sbas} .. {_sson} ({_uzunluk} gün)"})
 
         # --- haftalık off tavanı ---
         _hafta = {}

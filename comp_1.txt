@@ -164,6 +164,30 @@ _ks_dw = globals().get("day_week", {})
 _ks_sayilmayan = set(globals().get("calisma_disi_date_set", set()))
 _ks_ilk_gun = min(_ks_tarih.values())      # plan dönemi başlangıcı
 
+# --- aylık iş günü (hafta içi, resmî tatil/arife hariç) ---
+_ks_is_gunu_set = {d for ds, d in _ks_tarih.items()
+                   if d.weekday() in (0, 1, 2, 3, 4) and d not in _ks_sayilmayan}
+_ks_aylik_is_gunu = len(_ks_is_gunu_set)
+
+# --- HER PLANIN KENDİ İZİN VERİSİ ---
+# Model planı ay BAŞINDA yapılıyor, ekip planı ay boyunca REVİZE ediliyor:
+# agent sonradan izin alabiliyor. Bu yüzden kota (baz_gereken_calisma) her plan
+# için KENDİ izin kaydıyla hesaplanmalı; yoksa ekip planındaki sonradan alınmış
+# izinler "eksik çalışma" gibi görünür.
+model_izin_gunleri = {}
+for _a in _ks_ortak:
+    model_izin_gunleri[_a] = {d for d, t in _ks_tip.get(_a, {}).items()
+                              if str(t).strip().lower() == "izin"}
+_ekip_izin = globals().get("ekip_izin_gunleri", {})
+
+_mi = sum(len(v & _ks_is_gunu_set) for v in model_izin_gunleri.values())
+_ei = sum(len(_ekip_izin.get(a, set()) & _ks_is_gunu_set) for a in _ks_ortak)
+print(f"Aylık iş günü: {_ks_aylik_is_gunu}")
+print(f"İzinli iş günü toplamı - MODEL verisi: {_mi} | EKİP planı verisi: {_ei}")
+if _ei > _mi:
+    print(f"   -> ekip planında {_ei - _mi} gün DAHA FAZLA izin var "
+          f"(ay içinde alınan izinler). Her plan kendi izniyle değerlendiriliyor.")
+
 
 def _ks_dk(t):
     h, m = str(t).strip()[:5].split(":")
@@ -234,18 +258,20 @@ def _ks_sabah_uygun(b, e):
     return ed <= _ks_dk(_S_BIT)
 
 
-def plan_denetle(calisma, saat_atama, etiket):
-    """Bir planı ölç. calisma:(a,ds)->0/1  saat_atama:(a,ds)->(bas,bit)"""
+def plan_denetle(calisma, saat_atama, izin_gunleri, etiket):
+    """Bir planı ölç. calisma:(a,ds)->0/1  saat_atama:(a,ds)->(bas,bit)
+    izin_gunleri: agent -> {date}  O PLANIN KENDİ izin kaydı."""
     m = {"plan": etiket}
     _izin_calisma = _offt2_calisma = _offt_karsilanmayan = 0
     _11h = _max6 = _haftalik_off = _cift_off_yok = 0
     _hamile_hs = _sabah_ihlal = _kidem_gece = 0
-    _kota_eksik = _kota_fazla = _mesai_gun = 0
+    _kota_eksik = _kota_fazla = _mesai_gun = _izin_toplam = 0
     _hs_sayac, _takim_hafta = {}, {}
     _detay = []
 
     for _a in _ks_ortak:
         _tip_a = _ks_tip.get(_a, {})
+        _izin_a = set(izin_gunleri.get(_a, set()))
         _gun_calisilan = []
         for _ds in _ks_gunler:
             _d = _ks_tarih[_ds]
@@ -253,11 +279,12 @@ def plan_denetle(calisma, saat_atama, etiket):
             _t = str(_tip_a.get(_d, "")).strip().lower()
             if _c == 1:
                 _gun_calisilan.append(_d)
-                if _t == "izin":
+                if _d in _izin_a:
+                    # o planın KENDİ izin kaydında çalışma
                     _izin_calisma += 1
                     _detay.append({"plan": etiket, "kural": "İzin gününde çalışma",
                                    "agent_user_code": _a, "tarih": str(_d)})
-                elif _t == "off_t2":
+                if _t == "off_t2":
                     _offt2_calisma += 1
                     _detay.append({"plan": etiket, "kural": "Kesin off (off_t2) gününde çalışma",
                                    "agent_user_code": _a, "tarih": str(_d)})
@@ -350,7 +377,7 @@ def plan_denetle(calisma, saat_atama, etiket):
         _hafta = {}
         for _ds in _ks_gunler:
             _d = _ks_tarih[_ds]
-            if str(_tip_a.get(_d, "")).strip().lower() == "izin":
+            if _d in _izin_a:
                 continue
             if _d in _ks_sayilmayan and _d.weekday() in (0, 1, 2, 3, 4):
                 continue
@@ -389,10 +416,16 @@ def plan_denetle(calisma, saat_atama, etiket):
         _sayilan = sum(1 for _ds in _ks_gunler
                        if calisma.get((_a, _ds), 0) == 1
                        and _ks_tarih[_ds] not in _ks_sayilmayan)
-        _baz = int(_baz_map.get(_a, 0))
-        if _baz:
+        # kota, O PLANIN kendi izin kaydıyla hesaplanır
+        _baz = _ks_aylik_is_gunu - len(_izin_a & _ks_is_gunu_set)
+        _izin_toplam += len(_izin_a & _ks_is_gunu_set)
+        if _baz > 0:
             if _sayilan < _baz:
                 _kota_eksik += 1
+                _detay.append({"plan": etiket, "kural": "Kotayı tutturamayan agent",
+                               "agent_user_code": _a, "tarih": "",
+                               "vardiya": f"çalıştı {_sayilan} / gereken {_baz} "
+                                          f"(izin {len(_izin_a & _ks_is_gunu_set)} gün)"})
             elif _sayilan > _baz:
                 _kota_fazla += 1
                 _mesai_gun += _sayilan - _baz
@@ -434,6 +467,7 @@ def plan_denetle(calisma, saat_atama, etiket):
         "Kıdemsiz agent gece vardiyası [YENİ KURAL]": _kidem_gece,
         "Takım hafta içi bölünmesi (takım-hafta) [YENİ KURAL]": _bolunen,
         "Kotayı tutturamayan agent": _kota_eksik,
+        "İzinli iş günü (planın kendi verisi)": _izin_toplam,
         "Karşılanmayan off talebi (gün)": _offt_karsilanmayan,
         "Eksik atanan kova": _eksik_kova,
         "Eksik atanan kişi-gün": _eksik_kisi,
@@ -445,8 +479,10 @@ def plan_denetle(calisma, saat_atama, etiket):
     return m, _detay
 
 
-_m_ekip, _d_ekip = plan_denetle(ekip_calisma, ekip_saat, "EKİP PLANI")
-_m_model, _d_model = plan_denetle(model_calisma, model_saat, "MODEL PLANI")
+_m_ekip, _d_ekip = plan_denetle(ekip_calisma, ekip_saat,
+                                globals().get("ekip_izin_gunleri", {}), "EKİP PLANI")
+_m_model, _d_model = plan_denetle(model_calisma, model_saat,
+                                  model_izin_gunleri, "MODEL PLANI")
 
 # günde birden fazla vardiya: ekip verisinden, modelde yapısal olarak imkânsız
 _m_ekip["Günde birden fazla vardiya"] = len(globals().get("ekip_cift_vardiya_df", []))
@@ -502,4 +538,5 @@ with pd.ExcelWriter(_ks_dosya, engine="openpyxl") as _w:
     if "df_ekip_plani_ay" in globals():
         df_ekip_plani_ay.head(50000).to_excel(_w, sheet_name="EKIP_PLANI_HAM", index=False)
 print(f"\nExcel yazıldı: {_ks_dosya}")
+
 

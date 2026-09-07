@@ -1,289 +1,215 @@
-# %% [KISIT] - GÜNDÜZ VARDİYA ROTASYONU (SOFT)
-# 2026-09-04 EKLENEN. Tek başına çalışır; gereksinimi sadece team_week_base
-# ([HÜCRE] - TAKIM HAFTALIK BASE VARDİYA) ve CONFIG.
+# %% [KONTROL] - GÜNDÜZ VARDİYA ROTASYONU [RAPOR/SOFT]
+# 2026-09-07 EKLENEN. SOLVE SONRASI ölçüm: takımlar gündüz vardiyalarında fiilen
+# döndü mü, tavanı kim kaç hafta aştı. Kısıtın kendisi [KISIT] - GÜNDÜZ VARDİYA
+# ROTASYONU (SOFT) hücresinde.
 #
-# İş birimi: "Kişiler ay boyu aynı vardiyada kalmasın. Özellikle gündüz
-# vardiyaları için. Bir hafta 9 yazıldıysa diğer hafta 10, sonra 8:30 gibi."
+# Tek başına çalışır. Gereksinimi: çözülmüş solver + team_week_base + CONFIG.
 #
-#   Σ_hafta team_week_base[(takım, hafta, gündüz_vardiyası)] <= MAX + aşım
-#   ceza = GUNDUZ_ROTASYON_W × Σ aşım
+# gunduz_rotasyon_asim değişkenlerini KAYNAK olarak kullanmaz - sayımı
+# team_week_base'in çözülmüş değerlerinden sıfırdan yapar. Kısıtın kendi
+# değişkenini okumak kendini doğrulamak olurdu. Değişkenler varsa sonuçta
+# ÇAPRAZ KONTROL olarak karşılaştırılır; tutmuyorsa uyarı basılır.
 #
-# MAX = 2 ve ayda 5 hafta varsa takım en az 3 farklı gündüz vardiyası görür.
+# NEYİ ÖLÇER: TAKIM BASE'ini, agent bazında değil. Muafiyetli agentlar ve
+# sarkan haftada devir alanlar takım base'ini takip etmiyor, kendi bireysel
+# base'lerindeler - onlar bu tablonun kapsamında DEĞİL (kuralın da değil).
 #
-# NEDEN SOFT: HARD olsaydı HAFTALIK TAKIM BASE KAPASİTE KORUMASI ile çelişirdi.
-# O kural her hafta o vardiyaya yeterli takım seçilmesini ZORUNLU kılıyor. Bir
-# gündüz vardiyası her hafta kapasitenin %60'ını istiyorsa ama her takım orada
-# en fazla 2/5 hafta kalabiliyorsa ayrılabilecek maksimum kapasite %40'tır ->
-# infeasible. Aynı gerekçe TAKIM_VARDIYA_DENGE_MAX_HAFTA için de geçerliydi.
-#
-# KAPSAM DIŞI olanlar (bilinçli):
-#   - 15:00 / 00:00 vardiyaları -> TAKIM_VARDIYA_DENGE kuralında dengeleniyor
-#   - sarkan hafta              -> o hafta kişi bazlı devir kuralının kontrolünde
-#   - arife özel vardiyaları    -> base olarak seçilemiyorlar zaten
-#   - muafiyetli / devir alan agentlar -> takım base'ini takip etmiyorlar,
-#     kendi bireysel base'lerinde kalıyorlar (4 Eylül: kullanıcı kabul etti)
-#
-# EŞLEŞTİRME SAAT ARALIĞINDAN: vardiya kodları haftadan haftaya değişebilir,
-# saat aralığı sabit kalır. "09:00-18:00 ayda kaç hafta" diye sayılıyor.
+# SARKAN HAFTA sayıma girmez (kısıtla aynı): o hafta kişi bazlı devir kuralının
+# kontrolünde. hafta_dizisi'nde görünür ama "(sarkan)" etiketiyle işaretlidir.
 
-for _gr_p in ("ENABLE_GUNDUZ_ROTASYON", "GUNDUZ_ILK_BASLANGIC_SAATI",
-              "GUNDUZ_SON_BASLANGIC_SAATI", "GUNDUZ_AYNI_VARDIYA_MAX_HAFTA",
-              "GUNDUZ_ROTASYON_W"):
-    if _gr_p not in globals():
-        raise SystemExit(f"CONFIG'de tanımlı olmalı: {_gr_p} -> [CONFIG] hücresini çalıştır.")
-
+for _grk_p in ("ENABLE_GUNDUZ_ROTASYON", "GUNDUZ_ILK_BASLANGIC_SAATI",
+               "GUNDUZ_SON_BASLANGIC_SAATI", "GUNDUZ_AYNI_VARDIYA_MAX_HAFTA"):
+    if _grk_p not in globals():
+        raise SystemExit(
+            f"CONFIG'de tanımlı olmalı: {_grk_p} -> [CONFIG] hücresini çalıştır."
+        )
+if "solver" not in globals():
+    raise SystemExit("solver yok. Önce [KONTROL 0] - SOLVER hücresini çalıştır.")
 if "team_week_base" not in globals():
     raise SystemExit(
         "team_week_base yok. Önce [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA hücresini çalıştır."
     )
 
-gunduz_rotasyon_asim = {}      # (takim, "bas-bit") -> IntVar (tavanı kaç hafta aştı)
-gunduz_rotasyon_rows = []
-gunduz_rotasyon_kisiti = 0
-
-
-def _gr_dk(_t):
-    _h, _m = str(_t).strip()[:5].split(":")
-    return int(_h) * 60 + int(_m)
-
+gunduz_rotasyon_detay_df = pd.DataFrame()   # takım x gündüz vardiyası (Excel'e giden)
+gunduz_rotasyon_sonuc_df = pd.DataFrame()   # takım başına özet (ekran, hafta dizisi)
 
 if not ENABLE_GUNDUZ_ROTASYON:
-    print("ENABLE_GUNDUZ_ROTASYON = False - gündüz rotasyonu kurulmadı.")
+    print("ENABLE_GUNDUZ_ROTASYON = False - kural kurulmadı, kontrol atlandı.")
 else:
-    _gr_alt = _gr_dk(GUNDUZ_ILK_BASLANGIC_SAATI)
-    _gr_ust = _gr_dk(GUNDUZ_SON_BASLANGIC_SAATI)
-    _gr_arife = globals().get("arife_ozel_vardiya_kodlari", set())
-    _gr_sarkan = globals().get("SARKAN_WK")
+    def _grk_dk(_t):
+        _h, _m = str(_t).strip()[:5].split(":")
+        return int(_h) * 60 + int(_m)
 
-    # (hafta, vardiya) -> (bas, bit)   [bu hücre tek başına çalışsın diye burada türetilir]
-    _gr_wk_saat = {}
+    _grk_alt = _grk_dk(GUNDUZ_ILK_BASLANGIC_SAATI)
+    _grk_ust = _grk_dk(GUNDUZ_SON_BASLANGIC_SAATI)
+    _grk_tavan = int(GUNDUZ_AYNI_VARDIYA_MAX_HAFTA)
+    _grk_arife = globals().get("arife_ozel_vardiya_kodlari", set())
+    _grk_sarkan = globals().get("SARKAN_WK")
+
+    # (hafta, vardiya) -> (bas, bit)  [hücre tek başına çalışsın diye burada türetilir]
+    _grk_wk_saat = {}
     for _ds in PLAN_GUNLER:
         _wk = day_week[_ds]
         for _v in gun_vardiyalari.get(_ds, []):
-            if (_wk, _v) not in _gr_wk_saat and (_ds, _v) in saat:
+            if (_wk, _v) not in _grk_wk_saat and (_ds, _v) in saat:
                 _b, _e = saat[(_ds, _v)]
-                _gr_wk_saat[(_wk, _v)] = (str(_b).strip()[:5], str(_e).strip()[:5])
+                _grk_wk_saat[(_wk, _v)] = (str(_b).strip()[:5], str(_e).strip()[:5])
 
-    # rotasyona giren saat aralıkları
-    _gr_gunduz_saat = sorted({
-        _st for (_wk, _v), _st in _gr_wk_saat.items()
-        if _v not in _gr_arife and _gr_alt <= _gr_dk(_st[0]) <= _gr_ust
+    # rotasyon kapsamındaki saat aralıkları - kısıt hücresiyle AYNI filtre
+    _grk_gunduz = sorted({
+        _st for (_wk, _v), _st in _grk_wk_saat.items()
+        if _v not in _grk_arife and _grk_alt <= _grk_dk(_st[0]) <= _grk_ust
     })
-
-    # sayıma giren haftalar (sarkan hafta hariç)
-    _gr_haftalar = [_wk for _wk in WEEKS if _wk != _gr_sarkan]
+    _grk_haftalar = [_wk for _wk in WEEKS if _wk != _grk_sarkan]
 
     print(f"Gündüz penceresi: {GUNDUZ_ILK_BASLANGIC_SAATI} - {GUNDUZ_SON_BASLANGIC_SAATI}"
-          f"  |  tavan: {GUNDUZ_AYNI_VARDIYA_MAX_HAFTA} hafta  |  ceza: {GUNDUZ_ROTASYON_W}")
-    print(f"Rotasyona giren gündüz vardiyası: {len(_gr_gunduz_saat)}"
-          f"  ({', '.join('-'.join(_s) for _s in _gr_gunduz_saat) or 'YOK'})")
-    print(f"Sayıma giren hafta: {len(_gr_haftalar)} / {len(WEEKS)}"
-          f"  (sarkan hafta {_gr_sarkan} hariç)" if _gr_sarkan else
-          f"Sayıma giren hafta: {len(_gr_haftalar)} / {len(WEEKS)}")
+          f"  |  tavan: {_grk_tavan} hafta")
+    print(f"Rotasyona giren gündüz vardiyası: {len(_grk_gunduz)}"
+          f"  ({', '.join('-'.join(_s) for _s in _grk_gunduz) or 'YOK'})")
+    print(f"Sayıma giren hafta: {len(_grk_haftalar)} / {len(WEEKS)}"
+          + (f"  (sarkan hafta {_grk_sarkan} hariç)" if _grk_sarkan else ""))
 
-    if not _gr_gunduz_saat:
-        print("!!! UYARI: pencereye giren gündüz vardiyası YOK - kural boş çalışıyor.")
-        print("!!! GUNDUZ_ILK/SON_BASLANGIC_SAATI değerlerini kontrol et.")
+    _grk_detay, _grk_ozet = [], []
 
     for _t in TAKIMLAR:
-        _t = str(_t).strip()
-        for _st in _gr_gunduz_saat:
-            _vars = []
-            for _wk in _gr_haftalar:
-                for _v in week_vardiyalari.get(_wk, []):
-                    if _gr_wk_saat.get((_wk, _v)) != _st:
-                        continue
-                    if (_t, _wk, _v) in team_week_base:
-                        _vars.append(team_week_base[(_t, _wk, _v)])
-            # tavan aşılamayacaksa kısıt üretme (o vardiya takıma zaten az açık)
-            if len(_vars) <= GUNDUZ_AYNI_VARDIYA_MAX_HAFTA:
-                continue
-            _ad = "-".join(_st)
-            _asim = model.NewIntVar(0, len(_vars) - GUNDUZ_AYNI_VARDIYA_MAX_HAFTA,
-                                    f"gunduz_rot_asim_{_t}_{_ad}")
-            model.Add(sum(_vars) - GUNDUZ_AYNI_VARDIYA_MAX_HAFTA <= _asim)
-            gunduz_rotasyon_asim[(_t, _ad)] = _asim
-            gunduz_rotasyon_kisiti += 1
-            gunduz_rotasyon_rows.append({
-                "takim": _t, "vardiya_saati": _ad,
-                "secilebilir_hafta": len(_vars),
-                "tavan": GUNDUZ_AYNI_VARDIYA_MAX_HAFTA,
+        # --- her haftada takımın seçtiği base (sarkan dahil; dizi için) ---
+        _grk_secilen = {}
+        for _wk in WEEKS:
+            _bulunan = None
+            for _v in week_vardiyalari.get(_wk, []):
+                _var = team_week_base.get((_t, _wk, _v))
+                if _var is not None and solver.Value(_var) == 1:
+                    _bulunan = _grk_wk_saat.get((_wk, _v))
+                    break
+            _grk_secilen[_wk] = _bulunan
+
+        # --- gündüz saati bazında kaç hafta kalındı (sarkan hafta HARİÇ) ---
+        _grk_sayim = {_st: 0 for _st in _grk_gunduz}
+        for _wk in _grk_haftalar:
+            _st = _grk_secilen.get(_wk)
+            if _st in _grk_sayim:
+                _grk_sayim[_st] += 1
+
+        # --- o saati kaç haftada SEÇEBİLİRDİ (dönme imkanı var mıydı) ---
+        _grk_secilebilir = {_st: 0 for _st in _grk_gunduz}
+        for _wk in _grk_haftalar:
+            _acik = {
+                _grk_wk_saat.get((_wk, _v))
+                for _v in week_vardiyalari.get(_wk, [])
+                if (_t, _wk, _v) in team_week_base
+            }
+            for _st in _grk_gunduz:
+                if _st in _acik:
+                    _grk_secilebilir[_st] += 1
+
+        _grk_asim_toplam = 0
+        for _st in _grk_gunduz:
+            _asim = max(0, _grk_sayim[_st] - _grk_tavan)
+            _grk_asim_toplam += _asim
+            _grk_detay.append({
+                "takim": _t,
+                "vardiya_saati": "-".join(_st),
+                "secilebilir_hafta": _grk_secilebilir[_st],
+                "secilen_hafta": _grk_sayim[_st],
+                "tavan": _grk_tavan,
+                "asim": _asim,
+                # kısıt hücresi tavandan az seçenekli çiftte kısıt ÜRETMEZ;
+                # False satırlarda asim zaten yapısal olarak 0'dır.
+                "kisit_kuruldu": _grk_secilebilir[_st] > _grk_tavan,
             })
 
-gunduz_rotasyon_df = pd.DataFrame(gunduz_rotasyon_rows)
+        _grk_gunduz_hafta = sum(_grk_sayim.values())
+        _grk_farkli = sum(1 for _n in _grk_sayim.values() if _n > 0)
+        _grk_en_cok = max(_grk_sayim.items(), key=lambda kv: (kv[1], kv[0])) \
+            if _grk_gunduz_hafta else (None, 0)
+        _grk_secenek = sum(1 for _st in _grk_gunduz if _grk_secilebilir[_st] > 0)
+        # Tavanı AŞMADAN gündüzde geçirilebilecek en fazla hafta: her gündüz
+        # vardiyasından en çok "tavan" kadar, ama o vardiya kaç haftada açıksa
+        # o kadar. Seçenek SAYISI tek başına yetmez - 4 seçeneği olup her biri
+        # tek haftada açık olan takım da dönemez.
+        _grk_kapasite = sum(min(_grk_tavan, _grk_secilebilir[_st])
+                            for _st in _grk_gunduz)
+        # Takım gündüzde bu kapasiteden fazla hafta geçirdiyse aşım ZORUNLUYDU;
+        # üstü modelin tercihi (kaçınılabilir aşım).
+        _grk_zorunlu = max(0, _grk_gunduz_hafta - _grk_kapasite)
+        _grk_dizi = " | ".join(
+            f"{_wk}:{(_grk_secilen[_wk][0] if _grk_secilen[_wk] else '-')}"
+            + ("(sarkan)" if _wk == _grk_sarkan else "")
+            for _wk in WEEKS
+        )
+        _grk_ozet.append({
+            "takim": _t,
+            "hafta_dizisi": _grk_dizi,
+            "gunduz_hafta": _grk_gunduz_hafta,
+            "farkli_gunduz_vardiyasi": _grk_farkli,
+            "en_cok_kalinan": "-".join(_grk_en_cok[0]) if _grk_en_cok[0] else "",
+            "en_cok_hafta": int(_grk_en_cok[1]),
+            "tavan": _grk_tavan,
+            "asim_toplam": _grk_asim_toplam,
+            "secenek_sayisi": _grk_secenek,
+            "tavansiz_kapasite": _grk_kapasite,
+            "zorunlu_asim": _grk_zorunlu,
+            # asıl bakılacak kolon: model kaçınabilecekken mi aştı?
+            "kacinilabilir_asim": max(0, _grk_asim_toplam - _grk_zorunlu),
+        })
 
-print("Gündüz rotasyon kısıtı:", gunduz_rotasyon_kisiti)
-if not gunduz_rotasyon_df.empty:
-    print("Kural kurulan takım:", gunduz_rotasyon_df["takim"].nunique())
-    print("Takım başına gündüz vardiyası seçeneği (dağılım):")
-    print(gunduz_rotasyon_df.groupby("takim").size().value_counts()
-          .rename_axis("vardiya_secenegi").to_frame("takim_sayisi").to_string())
-    # Bir takımın seçebileceği gündüz vardiyası sayısı tavandan azsa rotasyon
-    # o takım için fiilen imkansız - ceza sürekli ödenir, plan değişmez.
-    _gr_dar = (gunduz_rotasyon_df.groupby("takim").size()
-               <= GUNDUZ_AYNI_VARDIYA_MAX_HAFTA)
-    if _gr_dar.any():
-        print(f"\n!!! {int(_gr_dar.sum())} takımın gündüz vardiya seçeneği tavandan az "
-              f"-> o takımlar dönemez, ceza boşuna birikir.")
-        print("!!! Bu takımlarda ya vardiya arzı dar ya da takım bütünlüğü kuralı "
-              "(TAKIM_BASE_MAX_YASAKLI_ORAN) seçenekleri kapatmış olabilir.")
-        print(_gr_dar[_gr_dar].head(10).to_string())
+    gunduz_rotasyon_detay_df = pd.DataFrame(_grk_detay)
+    gunduz_rotasyon_sonuc_df = pd.DataFrame(_grk_ozet)
 
+    # ------------------------------------------------------------------ RAPOR
+    _grk_asan = gunduz_rotasyon_sonuc_df[gunduz_rotasyon_sonuc_df["asim_toplam"] > 0]
+    _grk_kacin = gunduz_rotasyon_sonuc_df[
+        gunduz_rotasyon_sonuc_df["kacinilabilir_asim"] > 0]
+    _grk_zorunlu_t = gunduz_rotasyon_sonuc_df[
+        gunduz_rotasyon_sonuc_df["zorunlu_asim"] > 0]
 
+    print(f"\nTakım sayısı: {len(gunduz_rotasyon_sonuc_df)}")
+    print(f"TOPLAM AŞIM (hafta)  : {int(gunduz_rotasyon_sonuc_df['asim_toplam'].sum())}")
+    print(f"  bunun ZORUNLU olan : {int(gunduz_rotasyon_sonuc_df['zorunlu_asim'].sum())}"
+          f"  ({len(_grk_zorunlu_t)} takım - gündüz vardiya arzı yetmiyor, "
+          f"model bir şey yapamazdı)")
+    print(f"  KAÇINILABİLİR olan : {int(gunduz_rotasyon_sonuc_df['kacinilabilir_asim'].sum())}"
+          f"  ({len(_grk_kacin)} takım - asıl bakılacak yer)")
+    print(f"Tavanı aşan takım    : {len(_grk_asan)} / {len(gunduz_rotasyon_sonuc_df)}")
+    if len(_grk_zorunlu_t):
+        print("  -> zorunlu aşımı olan takımlarda ya vardiya arzı dar ya da takım "
+              "bütünlüğü kuralı (TAKIM_BASE_MAX_YASAKLI_ORAN) seçenekleri kapatmış.")
 
+    print("\nGündüz vardiya çeşitliliği - kaç takım kaç farklı vardiya gördü:")
+    print(gunduz_rotasyon_sonuc_df["farkli_gunduz_vardiyasi"]
+          .value_counts().sort_index()
+          .rename_axis("farkli_vardiya").to_frame("takim_sayisi").to_string())
 
+    if len(_grk_asan):
+        print("\n--- en çok aşan 10 takım (kaçınılabilir aşıma göre sıralı) ---")
+        print(_grk_asan.sort_values(["kacinilabilir_asim", "asim_toplam"],
+                                    ascending=False)
+              [["takim", "hafta_dizisi", "en_cok_kalinan", "en_cok_hafta",
+                "asim_toplam", "zorunlu_asim", "kacinilabilir_asim",
+                "secenek_sayisi", "tavansiz_kapasite"]]
+              .head(10).to_string(index=False))
+    else:
+        print("\nTavanı aşan takım YOK - gündüz rotasyonu tam tuttu.")
 
-# %% [HÜCRE] - OBJECTIVE
-# 2026-08-05: off_t talepleri SOFT. Karşılanmayan her off_t günü
-# OFF_TALEP_KARSILANMAMA_W ile cezalandırılır ([KISIT] - OFF_T SOFT hücresi).
-# izin ve off_t2 HARD kaldığı için objective'de karşılıkları yoktur.
+    # ---- ÇAPRAZ KONTROL: modelin aşım değişkeni ile yeniden sayım uyuşuyor mu ----
+    _grk_asim_map = globals().get("gunduz_rotasyon_asim", {})
+    if _grk_asim_map:
+        try:
+            _grk_model_toplam = sum(int(solver.Value(_v)) for _v in _grk_asim_map.values())
+            _grk_sayim_toplam = int(gunduz_rotasyon_detay_df["asim"].sum())
+            print(f"\nÇapraz kontrol: model aşım değişkeni {_grk_model_toplam}"
+                  f"  |  yeniden sayım {_grk_sayim_toplam}")
+            if _grk_model_toplam != _grk_sayim_toplam:
+                print("!!! UYARI: iki sayım TUTMUYOR. Kısıt hücresi ile bu hücrenin "
+                      "gündüz penceresi / sarkan hafta / arife filtresi ayrışmış olabilir.")
+        except Exception as _e:
+            print("gunduz_rotasyon_asim okunamadı:", _e)
+    else:
+        print("\nÇapraz kontrol yapılamadı: gunduz_rotasyon_asim yok "
+              "([KISIT] - GÜNDÜZ VARDİYA ROTASYONU hücresi çalışmamış).")
 
-objective_terms = []
-
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari.get(ds, []):
-        objective_terms.append(UNDER_BUFFER_W * under_buffer[(ds, v)])
-        objective_terms.append(MISSING_TO_REQUIRED_W * missing_to_required[(ds, v)])
-
-        if gece_aksam_vardiyasi_mi[(ds, v)]:
-            excess_weight = EXCESS_GECE_AKSAM_W
-        elif mola_destek_vardiyasi_mi[(ds, v)]:
-            excess_weight = EXCESS_MOLA_DESTEK_W
-        else:
-            excess_weight = EXCESS_NORMAL_W
-
-        objective_terms.append(excess_weight * excess_to_required[(ds, v)])
-        objective_terms.append(OVER_BUFFER_W * over_buffer[(ds, v)])
-
-# İkinci mesai ekstra cezası
-for a in AGENTS:
-    objective_terms.append(IKINCI_MESAI_W * ikinci_mesai_aylik[a])
-
-# Hafta sonu çalışma adil dağıtım cezası
-for a in hafta_sonu_calisma_sayisi.keys():
-    objective_terms.append(HAFTA_SONU_FAZLA_CALISMA_W * fazla_hafta_sonu_calisma[a])
-
-# Arife / resmi tatil mesai ve ihlal cezaları
-if "arife_mesai" in globals() and ARIFE_MESAI_W != 0:
-    for (a, ds, v), var in arife_mesai.items():
-        objective_terms.append(ARIFE_MESAI_W * var)
-
-if "resmi_tatil_mesai" in globals() and RESMI_TATIL_MESAI_W != 0:
-    for (a, ds, v), var in resmi_tatil_mesai.items():
-        objective_terms.append(RESMI_TATIL_MESAI_W * var)
-
-if "resmi_tatil_kisitli_ihlal" in globals():
-    for (a, ds, v), var in resmi_tatil_kisitli_ihlal.items():
-        objective_terms.append(RESMI_TATIL_KISITLI_IHLAL_W * var)
-
-print("ARIFE_MESAI_W:", ARIFE_MESAI_W)
-print("RESMI_TATIL_MESAI_W:", RESMI_TATIL_MESAI_W)
-print("RESMI_TATIL_KISITLI_IHLAL_W:", RESMI_TATIL_KISITLI_IHLAL_W)
-
-# Haftalık hedef sapma cezası - ÖLÜ BLOK (2026-08-10 tespit)
-# weekly_under / weekly_over değişkenlerini üreten hiçbir hücre YOK, hiçbir
-# sürümde de olmamış. Bu iki if hiçbir zaman True olmuyor, WEEKLY_UNDER_W ve
-# WEEKLY_OVER_W objective'e hiç girmiyor. Ağırlıkları değiştirmek bir şey
-# değiştirmez. Aynı işi [KISIT] - HAFTALIK OFF TAVANI yapıyor.
-if "weekly_under" in globals():
-    for (a, wk), var in weekly_under.items():
-        objective_terms.append(WEEKLY_UNDER_W * var)
-if "weekly_over" in globals():
-    for (a, wk), var in weekly_over.items():
-        objective_terms.append(WEEKLY_OVER_W * var)
-
-print("WEEKLY UNDER W:", WEEKLY_UNDER_W)
-print("WEEKLY OVER W:", WEEKLY_OVER_W)
-
-# Günlük fazla atama yığılma cezası
-if "daily_excess_over" in globals():
-    for ds, var in daily_excess_over.items():
-        objective_terms.append(DAILY_EXCESS_OVER_W * var)
-print("DAILY EXCESS SOFT LIMIT:", DAILY_EXCESS_SOFT_LIMIT)
-print("DAILY_EXCESS_OVER_W:", DAILY_EXCESS_OVER_W)
-
-# Partial end week tamamen OFF kalma cezası
-if "partial_end_week_all_off" in globals():
-    for key, var in partial_end_week_all_off.items():
-        objective_terms.append(PARTIAL_END_WEEK_ALL_OFF_W * var)
-print("PARTIAL END WEEK ALL OFF W:", PARTIAL_END_WEEK_ALL_OFF_W)
-
-# off_t soft ceza - değişkenler varsa
-if "off_t_ihlal" in globals():
-    for (a, ds), var in off_t_ihlal.items():
-        objective_terms.append(OFF_TALEP_KARSILANMAMA_W * var)
-    print("off_t soft ceza terimi:", len(off_t_ihlal))
-else:
-    print("off_t_ihlal yok -> off_t cezası objective'e girmedi")
-print("OFF_TALEP_KARSILANMAMA_W:", OFF_TALEP_KARSILANMAMA_W)
-
-# haftalık off tavanı aşımı - sadece SOFT modda değişken üretilir
-if "model_off_tavan_asim" in globals() and model_off_tavan_asim:
-    for (a, wk), var in model_off_tavan_asim.items():
-        objective_terms.append(MODEL_OFF_TAVAN_ASIM_W * var)
-    print("haftalık off tavanı soft ceza terimi:", len(model_off_tavan_asim))
-
-# ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
-# Değişkenler [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ (SOFT) hücresinde üretilir.
-# ENABLE_TAKIM_VARDIYA_DENGE = False iken sözlükler BOŞ kalır, buraya hiçbir
-# terim girmez - bu blok o durumda sessizce atlanır.
-if "takim_vardiya_denge_sapma" in globals() and takim_vardiya_denge_sapma:
-    for (_t, _b), (_arti, _eksi) in takim_vardiya_denge_sapma.items():
-        objective_terms.append(TAKIM_VARDIYA_DENGE_W * _arti)
-        objective_terms.append(TAKIM_VARDIYA_DENGE_W * _eksi)
-    print("takım vardiya denge sapma terimi:", 2 * len(takim_vardiya_denge_sapma))
-    print("TAKIM_VARDIYA_DENGE_W:", TAKIM_VARDIYA_DENGE_W)
-
-if "takim_vardiya_denge_asim" in globals() and takim_vardiya_denge_asim:
-    for (_t, _b), _var in takim_vardiya_denge_asim.items():
-        objective_terms.append(TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W * _var)
-    print("takım vardiya aylık tavan aşımı terimi:", len(takim_vardiya_denge_asim))
-    print("TAKIM_VARDIYA_DENGE_MAX_HAFTA:", TAKIM_VARDIYA_DENGE_MAX_HAFTA,
-          "| aşım W:", TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W)
-# =============================================================
-
-# ===== 2026-08-28 EKLENEN - AY GECISI SAPMA CEZALARI =====
-# Ay geçişi kuralları SOFT: sapma cezalandırılır ama yasaklanmaz.
-# Ağırlıklar coverage'ın ALTINDA -> model önce talebi karşılar, sonra sürekliliği.
-if "sarkan_base_sapma" in globals() and sarkan_base_sapma:
-    for _t, _var in sarkan_base_sapma.items():
-        objective_terms.append(SARKAN_BASE_SAPMA_W * _var)
-    print("ay geçişi - takım süreklilik sapma terimi:", len(sarkan_base_sapma))
-
-if "sarkan_agent_sapma" in globals() and sarkan_agent_sapma:
-    for _a, _var in sarkan_agent_sapma.items():
-        objective_terms.append(SARKAN_KISI_SAPMA_W * _var)
-    print("ay geçişi - muaf agent süreklilik sapma terimi:", len(sarkan_agent_sapma))
-
-if "sarkan_kisi_sapma" in globals() and sarkan_kisi_sapma:
-    for _a, _var in sarkan_kisi_sapma.items():
-        objective_terms.append(SARKAN_KISI_SAPMA_W * _var)
-    print("ay geçişi - kişi bazlı devir sapma terimi:", len(sarkan_kisi_sapma))
-    print("SARKAN_BASE_SAPMA_W:", SARKAN_BASE_SAPMA_W,
-          "| SARKAN_KISI_SAPMA_W:", SARKAN_KISI_SAPMA_W)
-# =========================================================
-
-# ===== 2026-09-04 EKLENEN - GUNDUZ VARDIYA ROTASYONU =====
-# Değişkenler [KISIT] - GÜNDÜZ VARDİYA ROTASYONU (SOFT) hücresinde üretilir.
-# ENABLE_GUNDUZ_ROTASYON = False iken sözlük BOŞ kalır, buraya terim girmez.
-if "gunduz_rotasyon_asim" in globals() and gunduz_rotasyon_asim:
-    for (_t, _sa), _var in gunduz_rotasyon_asim.items():
-        objective_terms.append(GUNDUZ_ROTASYON_W * _var)
-    print("gündüz rotasyon aşım terimi:", len(gunduz_rotasyon_asim))
-    print("GUNDUZ_ROTASYON_W:", GUNDUZ_ROTASYON_W,
-          "| tavan:", GUNDUZ_AYNI_VARDIYA_MAX_HAFTA, "hafta")
-# =========================================================
-
-model.Minimize(sum(objective_terms))
-
-print("Objective term sayısı:", len(objective_terms))
-print("UNDER_BUFFER_W:", UNDER_BUFFER_W)
-print("MISSING_TO_REQUIRED_W:", MISSING_TO_REQUIRED_W)
-print("OVERTIME_W:", OVERTIME_W)
-print("EXCESS_GECE_AKSAM_W:", EXCESS_GECE_AKSAM_W)
-print("EXCESS_NORMAL_W:", EXCESS_NORMAL_W)
-print("EXCESS_MOLA_DESTEK_W:", EXCESS_MOLA_DESTEK_W)
-print("OVER_BUFFER_W:", OVER_BUFFER_W)
+    if "kaydet" in globals():
+        kaydet("Gündüz vardiya aylık tavanı (rotasyon)", len(_grk_asan), tur="SOFT")
 
 
 
@@ -985,7 +911,10 @@ _ham_sheetler = [
     ("TAKIM_BASE_DEVIR", globals().get("takim_base_devir_df")),
     ("SARKAN_DEVIR_UYUM", globals().get("sarkan_devir_uyum_df")),
     # 2026-09-04 EKLENEN - GUNDUZ VARDIYA ROTASYONU
-    ("GUNDUZ_ROTASYON", globals().get("gunduz_rotasyon_df")),
+    # 2026-09-07: solve ONCESI gunduz_rotasyon_df cikarildi ("kural kuruldu"
+    # diyordu, "dondu mu" demiyordu). Yerine [KONTROL] - GUNDUZ VARDIYA
+    # ROTASYONU hucresinin solve SONRASI detay tablosu.
+    ("GUNDUZ_ROTASYON", globals().get("gunduz_rotasyon_detay_df")),
 ]
 
 _kural_df = globals().get("ihlal_ozet_df")

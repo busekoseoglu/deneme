@@ -102,6 +102,12 @@ takim_vardiya_denge_asim = {}      # (takim, baslangic) -> IntVar   tavan aşım
 takim_vardiya_denge_gecmis = {}    # (takim, baslangic) -> int      sabit geçmiş (ölçekli)
 takim_vardiya_denge_mevcut = {}    # takim -> int                   kullanılan bölen
 takim_vardiya_denge_katsayi = {}   # takim -> int                   OLCEK/mevcut, yuvarlanmış
+# 2026-09-11: ust sinirlar Python'da tutulur. Onceden IntVar'in protobuf
+# referansindan okunuyordu; o referans modelin dizisine DOGRUDAN bakar ve
+# sonraki NewIntVar cagrilari diziyi yeniden konumlandirinca bosa duser ->
+# segfault. Hucre model kurulurken KERNEL CRASH veriyordu (11 Eylul).
+takim_vardiya_denge_ag_ust = {}    # (takim, baslangic) -> int  agent-gün üst sınırı
+takim_vardiya_denge_kb_ust = {}    # (takim, baslangic) -> int  kişi başı üst sınırı
 takim_vardiya_denge_rows = []
 
 if not ENABLE_TAKIM_VARDIYA_DENGE:
@@ -124,7 +130,14 @@ else:
     except Exception:
         _lin_sum = sum
 
+    import math
+
     _tvd_olcek = int(TAKIM_VARDIYA_DENGE_OLCEK)
+    # Bir takımın tek bir vardiyada kişi başı çalışabileceği makul üst sınır.
+    # Ocak-Ağustos ~176 hafta içi günü; 400 bol güvenli pay bırakır. Aşılırsa
+    # veri bozuk demektir ve hücre okunur hatayla durur - sessiz devam ederse
+    # CP-SAT'a taşan alan sınırı gider, çökme riski doğar.
+    _TVD_MAX_GECMIS = 400.0
     _tvd_hs_dahil = bool(TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL)
     _tvd_arife_kod = globals().get("arife_ozel_vardiya_kodlari", set())
     _tvd_eksik_vars = float(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN)
@@ -264,8 +277,13 @@ else:
             continue
 
         # ---- takım başına agent-gün ve kişi başı değişkenleri ----
+        # 2026-09-11: flush'lı KONTROL NOKTALARI. Hücre model kurulurken kernel
+        # crash verdiğinde Jupyter tamponu kaybediyor ve nerede öldüğü
+        # görünmüyordu. flush=True ile son basılan satır crash noktasını verir.
+        print(f"  [kurulum] '{_bas}': agent-gün değişkenleri "
+              f"({len(_tvd_takimlar)} takım, {len(_tvd_gun_v)} gün)...", flush=True)
         _kum_ifadeler, _gecerli_t = [], []
-        for _t in _tvd_takimlar:
+        for _tsira, _t in enumerate(_tvd_takimlar, start=1):
             _n = takim_vardiya_denge_mevcut.get(_t)
             if not _n:
                 continue
@@ -282,6 +300,7 @@ else:
             _ag = model.NewIntVar(0, _ag_ust, f"tvd_agentgun_{_bas}_{_t}")
             model.Add(_ag == _lin_sum(_terms))
             takim_vardiya_denge_agentgun[(_t, _bas)] = _ag
+            takim_vardiya_denge_ag_ust[(_t, _bas)] = _ag_ust
 
             # ---- kişi başı (ölçekli) = KATSAYI x agent_gun ----
             # 2026-09-11: BÖLME KALDIRILDI. Eskiden _kb, floor(OLCEK*_ag/_n)'e
@@ -302,15 +321,32 @@ else:
             # (hata %1'e iner), o zaman TAKIM_VARDIYA_DENGE_W 10 kat düşürülmeli.
             _c = max(1, int(round(_tvd_olcek / _n)))
             takim_vardiya_denge_katsayi[_t] = _c
-            _kb = model.NewIntVar(0, _c * _ag_ust, f"tvd_buay_kb_{_bas}_{_t}")
+            _kb_ust = _c * _ag_ust
+            _kb = model.NewIntVar(0, _kb_ust, f"tvd_buay_kb_{_bas}_{_t}")
             model.Add(_kb == _c * _ag)          # DÜZ LİNEER - bölme yok
             takim_vardiya_denge_buay[(_t, _bas)] = _kb
+            takim_vardiya_denge_kb_ust[(_t, _bas)] = _kb_ust
 
             _gec_ham = float(_tvd_gecmis_map.get((_t, _bas), _tvd_eksik_vars))
+            if not math.isfinite(_gec_ham) or _gec_ham < 0:
+                raise SystemExit(
+                    f"Geçmiş kişi başı gün GEÇERSİZ: takim={_t}, baslangic={_bas}, "
+                    f"deger={_gec_ham}. [HÜCRE 3D] gun_agent_ratio kolonunu kontrol et."
+                )
+            if _gec_ham > _TVD_MAX_GECMIS:
+                raise SystemExit(
+                    f"Geçmiş kişi başı gün ABSÜRT BÜYÜK: takim={_t}, "
+                    f"baslangic={_bas}, deger={_gec_ham} (sınır {_TVD_MAX_GECMIS}). "
+                    f"gun_agent_ratio yanlış bölenle hesaplanmış ya da satırlar "
+                    f"birden fazla kesitten toplanmış olabilir."
+                )
             _gec = int(round(_tvd_olcek * _gec_ham))
             takim_vardiya_denge_gecmis[(_t, _bas)] = _gec
             _kum_ifadeler.append(_gec + _kb)
             _gecerli_t.append(_t)
+            if _tsira % 10 == 0:
+                print(f"    ... {_tsira}/{len(_tvd_takimlar)} takım "
+                      f"({len(_gecerli_t)} geçerli)", flush=True)
 
         if len(_gecerli_t) < 2:
             print(f"\n!!! UYARI: '{_bas}' için denge kurulacak takım sayısı {len(_gecerli_t)} "
@@ -336,8 +372,7 @@ else:
         _gec_sabit_toplam = sum(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
         _kb_listesi = [takim_vardiya_denge_buay[(t, _bas)] for t in _gecerli_t]
         _max_gec = max(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
-        _kb_ustleri = [takim_vardiya_denge_buay[(t, _bas)].Proto().domain[-1]
-                       for t in _gecerli_t]
+        _kb_ustleri = [takim_vardiya_denge_kb_ust[(t, _bas)] for t in _gecerli_t]
         _max_buay = max(_kb_ustleri)
 
         _toplam_kum = model.NewIntVar(
@@ -346,7 +381,17 @@ else:
         model.Add(_toplam_kum == _gec_sabit_toplam + _lin_sum(_kb_listesi))
 
         _lim = _N * (_max_gec + _max_buay) + 1
+        # int64 tasmasi CP-SAT'in C++ tarafinda cokmeye yol acabilir; burada dur.
+        if _lim > 2 ** 62:
+            raise SystemExit(
+                f"Sapma alan sınırı taşıyor: _lim={_lim} (N={_N}, "
+                f"max_gecmis={_max_gec}, max_buay={_max_buay}). Geçmiş veride "
+                f"absürt değer var ya da ölçek çok büyük."
+            )
 
+
+        print(f"  [kurulum] '{_bas}': {len(_gecerli_t)} takım hazır, "
+              f"sapma kısıtları (alan sınırı {_lim:,})...", flush=True)
 
         for _t in _gecerli_t:
             _gec = takim_vardiya_denge_gecmis[(_t, _bas)]
@@ -382,11 +427,12 @@ else:
                               - _tvd_olcek / takim_vardiya_denge_mevcut[_t])
                     / (_tvd_olcek / takim_vardiya_denge_mevcut[_t]), 1),
                 "gecmis_kisi_basi_gun": round(_gec / _tvd_olcek, 2),
-                "bu_ay_agentgun_ust_limit": int(
-                    takim_vardiya_denge_agentgun[(_t, _bas)].Proto().domain[-1]),
+                "bu_ay_agentgun_ust_limit": takim_vardiya_denge_ag_ust[(_t, _bas)],
                 "kapsanan_gun": len(_tvd_gun_v),
                 "kapsanan_hafta": len(_tvd_hafta_v),
             })
+
+        print(f"  [kurulum] '{_bas}': BİTTİ", flush=True)
 
         # ---- ÖN KONTROL ÇIKTISI (solve'dan ÖNCE bakılır) ----
         _gec_seri = pd.Series({
@@ -431,9 +477,7 @@ print(f"TAKIM_VARDIYA_DENGE_W = {globals().get('TAKIM_VARDIYA_DENGE_W')} "
 # agent-gün toplamları x'in binlerce boolean'ına dokunuyor; sayı beklenenden
 # çok büyükse (ör. milyonlar) kapsamı daraltmak gerekir.
 if ENABLE_TAKIM_VARDIYA_DENGE and takim_vardiya_denge_agentgun:
-    _yuk_bool = sum(
-        int(_v.Proto().domain[-1]) for _v in takim_vardiya_denge_agentgun.values()
-    )
+    _yuk_bool = sum(takim_vardiya_denge_ag_ust.values())
     _yuk_var = (len(takim_vardiya_denge_agentgun) + len(takim_vardiya_denge_buay)
                 + 2 * len(takim_vardiya_denge_sapma) + len(takim_vardiya_denge_hafta)
                 + len(takim_vardiya_denge_asim)

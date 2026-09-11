@@ -1,3 +1,146 @@
+# %% [CONFIG] - MODEL PARAMETRELERİ
+# Bu hücre modelde kullanılan tüm ayarlanabilir parametreleri tek yerde toplar.
+# Parametre değiştirmek istediğinizde kodun farklı yerlerine gitmeden sadece burayı güncelleriz.
+
+CONFIG = {
+    "BUFFER_RATE": 0.05,
+
+    "NORMAL_WORK_DAYS": 5,
+    "MAX_OVERTIME_PER_MONTH": 4,
+    "IKINCI_MESAI_W": 0,
+
+    "GECE_AKSAM_VARDIYA_SET": {
+        ("17:00", "01:00"),
+        ("18:00", "02:00"),
+        ("00:00", "08:00"),
+    },
+    "MAX_NIGHT_WEEKS_PER_MONTH": 2,
+
+    "MOLA_YOGUNLUK_PENCERELERI": [
+        ("ogle_yemek", "12:00", "13:30", 2),
+        ("ikindi_mola", "15:00", "16:00", 3),
+        ("aksam_yemek", "19:00", "20:00", 2),
+    ],
+
+    "GENEL_MAX_FAZLA_ATAMA": 15,
+    "GECE_MAX_FAZLA_ATAMA": 3,
+
+    "UNDER_BUFFER_W": 300000,
+    "MISSING_TO_REQUIRED_W": 50000,
+    "OVERTIME_W": 1000,
+    "EXCESS_GECE_AKSAM_W": 15000,
+    "EXCESS_NORMAL_W": 5000,
+    "EXCESS_MOLA_DESTEK_W": 1000,
+    "OVER_BUFFER_W": 1000,
+
+    "MAX_CONSECUTIVE_WORK_DAYS": 6,
+    "WINDOW_DAYS": 7,
+    "SABAH_CALISIR_MAX_BITIS_SAATI": "20:00",
+    "MIN_REST_HOURS": 11,
+
+    "HAFTA_SONU_CEZA_BASLANGIC_GUN": 4,
+    "HAFTA_SONU_FAZLA_CALISMA_W": 30000,
+
+    "ENABLE_ARIFE_KURALI": False,
+    "ARIFE_GUNLERI": {
+        "2026-06-16": {
+            "mesai_baslangic": "13:00",
+            "kisitli_agent_normal_vardiya": ("09:00", "13:00"),
+            "ozel_vardiya_kodu": "ARIFE_09_13",
+        }
+    },
+    "ARIFE_MESAI_W": 0,
+
+    "ENABLE_RESMI_TATIL_KURALI": True,
+    "RESMI_TATIL_GUNLERI": [
+        "2026-08-30",
+    ],
+    "RESMI_TATIL_MESAI_W": 0,
+    "RESMI_TATIL_KISITLI_IHLAL_W": 1000000,
+
+    "DAILY_EXCESS_SOFT_LIMIT": 10,
+    "DAILY_EXCESS_OVER_W": 20000,
+
+    # --------- KULLANILMIYOR (2026-08-10 tespit) ---------
+    # Haftalik hedef kurali HICBIR SURUMDE yazilmadi: weekly_under / weekly_over
+    # degiskenlerini ureten hucre yok, OBJECTIVE'deki blok hic calismiyor.
+    # Bu iki agirligi degistirmek MODELDE HICBIR SEY DEGISTIRMEZ.
+    # Ayni isi MODEL_OFF_HAFTALIK_MAX (haftalik off tavani) yapiyor:
+    # haftada en fazla 2 off -> calismaya haftalik kota kadar TABAN koyuyor.
+    "WEEKLY_UNDER_W": 500000,
+    "WEEKLY_OVER_W": 50000,
+    # -----------------------------------------------------
+
+    "FULL_WEEKDAY_COUNT": 5,
+    "SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS": True,   # KULLANILMIYOR - haftalik hedef
+                                                    # kurali yok (bkz. WEEKLY_UNDER_W notu)
+    "PARTIAL_WEEK_MAX_FAZLA_ATAMA": 1,
+
+    "ENABLE_PARTIAL_END_WEEK_ALL_OFF_PENALTY": True,
+    "PARTIAL_END_WEEK_ALL_OFF_W": 5000,
+
+    "ENABLE_OFF_T_HARD": False,   # 2026-08-05: off_t SOFT'a alindi, ceza = OFF_TALEP_KARSILANMAMA_W
+    "ENABLE_OFF_T2_HARD": True,   # off_t2 HARD kaliyor
+    "OFF_TALEP_KARSILANMAMA_W": 100000,
+
+    # ================= 2026-08-03 EKLENEN - KURAL 3 (W31 haftalik off dengesi) =================
+    "HAFTALIK_OFF_KOTASI": 2,      # hafta basina verilmesi gereken off gunu (izin off sayilmaz)
+    "W31_EKSIK_OFF_W": 50000,      # kotadan eksik verilen her off gunu icin ceza (soft)
+    # ==========================================================================================
+
+    # ================= 2026-08-05 EKLENEN - HAFTALIK OFF TAVANI =================
+    "MODEL_OFF_HAFTALIK_MAX": 2,       # bir agent bir haftada en fazla kac gun off alabilir
+                                       # off_t / off_t2 talepleri bu tavanin ICINDE sayilir
+    "MODEL_OFF_HAFTALIK_HARD": True,   # False -> soft, asim objective'de cezalandirilir
+    "MODEL_OFF_TAVAN_ASIM_W": 200000,  # sadece MODEL_OFF_HAFTALIK_HARD = False iken kullanilir
+    # ============================================================================
+
+    # ========== 2026-08-06 EKLENEN - SABAH CALISAN VARDIYA PENCERESI ==========
+    "SABAH_CALISIR_MAX_BASLANGIC_SAATI": "11:00",   # sabah agent en gec bu saatte basalayabilir
+    "SABAH_CALISIR_GECE_VARDIYA_YASAK": True,       # GECE_AKSAM_VARDIYA_SET tamamen yasak
+    # NOT: mevcut SABAH_CALISIR_MAX_BITIS_SAATI ("20:00") gecerli kalir; uc sart birlikte
+    #      uygulanir. Tek basina bitis kontrolu 00:00-08:00 gece vardiyasini kaciriyordu.
+    # ==========================================================================
+
+    # ========== 2026-08-06 EKLENEN - CIFT OFF KURALI ACMA/KAPAMA ==========
+    # True  -> ayda en az 1 Cmt-Pzr cift off ZORUNLU  (kisit modele eklenir)
+    # False -> zorunluluk YOK, kural kapali           (modele hic degisken/kisit eklenmez)
+    # NOT: False "cift off verilmesin" demek DEGIL, "cift off sart degil" demek.
+    "ENABLE_CIFT_OFF_KURALI": True,
+    # ======================================================================
+
+    # ===== 2026-08-06 EKLENEN - ARIFE HAFTA SONU / MESAIYE KALAMAZ =====
+    "ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK": True,
+    # Arife gunu HAFTA SONUNA denk geldiginde mesaiye_kalamaz_flg = 1 olan agent
+    # o gun calistirilmaz; kotasini hafta ici gunlerden doldurur.
+    # Hafta ici arife gunlerine dokunmaz.
+    # ===================================================================
+
+    # ===== 2026-08-12 EKLENEN - KIDEM / GECE VARDIYASI YASAGI =====
+    "KIDEM_MIN_AY": 6,                          # bu ayin altindaki agent gece vardiyasina giremez
+    "KIDEM_YASAK_VARDIYA_BASLANGIC": ("00:00",),  # yasak vardiyalar BASLANGIC saatinden tanimlanir
+    "KIDEM_EKSIK_VARSAYILAN_AY": 0,             # kidem tablosunda OLMAYAN agent kac ay sayilsin
+                                                # 0 -> kidemsiz sayilir (gece vardiyasina giremez)
+                                                # GUVENLI taraf budur; veri duzelince degistirilebilir
+    # (vardiya kodu aya gore degisebilir, baslangic saati sabit kalir)
+    # ==============================================================
+
+    # ===== 2026-08-12 EKLENEN - TAKIM BASE MUAFIYETI =====
+    # Bireysel vardiya yasagi olan agent (sabah calisan / kidemsiz), takiminin o
+    # haftaki base vardiyasinda calisamiyorsa takim kilidinden MUAF olur.
+    # Boylece tek bir sabah agenti yuzunden takim gec/gece base alamaz olmuyor.
+    # False -> muafiyet yok, takim kilidi herkese kosulsuz uygulanir.
+    "ENABLE_TAKIM_BASE_MUAFIYET": True,
+    # =====================================================
+    # ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
+    # Takimlarin gecmiste hangi vardiyada kac gun calistigina bakip bu ayin
+    # dagitimini dengeler. Amac: yil sonunda tum takimlarin ilgili vardiyadaki
+    # calisma gun sayisi birbirine yakin olsun.
+    # Gecmis veri: [HUCRE 3D] - TAKIM VARDIYA GECMISI (SQL) -> takim_vardiya_gecmis_map
+    "ENABLE_TAKIM_VARDIYA_DENGE": True,
+    # Dengelenecek vardiyalar BASLANGIC saatinden tanimlanir (vardiya kodu aya
+    # gore degisir, baslangic saati sabit kalir). Yeni vardiya eklemek icin
+    # tuple'a eklemek yeterli: ("15:00", "17:00")
     # 2026-09-07: 00:00 eklendi. AYDA MAX 2 HAFTA GECE/AKSAM (HARD) kuralina
     # DOKUNULMAZ; denge onun altinda calisir, 2 haftalik hakkin hangi takimlara
     # gidecegini belirler.
@@ -7,7 +150,184 @@
     # eder (2.23'te devir cezasinin yaptigi hatanin aynisi). Ilk calistirmada
     # kisit hucresinin bastigi "tahmini sapma toplami" ile kalibre edilecek.
     "TAKIM_VARDIYA_DENGE_W": 1,                 # kumulatif dengesizlik cezasi (agirlik)
+    "TAKIM_VARDIYA_DENGE_MAX_HAFTA": 2,         # bir takim bu ay en fazla kac hafta alsin
+    "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W": 5000,   # tavan asimi cezasi (SOFT)
+    # Tavan neden SOFT: [HUCRE] - HAFTALIK TAKIM BASE KAPASITE KORUMASI her hafta
+    # o vardiyaya yeterli takim secilmesini ZORUNLU kiliyor. Tavan HARD olsaydi
+    # ikisi celisip INFEASIBLE verebilirdi.
+    "TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN": 0,  # gecmis tabloda olmayan takim kac gun sayilsin
+    # =============================================================
+    # ===== 2026-08-12 EKLENEN - TAKIM BUTUNLUGU (BASE YASAGI) =====
+    # Bir vardiyada takimin bu orandan FAZLASI calisamiyorsa, o vardiya o takima
+    # base olarak verilemez. Amac: herkesin sabah_calisir_flg'i 1 olan ekipte
+    # model gec base secip TUM ekibi muaf birakmasin -> ekip bolunmesin.
+    # Bolunme sadece KARMA ekiplerde (flg 1 olan + olmayan bir arada) olsun.
+    #   0.5  -> cogunluk calisamiyorsa o base kapali (onerilen)
+    #   0.99 -> sadece TAMAMI calisamiyorsa kapali
+    #   1.0  -> kural DEVRE DISI (12 Agustos oncesi davranis)
+    "TAKIM_BASE_MAX_YASAKLI_ORAN": 0.5,
+    # ==============================================================
+    # ===== 2026-08-19 EKLENEN - MUAF AGENT HAFTALIK TEK VARDIYA =====
+    # Takim base'i kendisine YASAK oldugu icin muaf olan agent, eskiden hafta
+    # boyunca her gun BASKA bir vardiyaya dusebiliyordu (bir gun 15:00, ertesi
+    # gun 11:00, sonra 09:00). Bu kural muaf agente de haftalik BIREYSEL BASE
+    # verir: hafta ici boyunca TEK vardiyada kalir.
+    #   takim_muaf = 0 -> agent takimiyla AYNI vardiyada (bu kural devre disi)
+    #   takim_muaf = 1 -> agent kendi sectigi TEK vardiyada, hafta boyu sabit
+    # Hafta sonu KAPSAM DISI (takim base kilidi de sadece hafta ici).
+    "ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA": True,
+    # ================================================================
+    # ===== 2026-08-19 EKLENEN - AY GECISI / SARKAN HAFTA SUREKLILIGI =====
+    # Plan basladigi ISO hafta, onceki aydan SARKAR. Ornek: 1 Eylul 2026 Sali ->
+    # W36 haftasi 31 Agustos Pazartesi baslar, o gun ONCEKI ayin planindadir.
+    # Iki model ayni haftayi parca parca planlar ve birbirinden habersizdir:
+    #   1) haftalik off tavani delinir (31 Agustos off + Eylul'de 2 off = 3 off)
+    #   2) takim base'i hafta ortasinda degisir (Pzt 08:00, Sali 15:00)
+    # Bu kural ikisini de gecmis veriden kapatir.
+    #
+    # Sarkan gun sayisi PLAN_GUNLER'den TURETILIR, elle ayar YOK:
+    #   ay Pazartesi baslarsa 0 gun -> kural kendiliginden devre disi
+    #   ay Pazar     baslarsa 6 gun -> en kotu durum (gecmis 7 gun yeterli)
+    "ENABLE_SARKAN_HAFTA_SUREKLILIK": True,
+    # ======================================================================
+    # ===== 2026-08-28 EKLENEN - AY GECISI: KISI DEVRI + SOFT SUREKLILIK =====
+    # Ay gecisi kurallari ASLA HARD olmamali. Devralinan gercek (onceki ayin
+    # son gunu) bu ayin kisitlariyla celisebilir; celisince model DURMAMALI,
+    # tercihini bildirip devam etmeli. 28 Agustos'ta ENABLE_SARKAN_HAFTA_
+    # SUREKLILIK=True ile model INFEASIBLE cikti -> sabitlemeler SOFT'a alindi.
+    #
+    # Bakilan gun: SADECE plan baslangicindan BIR ONCEKI gun.
+    #   1 Eylul Sali  -> 31 Agustos
+    #   1 Ekim Persembe -> 30 Eylul   (28-29 Eylul'e BAKILMAZ)
+    #   ay Pazartesi baslarsa -> onceki gun yok, kural kurulmaz
+    #
+    # Uc katmanli sira (her katman bir oncekinin bosslugunu doldurur):
+    #   1) onceki gun takimindan FARKLI vardiya devrettiyse -> kendi vardiyasi
+    #   2) devir yoksa (off/izin/ayni vardiya)              -> takim kilidi
+    #   3) takim base'i o agente yasaksa                    -> muafiyet
+    "ENABLE_SARKAN_KISI_DEVRI": True,
+    "SARKAN_BASE_SAPMA_W": 30000,      # takim gecen ayki vardiyasinda devam edemezse
+    "SARKAN_KISI_SAPMA_W": 500000,     # kisi devraldigi vardiyada kalamazsa
+    # 2026-09-01: 20000 -> 100000. Is birimi deviri ZORUNLU tuttu. 20000 iken
+    # bir kisilik coverage acigi (300000) devri 15 kiside birden bozmayi karli
+    # kiliyordu, kural fiilen tutmuyordu. 100000 = karsilanmayan off talebiyle
+    # ayni agirlik.
+    #
+    # 2026-09-04 OLCUM - 100000 ile calistirildi:
+    #   devraldigi vardiyada kalan : 322 / 409  (%79)
+    #   sapan                      : 87
+    #   1-6 Eylul eksik kisi-slot  : 50  -> HEPSI buffer icinde (buffer_altinda FALSE)
+    #   1-4 Eylul fazla sutunu     : hepsi 0 -> partial hafta tavani BAGLAMIYOR
+    # Yani 100000'de coverage acisindan kritik acik YOKTU; model sadece
+    # buffer icindeki acıklari kapatmak icin 87 kisiyi tasidi.
+    #
+    # Is birimi "ekip ayni vardiyada devam etsin" konusunda net oldugu icin
+    # 500000 deneniyor. Bu agirlikta bir eksigi kapatmanin kazanci (350000)
+    # devri bozmanin maliyetinin (500000) ALTINDA kalir -> model artik
+    # coverage icin devri bozmaz, eksik buyur. Karar olcutu: COVERAGE
+    # sayfasinda 1-6 Eylul icin buffer_altinda = TRUE satiri CIKARSA agirlik
+    # geri dusurulecek (ara secenek 200000).
+    # Ikisi de coverage cezalarinin ALTINDA: bunlar yasal ihlal degil,
+    # operasyonel rahatsizlik. Model once talebi karsilar, sonra surekliligi.
+    # ========================================================================
 
+    # ===== 2026-09-04 EKLENEN - SARKAN DEVIR HARD DENEMESI =====
+    # Kullanici: "Coverage'i esnetebiliriz cunku part-time ve outsource agentlar
+    # dahil edilecek. Yeter ki insanlar devir aldiklari vardiyada kalsinlar.
+    # 7 gun / 11 saat gibi HARD kurallarimizi bozmuyorsa coverage dusse bile
+    # o vardiyada kalsinlar."
+    #
+    # SOFT yaklasim tukendi: 100000 -> 87 sapma, 500000 -> 81, partial tavani
+    # kaldirinca -> 82. Objective'in %57'si devir cezasi oldugu halde solver
+    # bunu kirpamiyor (best_bound 4,2M / objective 71,6M -> 67M kanitlanmamis
+    # bosluk). Ceza artirmak da ters tepti: dev katsayi LP gevsetmesini bozuyor.
+    #
+    # True -> devir_week_base[(agent, devraldigi)] == 1  (HARD)
+    #         sarkan haftanin fazla atama tavani da KALKAR, yoksa iki HARD
+    #         kisit carpisir ve INFEASIBLE gelir.
+    #         Coverage SOFT kaldigi icin eksik cikabilir - bilincli tercih.
+    # False -> SOFT davranis (SARKAN_KISI_SAPMA_W cezasi ile)
+    "SARKAN_DEVIR_HARD": True,
+    # ===========================================================
+
+    # ===== 2026-09-04 EKLENEN - PARTIAL HAFTA FAZLA ATAMA TAVANI KAPATILDI =====
+    # PARTIAL_WEEK_MAX_FAZLA_ATAMA = 1 kurali, "model ay sonundaki yarim haftaya
+    # fazla kisi yigmasin" diye konmustu. O onlem AYLIK CALISMA DENGESI kuralindan
+    # ONCE yazildi.
+    #
+    # Artik gecerli degil: aylik kota her agentin toplam calisma gununu sabitliyor
+    # (toplam_calisma == baz_gereken_calisma +- mesai). Ortada yigilacak bir
+    # fazlalik yok - herkes 22 is gununu tamamlamak zorunda.
+    #
+    # Ustelik tavan, ayin BASINDAKI sarkan haftaya da uygulaniyordu ve tam orada
+    # kisi bazli devir kurali herkesi Agustos'taki vardiyasinda toplamaya
+    # calisiyor. Ikisi dogrudan carpisiyordu (4 Eylul, 500000 calistirmasi:
+    # 81 kisi devraldigi vardiyada kalamadi).
+    #
+    # False -> butun haftalar normal limiti kullanir (fazla_atama_ust_limiti,
+    #          yoksa GENEL_MAX_FAZLA_ATAMA). True -> eski davranis.
+    "ENABLE_PARTIAL_WEEK_FAZLA_TAVANI": False,
+    # ===========================================================================
+
+    # ===== 2026-09-04 EKLENEN - GUNDUZ VARDIYA ROTASYONU =====
+    # Is birimi: "Kisiler ay boyu ayni vardiyada kalmasin. Ozellikle gunduz
+    # vardiyalari icin. Bir hafta 9 yazildiysa diger hafta 10, sonra 8:30 gibi."
+    # 15:00 ve 00:00 kapsam DISI - onlar TAKIM_VARDIYA_DENGE kuralinda.
+    #
+    # Kural takim base'ine konur: vardiyayi fiilen belirleyen o. Takim donunce
+    # icindeki herkes onunla doner. Muafiyetli agentlar (sabah calisan) kendi
+    # bireysel base'lerinde kaldiklari icin bu rotasyona girmez - kullanici
+    # 4 Eylul'de "sorun degil, gerekirse sonra bakariz" dedi.
+    #
+    # SOFT olmak ZORUNDA. HARD olsa HAFTALIK TAKIM BASE KAPASITE KORUMASI ile
+    # celisir: bir gunduz vardiyasi her hafta kapasitenin %60'ini istiyorsa ama
+    # her takim orada en fazla 2/5 hafta kalabiliyorsa ayrilabilecek maksimum
+    # kapasite %40'tir -> infeasible. Ayni gerekce TAKIM_VARDIYA_DENGE_MAX_HAFTA
+    # icin de gecerliydi (bkz. devir notu 2.9).
+    #
+    # SAAT ARALIGI: 00:00 sayisal olarak 12:00'nin ALTINDA oldugu icin alt sinir
+    # da gerekli, yoksa gece vardiyasi "gunduz" sayilirdi.
+    "ENABLE_GUNDUZ_ROTASYON": True,
+    "GUNDUZ_ILK_BASLANGIC_SAATI": "06:00",   # bu saat ve SONRASI
+    "GUNDUZ_SON_BASLANGIC_SAATI": "12:00",   # bu saat ve ONCESI
+    "GUNDUZ_AYNI_VARDIYA_MAX_HAFTA": 2,      # 5 haftalik ayda -> en az 3 farkli vardiya
+    "GUNDUZ_ROTASYON_W": 20000,              # coverage (300000) ve off_t (100000) ALTINDA
+    # Sarkan hafta bu sayima GIRMEZ: o hafta devir kuralinin kontrolunde.
+    # =========================================================
+
+    # ===== 2026-09-01 EKLENEN - AY GECISI: DEVIR KAPSAMI =====
+    # Is birimi 1 Eylul'de kurali netlestirdi: "Eylul Sali basliyorsa Pazartesi
+    # gunku vardiya neyse o yazilacak. Takim bolunse bile onemli degil, insanlarin
+    # bir hafta boyunca ayni vardiyada kalmasini istiyoruz."
+    #
+    # Devralinan vardiya SIRAYLA iki adaydan bulunur:
+    #   1) agentin sarkan gunlerde EN SON CALISTIGI gunun vardiyasi
+    #      (Eylul: 31 Agu. Ekim: 30 Eyl -> 29 Eyl -> 28 Eyl geriye taranir)
+    #   2) o gunlerin hepsinde off/izinliyse -> TAKIMININ o gunlerdeki
+    #      cogunluk vardiyasi
+    # Ikisi de tutmazsa devir yok, agent normal takim kilidine tabi olur.
+    #
+    # False yapilirsa 2. adaya bakilmaz (31 Agustos oncesi davranis).
+    "SARKAN_DEVIR_TAKIM_COGUNLUK": True,
+    # =========================================================
+
+    # ===== 2026-08-31 EKLENEN - AY GECISI: SAAT ESLESTIRME TOLERANSI =====
+    # Sureklilik kurallari, kisinin onceki aydaki vardiyasini BU AYIN vardiya
+    # katalogunda ariyor. Eslestime BIREBIR saat araligi uzerinden yapiliyordu:
+    # Agustos'ta 10:00-19:00 calisan biri icin Eylul listesinde 10:00-19:00 yoksa
+    # (yerine 10:30-19:30 varsa) eslesme bulunamiyor ve kural O KISI ICIN HIC
+    # KURULMUYORDU - sessizce, uyari vermeden. 31 Agustos'ta gercek planda
+    # gorulen "neredeyse kimse onceki ayki vardiyasiyla devam edememis"
+    # durumunun sebebi buydu.
+    #
+    # Artik en yakin vardiya seciliyor: |dbaslangic| + |dbitis| en kucuk olan.
+    # Ikisi de tolerans icinde olmali, degilse eslestirme yapilmaz.
+    #   10:00-19:00 -> 10:30-19:30  : sapma 30+30  -> ESLESIR
+    #   10:00-19:00 -> 12:00-21:00  : sapma 120    -> ESLESMEZ (tolerans 60)
+    # Saat farki DAIRESEL olcuulur: 23:30 ile 00:00 arasi 30 dakikadir, 1410 degil.
+    # 0 verilirse birebir eslestirme (31 Agustos oncesi davranis).
+    "SARKAN_SAAT_TOLERANS_DK": 60,
+    # =====================================================================
 
     # ===== 2026-09-07 EKLENEN - TAKIM VARDIYA DENGESI KISI BASI GUNE GECTI =====
     # Gecmis tablo artik TAKIM-GUN degil KISI BASI GUN tasiyor: bir takimin o
@@ -32,7 +352,155 @@
     # Elle sabitlemek icin (2026, 9) gibi bir tuple yaz.
     "TAKIM_VARDIYA_GECMIS_KESIT": None,
     # ===========================================================================
+}
 
+BUFFER_RATE = CONFIG["BUFFER_RATE"]
+
+NORMAL_WORK_DAYS = CONFIG["NORMAL_WORK_DAYS"]
+MAX_OVERTIME_PER_MONTH = CONFIG["MAX_OVERTIME_PER_MONTH"]
+IKINCI_MESAI_W = CONFIG["IKINCI_MESAI_W"]
+
+GECE_AKSAM_VARDIYA_SET = CONFIG["GECE_AKSAM_VARDIYA_SET"]
+MAX_NIGHT_WEEKS_PER_MONTH = CONFIG["MAX_NIGHT_WEEKS_PER_MONTH"]
+
+MOLA_YOGUNLUK_PENCERELERI = CONFIG["MOLA_YOGUNLUK_PENCERELERI"]
+
+GENEL_MAX_FAZLA_ATAMA = CONFIG["GENEL_MAX_FAZLA_ATAMA"]
+GECE_MAX_FAZLA_ATAMA = CONFIG["GECE_MAX_FAZLA_ATAMA"]
+
+UNDER_BUFFER_W = CONFIG["UNDER_BUFFER_W"]
+MISSING_TO_REQUIRED_W = CONFIG["MISSING_TO_REQUIRED_W"]
+OVERTIME_W = CONFIG["OVERTIME_W"]
+
+EXCESS_GECE_AKSAM_W = CONFIG["EXCESS_GECE_AKSAM_W"]
+EXCESS_NORMAL_W = CONFIG["EXCESS_NORMAL_W"]
+EXCESS_MOLA_DESTEK_W = CONFIG["EXCESS_MOLA_DESTEK_W"]
+
+OVER_BUFFER_W = CONFIG["OVER_BUFFER_W"]
+
+MAX_CONSECUTIVE_WORK_DAYS = CONFIG["MAX_CONSECUTIVE_WORK_DAYS"]
+WINDOW_DAYS = CONFIG["WINDOW_DAYS"]
+
+SABAH_CALISIR_MAX_BITIS_SAATI = CONFIG["SABAH_CALISIR_MAX_BITIS_SAATI"]
+
+MIN_REST_HOURS = CONFIG["MIN_REST_HOURS"]
+MIN_REST_MINUTES = CONFIG["MIN_REST_HOURS"] * 60
+
+HAFTA_SONU_CEZA_BASLANGIC_GUN = CONFIG["HAFTA_SONU_CEZA_BASLANGIC_GUN"]
+HAFTA_SONU_FAZLA_CALISMA_W = CONFIG["HAFTA_SONU_FAZLA_CALISMA_W"]
+
+ENABLE_ARIFE_KURALI = CONFIG["ENABLE_ARIFE_KURALI"]
+ARIFE_GUNLERI = CONFIG["ARIFE_GUNLERI"] if ENABLE_ARIFE_KURALI else {}
+ARIFE_MESAI_W = CONFIG["ARIFE_MESAI_W"]
+
+ENABLE_RESMI_TATIL_KURALI = CONFIG["ENABLE_RESMI_TATIL_KURALI"]
+RESMI_TATIL_GUNLERI = set(CONFIG["RESMI_TATIL_GUNLERI"]) if ENABLE_RESMI_TATIL_KURALI else set()
+RESMI_TATIL_MESAI_W = CONFIG["RESMI_TATIL_MESAI_W"]
+
+RESMI_TATIL_KISITLI_IHLAL_W = CONFIG["RESMI_TATIL_KISITLI_IHLAL_W"]
+
+DAILY_EXCESS_SOFT_LIMIT = CONFIG["DAILY_EXCESS_SOFT_LIMIT"]
+DAILY_EXCESS_OVER_W = CONFIG["DAILY_EXCESS_OVER_W"]
+
+# KULLANILMIYOR - haftalik hedef kurali hic yazilmadi (bkz. CONFIG icindeki not)
+WEEKLY_UNDER_W = CONFIG["WEEKLY_UNDER_W"]
+WEEKLY_OVER_W = CONFIG["WEEKLY_OVER_W"]
+
+FULL_WEEKDAY_COUNT = CONFIG["FULL_WEEKDAY_COUNT"]
+SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS = CONFIG["SKIP_WEEKLY_TARGET_FOR_PARTIAL_WEEKS"]  # KULLANILMIYOR
+PARTIAL_WEEK_MAX_FAZLA_ATAMA = CONFIG["PARTIAL_WEEK_MAX_FAZLA_ATAMA"]
+
+ENABLE_PARTIAL_END_WEEK_ALL_OFF_PENALTY = CONFIG["ENABLE_PARTIAL_END_WEEK_ALL_OFF_PENALTY"]
+PARTIAL_END_WEEK_ALL_OFF_W = CONFIG["PARTIAL_END_WEEK_ALL_OFF_W"]
+
+ENABLE_OFF_T_HARD = CONFIG["ENABLE_OFF_T_HARD"]
+ENABLE_OFF_T2_HARD = CONFIG["ENABLE_OFF_T2_HARD"]
+OFF_TALEP_KARSILANMAMA_W = CONFIG["OFF_TALEP_KARSILANMAMA_W"]
+
+# ================= 2026-08-03 EKLENEN - KURAL 3 =================
+HAFTALIK_OFF_KOTASI = CONFIG["HAFTALIK_OFF_KOTASI"]
+W31_EKSIK_OFF_W = CONFIG["W31_EKSIK_OFF_W"]
+# ================================================================
+
+# ================= 2026-08-05 EKLENEN - HAFTALIK OFF TAVANI =================
+MODEL_OFF_HAFTALIK_MAX = CONFIG["MODEL_OFF_HAFTALIK_MAX"]
+MODEL_OFF_HAFTALIK_HARD = CONFIG["MODEL_OFF_HAFTALIK_HARD"]
+MODEL_OFF_TAVAN_ASIM_W = CONFIG["MODEL_OFF_TAVAN_ASIM_W"]
+# ============================================================================
+
+# ========== 2026-08-06 EKLENEN - SABAH CALISAN VARDIYA PENCERESI ==========
+SABAH_CALISIR_MAX_BASLANGIC_SAATI = CONFIG["SABAH_CALISIR_MAX_BASLANGIC_SAATI"]
+SABAH_CALISIR_GECE_VARDIYA_YASAK = CONFIG["SABAH_CALISIR_GECE_VARDIYA_YASAK"]
+# ==========================================================================
+
+# ========== 2026-08-06 EKLENEN - CIFT OFF KURALI ACMA/KAPAMA ==========
+ENABLE_CIFT_OFF_KURALI = CONFIG["ENABLE_CIFT_OFF_KURALI"]
+# ======================================================================
+
+# ===== 2026-08-06 EKLENEN - ARIFE HAFTA SONU / MESAIYE KALAMAZ =====
+ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK = CONFIG["ARIFE_HAFTASONU_MESAIYE_KALAMAZ_YASAK"]
+# ===================================================================
+
+# ===== 2026-08-12 EKLENEN - KIDEM / GECE VARDIYASI YASAGI =====
+KIDEM_MIN_AY = CONFIG["KIDEM_MIN_AY"]
+KIDEM_YASAK_VARDIYA_BASLANGIC = CONFIG["KIDEM_YASAK_VARDIYA_BASLANGIC"]
+KIDEM_EKSIK_VARSAYILAN_AY = CONFIG["KIDEM_EKSIK_VARSAYILAN_AY"]
+# ==============================================================
+
+# ===== 2026-08-12 EKLENEN - TAKIM BASE MUAFIYETI =====
+ENABLE_TAKIM_BASE_MUAFIYET = CONFIG["ENABLE_TAKIM_BASE_MUAFIYET"]
+# =====================================================
+
+# ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
+ENABLE_TAKIM_VARDIYA_DENGE = CONFIG["ENABLE_TAKIM_VARDIYA_DENGE"]
+TAKIM_VARDIYA_DENGE_BASLANGICLARI = CONFIG["TAKIM_VARDIYA_DENGE_BASLANGICLARI"]
+TAKIM_VARDIYA_DENGE_W = CONFIG["TAKIM_VARDIYA_DENGE_W"]
+TAKIM_VARDIYA_DENGE_MAX_HAFTA = CONFIG["TAKIM_VARDIYA_DENGE_MAX_HAFTA"]
+TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W = CONFIG["TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W"]
+TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN = CONFIG["TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN"]
+# =============================================================
+
+# ===== 2026-08-12 EKLENEN - TAKIM BUTUNLUGU (BASE YASAGI) =====
+TAKIM_BASE_MAX_YASAKLI_ORAN = CONFIG["TAKIM_BASE_MAX_YASAKLI_ORAN"]
+# ==============================================================
+
+# ===== 2026-08-19 EKLENEN - MUAF AGENT HAFTALIK TEK VARDIYA =====
+ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA = CONFIG["ENABLE_MUAF_AGENT_HAFTALIK_TEK_VARDIYA"]
+# ================================================================
+
+# ===== 2026-08-19 EKLENEN - AY GECISI / SARKAN HAFTA SUREKLILIGI =====
+ENABLE_SARKAN_HAFTA_SUREKLILIK = CONFIG["ENABLE_SARKAN_HAFTA_SUREKLILIK"]
+# ======================================================================
+
+# ===== 2026-08-28 EKLENEN - AY GECISI: KISI DEVRI + SOFT SUREKLILIK =====
+ENABLE_SARKAN_KISI_DEVRI = CONFIG["ENABLE_SARKAN_KISI_DEVRI"]
+SARKAN_BASE_SAPMA_W = CONFIG["SARKAN_BASE_SAPMA_W"]
+SARKAN_KISI_SAPMA_W = CONFIG["SARKAN_KISI_SAPMA_W"]
+# ========================================================================
+
+# ===== 2026-08-31 EKLENEN - AY GECISI: SAAT ESLESTIRME TOLERANSI =====
+SARKAN_SAAT_TOLERANS_DK = CONFIG["SARKAN_SAAT_TOLERANS_DK"]
+# =====================================================
+
+# ===== 2026-09-01 EKLENEN - AY GECISI: DEVIR KAPSAMI =====
+SARKAN_DEVIR_TAKIM_COGUNLUK = CONFIG["SARKAN_DEVIR_TAKIM_COGUNLUK"]
+# =========================================================
+
+# ===== 2026-09-04 EKLENEN - SARKAN DEVIR HARD DENEMESI =====
+SARKAN_DEVIR_HARD = CONFIG["SARKAN_DEVIR_HARD"]
+# ===========================================================
+
+# ===== 2026-09-04 EKLENEN - PARTIAL HAFTA FAZLA ATAMA TAVANI =====
+ENABLE_PARTIAL_WEEK_FAZLA_TAVANI = CONFIG["ENABLE_PARTIAL_WEEK_FAZLA_TAVANI"]
+# =================================================================
+
+# ===== 2026-09-04 EKLENEN - GUNDUZ VARDIYA ROTASYONU =====
+ENABLE_GUNDUZ_ROTASYON = CONFIG["ENABLE_GUNDUZ_ROTASYON"]
+GUNDUZ_ILK_BASLANGIC_SAATI = CONFIG["GUNDUZ_ILK_BASLANGIC_SAATI"]
+GUNDUZ_SON_BASLANGIC_SAATI = CONFIG["GUNDUZ_SON_BASLANGIC_SAATI"]
+GUNDUZ_AYNI_VARDIYA_MAX_HAFTA = CONFIG["GUNDUZ_AYNI_VARDIYA_MAX_HAFTA"]
+GUNDUZ_ROTASYON_W = CONFIG["GUNDUZ_ROTASYON_W"]
+# =========================================================================
 
 # ===== 2026-09-07 EKLENEN - TAKIM VARDIYA DENGESI KISI BASI GUNE GECTI =====
 TAKIM_VARDIYA_DENGE_OLCEK = CONFIG["TAKIM_VARDIYA_DENGE_OLCEK"]
@@ -40,4 +508,618 @@ TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL = CONFIG["TAKIM_VARDIYA_DENGE_HAFTA_SONU_DA
 TAKIM_VARDIYA_GECMIS_KESIT = CONFIG["TAKIM_VARDIYA_GECMIS_KESIT"]
 # ===========================================================================
 
+print("CONFIG yüklendi.")
 
+for key, value in CONFIG.items():
+    print(f"{key}: {value}")
+
+
+
+
+
+# %% [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL)
+# NOT: Diğer SQL çekme hücreleriyle birlikte EN ÜSTTE tutulur (df_agents/df_off/
+# df_izin/df_gecmis/df_kidem yanı). Sadece sync_engine + pd yeterli.
+# df_tam'a BAĞIMLI DEĞİL - takım eşleşme kontrolü [KISIT] hücresinde yapılır.
+#
+# ============ 2026-09-07 - BİRİM DEĞİŞTİ: TAKIM-GÜN -> KİŞİ BAŞI GÜN ============
+# ESKİ tablo haftalık BASE mantığıyla üretiliyordu: her (ISO hafta, takım) için
+# en çok kişinin çalıştığı vardiya o haftanın base'i sayılır, base günleri
+# toplanırdı. Birim TAKIM-GÜN'dü, takım büyüklüğünden bağımsızdı.
+#
+# YENİ tablo base'e hiç bakmıyor. Takımın bütün agentlarının o vardiya altında
+# çalıştığı TOPLAM AGENT-GÜN alınıp TAKIM MEVCUDUNA BÖLÜNÜYOR. Yani:
+#   "ben 10 gün 15:00'ta çalıştım, sen 5 gün" -> takım toplamı 15 agent-gün
+#   takım 15 kişilikse -> 1.0 kişi başı gün
+# Bölme İŞ BİRİMİ tarafında, veride yapılıyor; model bölmüyor.
+#
+# Bunun sonucu: "takımın base'i değildi ama ben orada çalıştım" artık sayılıyor.
+# Muafiyetli ve devir alan agentlar da geçmişe dahil.
+#
+# BEKLENEN ŞEMA:
+#   yil | rapor_bas | teamleader_name | working_main_group | shifts_adj |
+#   total_gun_sayisi | agent_sayisi | gun_agent_ratio
+#
+#   total_gun_sayisi = HAM agent-gün (bölünmemiş)
+#   agent_sayisi     = takımın agent sayısı (bölen)
+#   gun_agent_ratio  = total_gun_sayisi / agent_sayisi  -> KİŞİ BAŞI GÜN
+#
+#   DENGE HESABI gun_agent_ratio'yu KULLANIR. total_gun_sayisi sadece tutarlılık
+#   kontrolü ve raporlama için okunur; modele girmez.
+#
+#   rapor_bas = planlanan ay (Eylül planlanıyorsa 9). Tablo birden çok kesit
+#   taşıyabilir; hangisinin kullanılacağı CONFIG'deki TAKIM_VARDIYA_GECMIS_KESIT
+#   ile seçilir, None ise EN SON kesit otomatik alınır.
+#
+#   agent_sayisi = kişi başı hesabında kullanılan BÖLEN. Model bu ayın katkısını
+#   da AYNI sayıya böler; iki taraf farklı bölen kullanırsa denge sessizce
+#   yanlış ölçer. Bu yüzden bölen veriden gelir, notebook kendi saymaz.
+# ================================================================================
+
+import re
+
+TAKIM_VARDIYA_GECMIS_TABLE = "<TABLO_ADINI_YAZ>"      # <-- KENDİ TABLO ADINLA DEĞİŞTİR
+
+query = f"SELECT * FROM {TAKIM_VARDIYA_GECMIS_TABLE}"
+chunks = pd.read_sql(query, sync_engine, chunksize=10000)
+df_takim_vardiya_gecmis = pd.concat(chunks, ignore_index=True)
+df_takim_vardiya_gecmis.columns = [str(c).strip().lower() for c in df_takim_vardiya_gecmis.columns]
+
+print(f"df_takim_vardiya_gecmis: {df_takim_vardiya_gecmis.shape[0]} satır x "
+      f"{df_takim_vardiya_gecmis.shape[1]} kolon")
+print(f"kolonlar: {list(df_takim_vardiya_gecmis.columns)}")
+
+_bek = ["yil", "rapor_bas", "teamleader_name", "working_main_group",
+        "shifts_adj", "total_gun_sayisi", "agent_sayisi", "gun_agent_ratio"]
+_eksik_kol = [c for c in _bek if c not in df_takim_vardiya_gecmis.columns]
+if _eksik_kol:
+    raise SystemExit(
+        f"df_takim_vardiya_gecmis'te beklenen kolon(lar) yok: {_eksik_kol}\n"
+        "Tablo 2026-09-07'de değişti: yil / rapor_bas / agent_sayisi / "
+        "gun_agent_ratio eklendi. Denge gun_agent_ratio'yu kullanır."
+    )
+
+for _c in ["teamleader_name", "working_main_group", "shifts_adj"]:
+    df_takim_vardiya_gecmis[_c] = df_takim_vardiya_gecmis[_c].astype(str).str.strip()
+for _c in ["yil", "rapor_bas", "total_gun_sayisi", "agent_sayisi", "gun_agent_ratio"]:
+    df_takim_vardiya_gecmis[_c] = pd.to_numeric(
+        df_takim_vardiya_gecmis[_c], errors="coerce")
+
+# --- KESİT SEÇİMİ: hangi (yil, rapor_bas) satırları kullanılacak ---
+# Sabit ay yazılmaz. CONFIG boşsa tabloda bulunan en son kesit alınır.
+_kesit_cfg = globals().get("TAKIM_VARDIYA_GECMIS_KESIT")
+_kesitler = sorted(
+    df_takim_vardiya_gecmis.dropna(subset=["yil", "rapor_bas"])
+    .groupby(["yil", "rapor_bas"]).size().index.tolist()
+)
+if not _kesitler:
+    raise SystemExit("Tabloda geçerli (yil, rapor_bas) kesiti yok.")
+
+if _kesit_cfg is None:
+    _kesit = _kesitler[-1]
+    print(f"\nKESİT otomatik seçildi (en son): yil={int(_kesit[0])}, "
+          f"rapor_bas={int(_kesit[1])}")
+else:
+    _kesit = (float(_kesit_cfg[0]), float(_kesit_cfg[1]))
+    if _kesit not in _kesitler:
+        raise SystemExit(
+            f"CONFIG'deki TAKIM_VARDIYA_GECMIS_KESIT {_kesit_cfg} tabloda YOK. "
+            f"Mevcut kesitler: {[(int(a), int(b)) for a, b in _kesitler]}"
+        )
+    print(f"\nKESİT CONFIG'den sabitlendi: yil={int(_kesit[0])}, "
+          f"rapor_bas={int(_kesit[1])}")
+if len(_kesitler) > 1:
+    print(f"  tabloda {len(_kesitler)} kesit var: "
+          f"{[(int(a), int(b)) for a, b in _kesitler]}")
+
+df_takim_vardiya_gecmis = df_takim_vardiya_gecmis[
+    (df_takim_vardiya_gecmis["yil"] == _kesit[0])
+    & (df_takim_vardiya_gecmis["rapor_bas"] == _kesit[1])
+].copy()
+print(f"  kesit sonrası satır: {len(df_takim_vardiya_gecmis)}")
+
+# PLAN_GUNLER varsa (bu hücre normalde ondan önce çalışır) kesit ayı ile
+# planlanan ay tutuyor mu diye kontrol edilir - tutmuyorsa geçmiş yanlış aydan.
+_pg = globals().get("PLAN_GUNLER")
+if _pg:
+    _plan_ay = pd.to_datetime(min(_pg)).month
+    _plan_yil = pd.to_datetime(min(_pg)).year
+    if (int(_kesit[0]), int(_kesit[1])) != (_plan_yil, _plan_ay):
+        print(f"!!! UYARI: kesit ({int(_kesit[0])}, {int(_kesit[1])}) ile planlanan ay "
+              f"({_plan_yil}, {_plan_ay}) TUTMUYOR - yanlış dönemin geçmişi kullanılıyor olabilir.")
+
+# --- takım anahtarı: [HÜCRE 6] - TAKIM VE LOKASYON KOLONLARI ile BİREBİR aynı ---
+df_takim_vardiya_gecmis["takim"] = (
+    df_takim_vardiya_gecmis["working_main_group"] + " | " + df_takim_vardiya_gecmis["teamleader_name"]
+)
+
+
+def _tvg_bas_saat(s):
+    """'15:00-00:00' -> '15:00'. Ayrıştıramazsa None döner (sessizce yutmaz, sayılır)."""
+    t = str(s).strip()
+    if not t or t.lower() in ("nan", "none", "null"):
+        return None
+    t = t.split("-")[0].strip().replace(".", ":")
+    m = re.match(r"^(\d{1,2}):?(\d{2})$", t)
+    if not m:
+        return None
+    _h, _dk = int(m.group(1)), int(m.group(2))
+    if _h > 23 or _dk > 59:
+        return None
+    return f"{_h:02d}:{_dk:02d}"
+
+
+df_takim_vardiya_gecmis["baslangic_saati"] = df_takim_vardiya_gecmis["shifts_adj"].map(_tvg_bas_saat)
+
+# --- veri sağlığı uyarıları: model DURMAZ, uyarır ---
+_bozuk_saat = df_takim_vardiya_gecmis[df_takim_vardiya_gecmis["baslangic_saati"].isna()]
+if len(_bozuk_saat):
+    print(f"\n!!! UYARI: shifts_adj ayrıştırılamayan {len(_bozuk_saat)} satır "
+          f"({_bozuk_saat['gun_agent_ratio'].sum():.1f} kişi başı gün) "
+          f"DENGE HESABINA GİRMEYECEK.")
+    print("    Ayrıştırılamayan değerler:")
+    print(_bozuk_saat["shifts_adj"].value_counts().head(15).to_string())
+
+_bozuk_gun = int(df_takim_vardiya_gecmis["gun_agent_ratio"].isna().sum())
+if _bozuk_gun:
+    print(f"!!! UYARI: gun_agent_ratio boş/sayıya çevrilemeyen {_bozuk_gun} satır var.")
+
+_negatif = int((df_takim_vardiya_gecmis["gun_agent_ratio"] < 0).sum())
+if _negatif:
+    print(f"!!! UYARI: gun_agent_ratio NEGATİF olan {_negatif} satır var.")
+
+# --- TUTARLILIK: ratio gercekten total / agent_sayisi mi? ---
+# Tutmuyorsa join yanlis ya da ratio baska bir bolenle hesaplanmis demektir;
+# o durumda modelin bu aya uyguladigi bolen ile gecmis ayrisir.
+_tut = df_takim_vardiya_gecmis.dropna(
+    subset=["total_gun_sayisi", "agent_sayisi", "gun_agent_ratio"])
+_tut = _tut[_tut["agent_sayisi"] > 0]
+if len(_tut):
+    _bekl = _tut["total_gun_sayisi"] / _tut["agent_sayisi"]
+    _sapan = _tut[(_bekl - _tut["gun_agent_ratio"]).abs() > 0.01]
+    if len(_sapan):
+        print(f"\n!!! UYARI: {len(_sapan)} satirda gun_agent_ratio != "
+              f"total_gun_sayisi / agent_sayisi (tolerans 0.01).")
+        print("    Ratio baska bir bolenle hesaplanmis olabilir; model bu ayin")
+        print("    katkisini agent_sayisi'na bolecegi icin iki taraf ayrisir.")
+        print(_sapan[["takim" if "takim" in _sapan.columns else "teamleader_name",
+                      "shifts_adj", "total_gun_sayisi", "agent_sayisi",
+                      "gun_agent_ratio"]].head(10).to_string(index=False))
+
+# aynı takım lideri birden fazla main group'ta mı? (SQL PARTITION BY kontrolü)
+_cok_gruplu = (
+    df_takim_vardiya_gecmis.groupby("teamleader_name")["working_main_group"]
+    .nunique().loc[lambda s: s > 1]
+)
+if len(_cok_gruplu):
+    print(f"\n!!! DİKKAT: {len(_cok_gruplu)} takım lideri birden fazla working_main_group'ta:")
+    print(_cok_gruplu.head(10).to_string())
+    print("    SQL'de PARTITION BY içinde WORKING_MAIN_GROUP yoksa bu takımların")
+    print("    bir kısmı geçmiş tabloda EKSİK kalmış olabilir.")
+
+# --- AGENT SAYISI: kişi başı bölen, takım başına TEK olmalı ---
+# Aynı takımın satırlarında farklı mevcut varsa hangisinin kullanıldığı belirsiz;
+# bu durumda kişi başı gün değerleri kendi aralarında kıyaslanamaz hale gelir.
+_mv = df_takim_vardiya_gecmis.dropna(subset=["agent_sayisi"])
+takim_mevcut_map = {}
+_mevcut_celiskili = []
+for _t, _grp in _mv.groupby("takim")["agent_sayisi"]:
+    _essiz = sorted(_grp.unique())
+    takim_mevcut_map[str(_t).strip()] = int(round(float(_essiz[0])))
+    if len(_essiz) > 1:
+        _mevcut_celiskili.append({"takim": _t, "farkli_agent_sayisi": _essiz})
+if _mevcut_celiskili:
+    print(f"\n!!! UYARI: {len(_mevcut_celiskili)} takımda agent_sayisi satırdan satıra "
+          f"DEĞİŞİYOR - ilk değer kullanıldı, kişi başı günler kıyaslanamaz olabilir:")
+    print(pd.DataFrame(_mevcut_celiskili).head(10).to_string(index=False))
+
+_mevcut_sifir = [t for t, n in takim_mevcut_map.items() if n <= 0]
+if _mevcut_sifir:
+    print(f"\n!!! UYARI: {len(_mevcut_sifir)} takımın agent_sayisi değeri <= 0 "
+          f"-> denge hesabına giremezler: {_mevcut_sifir[:5]}")
+
+# --- (takım, başlangıç saati) -> KİŞİ BAŞI gün (gun_agent_ratio, float) ---
+# Aynı başlangıçlı farklı bitişler (15:00-00:00 / 15:00-23:00) TOPLANIR.
+# Oranları toplamak doğrudur: bir takımın bütün satırlarında bölen (agent_sayisi)
+# aynı olduğu için Σ(gün_i / n) = (Σ gün_i) / n. Bölenin takım içinde sabit
+# olduğu yukarıda ayrıca kontrol ediliyor.
+# Ondalık korunur; tamsayıya çevirme [KISIT] hücresinde ölçekle yapılır.
+_gecerli = df_takim_vardiya_gecmis.dropna(subset=["baslangic_saati", "gun_agent_ratio"])
+takim_vardiya_gecmis_map = {
+    (str(_t).strip(), str(_b).strip()): float(_g)
+    for (_t, _b), _g in _gecerli.groupby(["takim", "baslangic_saati"])["gun_agent_ratio"].sum().items()
+}
+
+print(f"\nbenzersiz takım        : {df_takim_vardiya_gecmis['takim'].nunique()}")
+print(f"benzersiz shifts_adj   : {df_takim_vardiya_gecmis['shifts_adj'].nunique()}")
+print(f"benzersiz başlangıç    : {_gecerli['baslangic_saati'].nunique()}")
+print(f"takim_vardiya_gecmis_map kayıt sayısı: {len(takim_vardiya_gecmis_map)}")
+print(f"takim_mevcut_map kayıt sayısı       : {len(takim_mevcut_map)}  (agent_sayisi)")
+if takim_mevcut_map:
+    _mv_seri = pd.Series(takim_mevcut_map)
+    print(f"agent_sayisi min/ort/max            : {int(_mv_seri.min())} / "
+          f"{_mv_seri.mean():.1f} / {int(_mv_seri.max())}")
+
+print("\nBaşlangıç saatine göre dağılım (tüm takımlar):")
+print(_gecerli.groupby("baslangic_saati")
+      .agg(ham_agent_gun=("total_gun_sayisi", "sum"),
+           kisi_basi_toplam=("gun_agent_ratio", "sum"),
+           kisi_basi_ortalama=("gun_agent_ratio", "mean"),
+           takim_satiri=("gun_agent_ratio", "count"))
+      .sort_values("kisi_basi_toplam", ascending=False).round(2).to_string())
+
+# --- CONFIG'deki denge vardiyaları için dağılım (CONFIG çalıştıysa) ---
+_denge_bas = globals().get("TAKIM_VARDIYA_DENGE_BASLANGICLARI")
+if _denge_bas:
+    _tum_takimlar = sorted(df_takim_vardiya_gecmis["takim"].unique())
+    for _b in _denge_bas:
+        _b = str(_b).strip()
+        _seri = pd.Series(
+            {_t: takim_vardiya_gecmis_map.get((_t, _b), 0.0) for _t in _tum_takimlar}
+        ).sort_values()
+        print(f"\n--- {_b} başlangıçlı vardiya: takım bazında geçmiş KİŞİ BAŞI gün ---")
+        print(f"    takım sayısı        : {len(_seri)}")
+        print(f"    hiç almamış (0 gün) : {int((_seri == 0).sum())}")
+        print(f"    min / ortalama / max: {_seri.min():.1f} / "
+              f"{_seri.mean():.1f} / {_seri.max():.1f}")
+        print(f"    yayılım (max-min)   : {(_seri.max() - _seri.min()):.1f} kişi başı gün")
+        print(f"    EN AZ alan 5 takım  : {_seri.head(5).round(1).to_dict()}")
+        print(f"    EN ÇOK alan 5 takım : {_seri.tail(5).round(1).to_dict()}")
+else:
+    print("\nNOT: TAKIM_VARDIYA_DENGE_BASLANGICLARI yok (CONFIG çalışmamış) - dağılım atlandı.")
+
+display(df_takim_vardiya_gecmis.head())
+
+
+
+
+
+# %% [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ (SOFT)
+# Takımların geçmişte belirli bir vardiyada KİŞİ BAŞI kaç gün çalıştığına bakıp
+# bu ayın dağıtımını dengeler. Amaç: yıl sonunda tüm takımların o vardiyadaki
+# kişi başı çalışma günü birbirine yakın olsun - aynı kişiler hep aynı vardiyada
+# kalmasın.
+#
+# ÖN KOŞUL: [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL)
+#             -> takim_vardiya_gecmis_map (gun_agent_ratio toplamı, float)
+#             -> takim_mevcut_map         (agent_sayisi = kişi başı bölen)
+#           [HÜCRE 9] - CP-SAT MODEL      -> x
+#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA -> team_week_base (sadece tavan için)
+#
+# ============ 2026-09-07 - BİRİM DEĞİŞTİ: TAKIM-GÜN -> KİŞİ BAŞI GÜN ============
+# ESKİ: gecmis ve bu_ay'ın ikisi de takım-gündü.
+#         bu_ay[t] = Σ_hafta team_week_base[(t,wk,v)] × hafta içi gün
+#       Takım büyüklüğü hesaba girmiyordu, normalizasyon yapılmıyordu.
+#
+# YENİ: geçmiş tablo gun_agent_ratio taşıyor = total_gun_sayisi / agent_sayisi,
+#       yani kişi başı gün (bkz. [HÜCRE 3D]). Bu ayın katkısı
+#       team_week_base'ten TÜRETİLEMEZ - base takım-gün üretir, kişi-gün değil.
+#       Bu yüzden bu ay doğrudan x'ten sayılır:
+#
+#         agent_gun[t] = Σ_{a ∈ takım t} Σ_{hafta içi gün} Σ_{v: başlangıç = v*} x[(a,ds,v)]
+#         bu_ay_kb[t]  = agent_gun[t] / agent_sayisi[t]        (kişi başı)
+#
+#       Bölen VERİDEN gelir (agent_sayisi kolonu). Geçmişteki gun_agent_ratio
+#       hangi bölenle hesaplandıysa model de aynısını kullanır; notebook kendi
+#       saymaz. [HÜCRE 3D] ratio == total / agent_sayisi tutuyor mu diye bakar.
+#       team_size_map'e düşülürse iki taraf sessizce ayrışabilir - o yüzden
+#       fallback olsa bile UYARI basılır.
+#
+# BUNUN İKİ SONUCU VAR:
+#   1) Muafiyetli ve devir alan agentlar artık sayıya GİRİYOR. x'ten saydığımız
+#      için takım base'ini takip etmeyenler de dahil - yeni verinin semantiği bu.
+#   2) Denge artık x'i DOĞRUDAN itiyor (eskiden sadece base'i seçiyordu), yani
+#      coverage ile daha sert yarışıyor. Ağırlık kalibrasyonu kritik.
+# ================================================================================
+#
+# MATEMATİK (her denge vardiyası v* için ayrı ayrı):
+#
+#   kum[t] = gecmis_kb[t] + bu_ay_kb[t]          (ikisi de ×OLCEK ölçekli tamsayı)
+#   N × kum[t] − Σ_t kum[t]  =  sapma_arti[t] − sapma_eksi[t]
+#   ceza = TAKIM_VARDIYA_DENGE_W × Σ (sapma_arti + sapma_eksi)      [OBJECTIVE'de]
+#
+# N ile çarpım BÖLME YAPMAMAK içindir: ortalamadan sapmanın N katı, tamsayı kalır.
+# Ceza ortalamadan UZAKLIKLA ORANTILI - sert bir eşik/kesme yok. Geçmişte kişi
+# başı az almış takımın sapma_eksi'si büyük olduğu için model o vardiyayı ona
+# vermeye meyleder; çok almışa vermemeye. Kimse sıfırlanmaz, herkes ortalamaya
+# doğru itilir ("insafsız olmasın").
+#
+# ÖLÇEK: kişi başı gün ondalıklı, CP-SAT tamsayı ister. Her şey
+# TAKIM_VARDIYA_DENGE_OLCEK ile çarpılır (100 -> 0.01 gün hassasiyet).
+# Bölme taban bölmedir; hata takım başına en fazla 1/OLCEK gün.
+#
+# HAFTA İÇİ: geçmiş veri sadece hafta içi sayıyor, bu ay da öyle sayılır
+# (TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL). Resmi tatil / arife hafta içiyse
+# geçmişe girmiş -> bu ayda da SAYILIR. (Eski hücre onları hariç tutuyordu.)
+#
+# AYLIK TAVAN AYNI KALDI: hâlâ team_week_base üzerinden, HAFTA bazında.
+# Tavan başka bir iş yapıyor - "takım ay boyu aynı vardiyada park etmesin",
+# yani gündüz rotasyonunun kardeşi. Denge ise "yıl içinde kişi başı adalet".
+# İkisi aynı değişkene bağlanırsa ikisi de bulanıklaşır.
+#
+# Vardiya BAŞLANGIÇ SAATİNDEN eşleşir, koddan değil (kodlar aydan aya değişir).
+# Yeni vardiya dengelemek için CONFIG'deki tuple'a eklemek yeterli:
+#     TAKIM_VARDIYA_DENGE_BASLANGICLARI = ("15:00", "00:00")
+#
+# 00:00 NOTU: AYDA MAX 2 HAFTA GECE/AKŞAM (HARD) kuralına dokunulmaz. Denge onun
+# ALTINDA çalışır - tavanı zorlamaz, 2 haftalık hakkın hangi takımlara gideceğini
+# belirler. Denge SOFT olduğu için çakışmada HARD her zaman kazanır.
+#
+# TAVAN NEDEN SOFT: [HÜCRE] - HAFTALIK TAKIM BASE KAPASİTE KORUMASI her hafta o
+# vardiyaya yeterli takım seçilmesini ZORUNLU kılıyor. Tavan HARD olsaydı ikisi
+# çelişip INFEASIBLE verebilirdi.
+
+_tvd_gerekli = [
+    "ENABLE_TAKIM_VARDIYA_DENGE", "TAKIM_VARDIYA_DENGE_BASLANGICLARI",
+    "TAKIM_VARDIYA_DENGE_W", "TAKIM_VARDIYA_DENGE_MAX_HAFTA",
+    "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W", "TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN",
+    "TAKIM_VARDIYA_DENGE_OLCEK", "TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL",
+]
+_tvd_eksik = [k for k in _tvd_gerekli if k not in globals()]
+if _tvd_eksik:
+    raise SystemExit(
+        f"CONFIG'de tanımlı olmalı: {_tvd_eksik} -> [CONFIG] hücresini çalıştır."
+    )
+
+takim_vardiya_denge_agentgun = {}  # (takim, baslangic) -> IntVar   bu ayki AGENT-gün
+takim_vardiya_denge_buay = {}      # (takim, baslangic) -> IntVar   bu ayki kişi başı (ölçekli)
+takim_vardiya_denge_hafta = {}     # (takim, baslangic) -> IntVar   bu ayki hafta (tavan için)
+takim_vardiya_denge_sapma = {}     # (takim, baslangic) -> (arti, eksi)  OBJECTIVE okur
+takim_vardiya_denge_asim = {}      # (takim, baslangic) -> IntVar   tavan aşımı, OBJECTIVE okur
+takim_vardiya_denge_gecmis = {}    # (takim, baslangic) -> int      sabit geçmiş (ölçekli)
+takim_vardiya_denge_mevcut = {}    # takim -> int                   kullanılan bölen
+takim_vardiya_denge_rows = []
+
+if not ENABLE_TAKIM_VARDIYA_DENGE:
+    print("ENABLE_TAKIM_VARDIYA_DENGE = False -> takım vardiya geçmiş dengesi KURULMADI.")
+    print("Hiçbir değişken yaratılmadı, objective'e ceza girmeyecek.")
+else:
+    _tvd_gecmis_map = globals().get("takim_vardiya_gecmis_map")
+    if not _tvd_gecmis_map:
+        raise SystemExit(
+            "takim_vardiya_gecmis_map yok/boş. Önce [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL) "
+            "hücresini çalıştır. (Dengeyi bilinçli olarak kapatmak için "
+            "CONFIG'de ENABLE_TAKIM_VARDIYA_DENGE = False yap.)"
+        )
+
+    _tvd_olcek = int(TAKIM_VARDIYA_DENGE_OLCEK)
+    _tvd_hs_dahil = bool(TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL)
+    _tvd_arife_kod = globals().get("arife_ozel_vardiya_kodlari", set())
+    _tvd_eksik_vars = float(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN)
+
+    # --- BÖLEN: veriden gelen agent_sayisi; yoksa team_size_map'e düşer ---
+    _tvd_mevcut_map = globals().get("takim_mevcut_map") or {}
+    _tvd_team_size = globals().get("team_size_map") or {}
+    if not _tvd_mevcut_map:
+        print("!!! UYARI: takim_mevcut_map YOK - kişi başı bölen team_size_map'ten alınacak.")
+        print("    (takim_mevcut_map, [HÜCRE 3D]'de agent_sayisi kolonundan üretilir.)")
+        print("    Bu, iş biriminin veride kullandığı bölenden FARKLI olabilir; farkı")
+        print("    kimse görmez, denge sessizce yanlış ölçer. [HÜCRE 3D]'yi çalıştır.")
+
+    # --- sayılan plan günleri: hafta içi (resmi tatil / arife DAHİL) ---
+    _tvd_gunler = [
+        ds for ds in PLAN_GUNLER
+        if _tvd_hs_dahil or pd.to_datetime(ds).weekday() in (0, 1, 2, 3, 4)
+    ]
+
+    # --- (gün, vardiya) -> başlangıç saati ---
+    _tvd_gun_bas = {}
+    for _ds in _tvd_gunler:
+        for _v in gun_vardiyalari.get(_ds, []):
+            if _v in _tvd_arife_kod:
+                continue
+            if (_ds, _v) in saat:
+                _tvd_gun_bas[(_ds, _v)] = str(saat[(_ds, _v)][0]).strip()[:5]
+
+    # --- takım -> agent listesi ---
+    _tvd_uyeler = {}
+    for _a in AGENTS:
+        _a = str(_a).strip()
+        _t = agent_team.get(_a)
+        if _t is None or pd.isna(_t):
+            continue
+        _tvd_uyeler.setdefault(str(_t).strip(), []).append(_a)
+
+    _tvd_takimlar = sorted({str(t).strip() for t in TAKIMLAR})
+
+    # --- geçmiş veri ile plan takımlarının eşleşmesi ---
+    _tvd_gecmis_takimlar = {str(k[0]).strip() for k in _tvd_gecmis_map}
+    _tvd_eslesmeyen = [t for t in _tvd_takimlar if t not in _tvd_gecmis_takimlar]
+    _tvd_fazla = sorted(_tvd_gecmis_takimlar - set(_tvd_takimlar))
+    if _tvd_eslesmeyen:
+        print(f"!!! UYARI: plandaki {len(_tvd_eslesmeyen)} takımın geçmiş tabloda HİÇ kaydı yok "
+              f"-> {_tvd_eksik_vars} kişi başı gün sayılacak "
+              f"(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN).")
+        for _t in _tvd_eslesmeyen[:10]:
+            print(f"      {_t}")
+        if len(_tvd_eslesmeyen) > 10:
+            print(f"      ... ve {len(_tvd_eslesmeyen) - 10} takım daha")
+        print("    Takım adı 'working_main_group | teamleader_name' formatında eşleşir;")
+        print("    eşleşmeyen çoksa geçmiş tablodaki yazımı kontrol et.")
+    if _tvd_fazla:
+        print(f"NOT: geçmiş tabloda olup planda OLMAYAN {len(_tvd_fazla)} takım var "
+              f"(kapanmış/değişmiş ekipler) - denge hesabına girmiyorlar.")
+
+    # --- her takım için BÖLEN belirle, iki kaynak arasındaki farkı raporla ---
+    _tvd_bolen_fark = []
+    _tvd_bolensiz = []
+    for _t in _tvd_takimlar:
+        _n_veri = _tvd_mevcut_map.get(_t)
+        _n_model = _tvd_team_size.get(_t)
+        if _n_model is None:
+            _n_model = len(_tvd_uyeler.get(_t, []))
+        _n = _n_veri if _n_veri else _n_model
+        if not _n or int(_n) <= 0:
+            _tvd_bolensiz.append(_t)
+            continue
+        takim_vardiya_denge_mevcut[_t] = int(_n)
+        if _n_veri and _n_model and int(_n_veri) != int(_n_model):
+            _tvd_bolen_fark.append({
+                "takim": _t, "veriden_agent_sayisi": int(_n_veri),
+                "modeldeki_mevcut": int(_n_model),
+                "fark": int(_n_veri) - int(_n_model),
+            })
+
+    takim_vardiya_denge_bolen_fark_df = pd.DataFrame(_tvd_bolen_fark)
+    if _tvd_bolen_fark:
+        print(f"\n!!! DİKKAT: {len(_tvd_bolen_fark)} takımda veriden gelen agent_sayisi ile "
+              f"modeldeki mevcut FARKLI.")
+        print("    VERİDEN gelen kullanıldı (geçmiş kişi başı günler onunla hesaplandığı için).")
+        print("    Fark büyükse geçmiş tablo eski bir kadro kesitiyle üretilmiş olabilir.")
+        print(takim_vardiya_denge_bolen_fark_df
+              .reindex(takim_vardiya_denge_bolen_fark_df["fark"].abs()
+                       .sort_values(ascending=False).index)
+              .head(10).to_string(index=False))
+    if _tvd_bolensiz:
+        print(f"\n!!! UYARI: {len(_tvd_bolensiz)} takımın mevcudu bulunamadı/0 "
+              f"-> denge hesabına girmiyorlar: {_tvd_bolensiz[:5]}")
+
+    print(f"\nSayılan plan günü: {len(_tvd_gunler)} "
+          f"({'hafta sonu DAHİL' if _tvd_hs_dahil else 'sadece hafta içi'}, "
+          f"resmi tatil/arife dahil)")
+    print(f"Ölçek: ×{_tvd_olcek}  (kişi başı gün -> tamsayı, {1 / _tvd_olcek:g} gün hassasiyet)")
+
+    # ================== HER DENGE VARDİYASI İÇİN AYRI HESAP ==================
+    for _bas in TAKIM_VARDIYA_DENGE_BASLANGICLARI:
+        _bas = str(_bas).strip()[:5]
+
+        # bu başlangıçlı vardiyanın açık olduğu (gün, vardiya) çiftleri
+        _tvd_gun_v = {}
+        for (_ds, _v), _b in _tvd_gun_bas.items():
+            if _b == _bas:
+                _tvd_gun_v.setdefault(_ds, []).append(_v)
+
+        if not _tvd_gun_v:
+            print(f"\n!!! UYARI: '{_bas}' başlangıçlı vardiya sayılan günlerin HİÇBİRİNDE yok "
+                  f"-> denge kurulmadı.")
+            print(f"    Plandaki başlangıç saatleri: {sorted(set(_tvd_gun_bas.values()))}")
+            continue
+
+        # ---- takım başına agent-gün ve kişi başı değişkenleri ----
+        _kum_ifadeler, _gecerli_t = [], []
+        for _t in _tvd_takimlar:
+            _n = takim_vardiya_denge_mevcut.get(_t)
+            if not _n:
+                continue
+            _terms = []
+            for _ds, _vler in _tvd_gun_v.items():
+                for _a in _tvd_uyeler.get(_t, []):
+                    for _v in _vler:
+                        if (_a, _ds, _v) in x:
+                            _terms.append(x[(_a, _ds, _v)])
+            if not _terms:
+                continue      # bu takımın hiçbir agentı o vardiyada çalışamıyor
+
+            _ag_ust = len(_terms)
+            _ag = model.NewIntVar(0, _ag_ust, f"tvd_agentgun_{_bas}_{_t}")
+            model.Add(_ag == sum(_terms))
+            takim_vardiya_denge_agentgun[(_t, _bas)] = _ag
+
+            # kişi başı (ölçekli) = OLCEK * agent_gun / mevcut   -- TABAN BÖLME
+            # _n sabit olduğu için iki kısıt da lineer kalır.
+            _kb_ust = (_tvd_olcek * _ag_ust) // _n + 1
+            _kb = model.NewIntVar(0, _kb_ust, f"tvd_buay_kb_{_bas}_{_t}")
+            model.Add(_kb * _n <= _tvd_olcek * _ag)
+            model.Add(_kb * _n > _tvd_olcek * _ag - _n)
+            takim_vardiya_denge_buay[(_t, _bas)] = _kb
+
+            _gec_ham = float(_tvd_gecmis_map.get((_t, _bas), _tvd_eksik_vars))
+            _gec = int(round(_tvd_olcek * _gec_ham))
+            takim_vardiya_denge_gecmis[(_t, _bas)] = _gec
+            _kum_ifadeler.append(_gec + _kb)
+            _gecerli_t.append(_t)
+
+        if len(_gecerli_t) < 2:
+            print(f"\n!!! UYARI: '{_bas}' için denge kurulacak takım sayısı {len(_gecerli_t)} "
+                  f"-> denge anlamsız, atlandı.")
+            continue
+
+        # ---- AYLIK TAVAN: hâlâ team_week_base üzerinden, HAFTA bazında ----
+        # (gün bazlı denge ile aynı değişkeni paylaşmaz - bilinçli, bkz. başlık yorumu)
+        _tvd_hafta_v = {}
+        _twb = globals().get("team_week_base", {})
+        for _ds in _tvd_gun_v:
+            _wk = day_week[_ds]
+            for _v in _tvd_gun_v[_ds]:
+                _tvd_hafta_v.setdefault(_wk, set()).add(_v)
+
+        # ---- ölçekli L1 sapma: N*kumulatif[t] - Σ kumulatif ----
+        _N = len(_gecerli_t)
+        _toplam_kum = sum(_kum_ifadeler)
+        _max_gec = max(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
+        _max_buay = max(takim_vardiya_denge_buay[(t, _bas)].Proto().domain[-1]
+                        for t in _gecerli_t)
+        _lim = _N * (_max_gec + _max_buay) + 1
+
+        for _t in _gecerli_t:
+            _gec = takim_vardiya_denge_gecmis[(_t, _bas)]
+            _kb = takim_vardiya_denge_buay[(_t, _bas)]
+
+            _arti = model.NewIntVar(0, _lim, f"tvd_sapma_arti_{_bas}_{_t}")
+            _eksi = model.NewIntVar(0, _lim, f"tvd_sapma_eksi_{_bas}_{_t}")
+            model.Add(_N * (_gec + _kb) - _toplam_kum == _arti - _eksi)
+            takim_vardiya_denge_sapma[(_t, _bas)] = (_arti, _eksi)
+
+            # ---- aylık tavan (SOFT): en fazla TAKIM_VARDIYA_DENGE_MAX_HAFTA hafta ----
+            _hafta_terms = [
+                _twb[(_t, _wk, _v)]
+                for _wk, _vset in _tvd_hafta_v.items()
+                for _v in _vset
+                if (_t, _wk, _v) in _twb
+            ]
+            if _hafta_terms:
+                _hft = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_hafta_{_bas}_{_t}")
+                model.Add(_hft == sum(_hafta_terms))
+                takim_vardiya_denge_hafta[(_t, _bas)] = _hft
+                _asim = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_tavan_asim_{_bas}_{_t}")
+                model.Add(_hft <= int(TAKIM_VARDIYA_DENGE_MAX_HAFTA) + _asim)
+                takim_vardiya_denge_asim[(_t, _bas)] = _asim
+
+            takim_vardiya_denge_rows.append({
+                "takim": _t,
+                "baslangic": _bas,
+                "agent_sayisi": takim_vardiya_denge_mevcut[_t],
+                "gecmis_kisi_basi_gun": round(_gec / _tvd_olcek, 2),
+                "bu_ay_agentgun_ust_limit": int(
+                    takim_vardiya_denge_agentgun[(_t, _bas)].Proto().domain[-1]),
+                "kapsanan_gun": len(_tvd_gun_v),
+                "kapsanan_hafta": len(_tvd_hafta_v),
+            })
+
+        # ---- ÖN KONTROL ÇIKTISI (solve'dan ÖNCE bakılır) ----
+        _gec_seri = pd.Series({
+            t: takim_vardiya_denge_gecmis[(t, _bas)] / _tvd_olcek for t in _gecerli_t
+        })
+        # bu ay hiç dağıtılmasa objective'e giren sapma ne kadar olurdu?
+        # AĞIRLIK KALİBRASYONU BURADAN YAPILIR: bu sayı × W, denge kaleminin
+        # objective'deki büyüklüğüdür. coverage eksiği 300.000/slot ile kıyasla.
+        _kum0 = pd.Series({t: takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t})
+        _sapma0 = int((_N * _kum0 - _kum0.sum()).abs().sum())
+        print(f"\n=== DENGE KURULDU: '{_bas}' başlangıçlı vardiya ===")
+        print(f"  denge takım sayısı        : {_N}")
+        print(f"  kapsanan gün / hafta      : {len(_tvd_gun_v)} gün, {len(_tvd_hafta_v)} hafta")
+        print(f"  aylık tavan               : {int(TAKIM_VARDIYA_DENGE_MAX_HAFTA)} hafta (SOFT, "
+              f"aşım cezası {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W}, team_week_base üzerinden)")
+        print(f"  GEÇMİŞ kişi başı min/ort/max : {_gec_seri.min():.1f} / "
+              f"{_gec_seri.mean():.1f} / {_gec_seri.max():.1f} gün")
+        print(f"  geçmişte hiç almamış takım   : {int((_gec_seri == 0).sum())}")
+        print(f"  mevcut yayılım (max-min)     : {(_gec_seri.max() - _gec_seri.min()):.1f} kişi başı gün")
+        print(f"  >> AĞIRLIK KALİBRASYONU: bu ay hiç dağıtılmazsa Σ sapma = {_sapma0:,}")
+        print(f"     objective katkısı ≈ {_sapma0:,} × W({TAKIM_VARDIYA_DENGE_W}) "
+              f"= {_sapma0 * int(TAKIM_VARDIYA_DENGE_W):,}")
+        print(f"     (coverage eksiği 300.000/slot ile kıyasla; büyükse W'yi düşür)")
+        print(f"  EN AZ alan 5 takım (bu ay öncelikli):")
+        for _t, _g in _gec_seri.sort_values().head(5).items():
+            print(f"      {_g:>7.1f} gün   {_t}")
+        print(f"  EN ÇOK alan 5 takım (bu ay geri planda):")
+        for _t, _g in _gec_seri.sort_values().tail(5).items():
+            print(f"      {_g:>7.1f} gün   {_t}")
+
+takim_vardiya_denge_df = pd.DataFrame(takim_vardiya_denge_rows)
+
+print(f"\nToplam denge değişkeni: agent_gun={len(takim_vardiya_denge_agentgun)}, "
+      f"kişi_başı={len(takim_vardiya_denge_buay)}, "
+      f"sapma çifti={len(takim_vardiya_denge_sapma)}, "
+      f"tavan aşımı={len(takim_vardiya_denge_asim)}")
+print(f"TAKIM_VARDIYA_DENGE_W = {globals().get('TAKIM_VARDIYA_DENGE_W')} "
+      f"(objective'e [HÜCRE] - OBJECTIVE hücresinde giriyor)")

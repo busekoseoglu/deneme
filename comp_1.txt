@@ -1,299 +1,173 @@
-# %% [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ (SOFT)
-# Geçmişte belirli bir vardiyada KİŞİ BAŞI çok çalışmış takımın o vardiyaya
-# yine yazılmasını pahalı, az çalışmışın yazılmasını bedava yapar.
-# Amaç: aynı kişiler hep aynı vardiyada kalmasın.
+# %% [KONTROL] - TAKIM VARDİYA GEÇMİŞ DENGESİ [RAPOR/SOFT]
+# Ön koşul: [KONTROL] - ÇÖZÜMÜ ÇIKAR (cozum_calisma / cozum_atama)
+#           [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ
+# Denge SOFT'tur: burada "ihlal" yoktur, dağıtımın geçmişe UYUP UYMADIĞI ölçülür.
 #
-# ÖN KOŞUL: [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL) -> takim_vardiya_gecmis_map
-#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA    -> team_week_base
+# ======= 2026-09-11 - YENİ FORMÜLASYONA UYARLANDI =======
+# Kural artık kişi başı kümülatifi ortalamaya yaklaştırmıyor; geçmişten türetilmiş
+# bir CEZA KATSAYISI ile "geçmişte çok almış takım bu ay o vardiyaya girmesin"
+# diyor (bkz. kısıt hücresinin başlığı).
 #
-# ======= 2026-09-11 - FORMÜLASYON DEĞİŞTİ: L1 SAPMA -> KATSAYI CEZASI =======
-# ESKİ (7-11 Eylül): kişi başı kümülatif ortalamaya yaklaştırılıyordu.
-#     kum[t] = gecmis[t] + bu_ay[t]        (bu_ay, x'ten agent-gün / mevcut)
-#     N x kum[t] - Sigma kum = arti - eksi ,  ceza = W x Sigma(arti + eksi)
+# Bunun raporlamaya yansıması: bu ayın katkısı artık modelde bir değişken DEĞİL.
+# Burada doğrudan ÇÖZÜMDEN sayılıyor (cozum_atama), yani modele hiçbir yük
+# bindirmeden. Geçmişle kıyaslanabilir olsun diye SADECE HAFTA İÇİ günler
+# sayılıyor - geçmiş tablo da hafta içi sayıyor.
 #
-# NEDEN BIRAKILDI - GERÇEK PLANDA ÖLÇÜLDÜ (11 Eylül):
-#   W=0 -> hafta içi eksik 13-18 kişi/gün  (eski, iyi hâl)
-#   W=1 -> hafta içi eksik ~30 kişi/gün    (coverage bozuldu)
+# İki soru, iki sütun grubu:
+#   "önceden ne kadar vardı" -> gecmis_ham_agent_gun / gecmis_kisi_basi_gun
+#   "bu ay ne verildi"       -> bu_ay_agent_gun / bu_ay_kisi_basi_gun / bu_ay_hafta
 #
-# Sebebi ağırlık değil YAPI. İki kusuru vardı:
-#
-#   1) GRANÜLERLİK ŞİŞMESİ. Bir takım o vardiyaya ancak TAM HAFTA girebiliyor
-#      (hafta içi takım base kilidi). "Kişi başı kümülatif eşit olsun" hedefine
-#      yaklaşmanın tek yolu her takımı sırayla o vardiyaya sokmak; bu da talep
-#      gerektirmese bile vardiyayı şişiriyor. Toplamı COVERAGE belirlemeli,
-#      denge yalnızca KİMİN gireceğini seçmeli - eski kural ikisini karıştırdı.
-#
-#   2) N ÇARPANI. Ortalamayı bölmeden hesaplamak için sapma takım sayısıyla
-#      çarpılıyordu. Takım sayısı büyük olduğu için terim W=1'de bile onlarca
-#      milyona çıkıyor ve coverage'ı (eksik slot 50.000 / 300.000) eziyordu.
-#      W tamsayı olduğu için 1'in altına inmek de mümkün değildi.
-#
-# YENİ: geçmişten SABİT bir ceza katsayısı türetilip takımın o vardiyadaki her
-# base haftasına uygulanıyor.
-#
-#     w[t]  = max(0, gecmis_kisi_basi[t] - ortalama)        x OLCEK, tamsayı
-#     ceza  = W x Sigma_t Sigma_hafta  w[t] x team_week_base[(t, hafta, v*)]
-#
-# ŞİŞİRME BASKISI NEDEN YOK: bütün katsayılar >= 0. Modele o vardiyadan bir
-# hafta daha eklemek objective'i ASLA düşürmüyor, yani fazla üretmenin ödülü
-# yok. Ortalamanın ALTINDA kalan takım için katsayı 0 -> girmesi bedava.
-# Üstündeki için pozitif -> girmesi pahalı. Coverage kaç takım gerekiyorsa
-# onu belirliyor, denge o kotayı geçmişte az almışlara yönlendiriyor.
-#
-# KÜMÜLATİF MUHASEBE ARTIK MODELDE DEĞİL VERİDE. Model bu ayın katkısını
-# kümülatife eklemiyor; gerek de yok, çünkü geçmiş tablo her ay yeniden
-# üretiliyor ve bu ayın katkısı gelecek ayın verisine kendiliğinden giriyor.
-#
-# BUNUN İKİ YAN FAYDASI:
-#   - x'ten agent-gün sayımı KALKTI. Modele bindirilen yük ~sıfır; 11 Eylül'de
-#     hücrenin kernel crash vermesine yol açan bütün yapı (bölme, ara toplam
-#     değişkeni, binlerce x terimi) ortadan kalktı.
-#   - Kişi başı bölen (agent_sayisi) ve katsayı yuvarlaması gerekmiyor;
-#     geçmiş zaten kişi başı geliyor, sistematik yuvarlama hatası bitti.
-#
-# RAPORLAMA: "bu ay hangi takıma ne kadar verildi" artık çözümden
-# ([KONTROL] - TAKIM VARDİYA GEÇMİŞ DENGESİ hücresinde cozum_atama'dan)
-# hesaplanıyor - modele değişken eklemeden.
-# ============================================================================
-#
-# AYLIK TAVAN AYNI KALDI: takım o vardiyada ayda en fazla
-# TAKIM_VARDIYA_DENGE_MAX_HAFTA hafta (SOFT, aşım cezası ayrı ağırlıkta).
-# Tavan başka bir iş yapıyor - "takım ay boyu aynı vardiyada park etmesin",
-# yani gündüz rotasyonunun kardeşi. Denge ise "geçmişte az almışa ver".
-#
-# TAVAN NEDEN SOFT: [HÜCRE] - HAFTALIK TAKIM BASE KAPASİTE KORUMASI her hafta o
-# vardiyaya yeterli takım seçilmesini ZORUNLU kılıyor. Tavan HARD olsaydı ikisi
-# çelişip INFEASIBLE verebilirdi.
-#
-# Vardiya BAŞLANGIÇ SAATİNDEN eşleşir, koddan değil (kodlar aydan aya değişir):
-#     TAKIM_VARDIYA_DENGE_BASLANGICLARI = ("15:00", "00:00")
-#
-# 00:00 NOTU: AYDA MAX 2 HAFTA GECE/AKŞAM (HARD) kuralına dokunulmaz. Denge onun
-# ALTINDA çalışır; çakışmada HARD her zaman kazanır.
-#
-# NOT: TAKIM_VARDIYA_DENGE_OLCEK yalnızca katsayıyı tamsayıya çevirmek için
-# kullanılıyor. TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL bu hücrede artık ÖLÜ
-# (x'ten sayım kalktığı için); CONFIG'de durması zararsız.
+# Ham geçmişin satır satır hâli Excel'de ayrıca var: TAKIM_VARDIYA_GECMIS_HAM.
+# ========================================================
 
-_tvd_gerekli = [
-    "ENABLE_TAKIM_VARDIYA_DENGE", "TAKIM_VARDIYA_DENGE_BASLANGICLARI",
-    "TAKIM_VARDIYA_DENGE_W", "TAKIM_VARDIYA_DENGE_MAX_HAFTA",
-    "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W", "TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN",
-    "TAKIM_VARDIYA_DENGE_OLCEK",
-]
-_tvd_eksik = [k for k in _tvd_gerekli if k not in globals()]
-if _tvd_eksik:
-    raise SystemExit(
-        f"CONFIG'de tanımlı olmalı: {_tvd_eksik} -> [CONFIG] hücresini çalıştır."
-    )
+takim_vardiya_denge_sonuc_df = pd.DataFrame()
 
-takim_vardiya_denge_katsayi = {}   # (takim, baslangic) -> int   ceza katsayısı (>=0, ölçekli)
-takim_vardiya_denge_gecmis = {}    # (takim, baslangic) -> float geçmiş kişi başı gün
-takim_vardiya_denge_hedef = {}     # baslangic -> float          ortalama (katsayı sıfır noktası)
-takim_vardiya_denge_hafta = {}     # (takim, baslangic) -> IntVar bu ayki base haftası
-takim_vardiya_denge_asim = {}      # (takim, baslangic) -> IntVar tavan aşımı, OBJECTIVE okur
-takim_vardiya_denge_ceza = {}      # (takim, baslangic) -> IntVar w[t] x hafta, OBJECTIVE okur
-takim_vardiya_denge_rows = []
+_kd_katsayi = globals().get("takim_vardiya_denge_katsayi")
+_kd_gecmis = globals().get("takim_vardiya_denge_gecmis", {})
+_kd_hedef = globals().get("takim_vardiya_denge_hedef", {})
+_kd_hafta = globals().get("takim_vardiya_denge_hafta", {})
+_kd_asim = globals().get("takim_vardiya_denge_asim", {})
+_kd_ceza = globals().get("takim_vardiya_denge_ceza", {})
+_kd_ham_map = globals().get("takim_vardiya_gecmis_ham_map", {})
+_kd_mevcut_map = globals().get("takim_mevcut_map", {})
+_kd_solver = globals().get("solver")
 
-# OBJECTIVE hücresi takim_vardiya_denge_sapma'yı (arti, eksi) ikilisi olarak
-# okuyor. Formülasyon değişti ama ARAYÜZ KORUNUYOR ki OBJECTIVE hücresine
-# dokunmak gerekmesin: birinci eleman ceza değişkeni, ikincisi sabit 0.
-takim_vardiya_denge_sapma = {}
-
-if not ENABLE_TAKIM_VARDIYA_DENGE:
-    print("ENABLE_TAKIM_VARDIYA_DENGE = False -> takım vardiya geçmiş dengesi KURULMADI.")
-    print("Hiçbir değişken yaratılmadı, objective'e ceza girmeyecek.")
+if not _kd_katsayi:
+    print("Takım vardiya denge değişkeni yok "
+          "(ENABLE_TAKIM_VARDIYA_DENGE = False ya da kısıt hücresi çalışmadı) - kontrol atlandı.")
+elif _kd_solver is None:
+    print("solver yok - önce [KONTROL 0] - SOLVER hücresini çalıştır.")
+elif "cozum_atama" not in globals():
+    print("cozum_atama yok - önce [KONTROL] - ÇÖZÜMÜ ÇIKAR hücresini çalıştır.")
 else:
-    _tvd_gecmis_map = globals().get("takim_vardiya_gecmis_map")
-    if not _tvd_gecmis_map:
-        raise SystemExit(
-            "takim_vardiya_gecmis_map yok/boş. Önce [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL) "
-            "hücresini çalıştır. (Dengeyi bilinçli olarak kapatmak için "
-            "CONFIG'de ENABLE_TAKIM_VARDIYA_DENGE = False yap.)"
-        )
-    if "team_week_base" not in globals():
-        raise SystemExit(
-            "team_week_base yok. Önce [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA hücresini çalıştır."
-        )
+    _kd_w = int(globals().get("TAKIM_VARDIYA_DENGE_W", 0))
+    _kd_saat = globals().get("saat", {})
 
-    import math
-
-    _tvd_olcek = int(TAKIM_VARDIYA_DENGE_OLCEK)
-    _tvd_w = int(TAKIM_VARDIYA_DENGE_W)
-    _tvd_arife_kod = globals().get("arife_ozel_vardiya_kodlari", set())
-    _tvd_eksik_vars = float(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN)
-    # Ocak-Ağustos ~176 hafta içi günü; bunun üstü veri hatasıdır.
-    _TVD_MAX_GECMIS = 400.0
-
-    # --- (hafta, vardiya) -> başlangıç saati ---
-    _tvd_wk_bas = {}
-    for _ds in PLAN_GUNLER:
-        _wk = day_week[_ds]
-        for _v in gun_vardiyalari.get(_ds, []):
-            if _v in _tvd_arife_kod:
-                continue
-            if (_wk, _v) not in _tvd_wk_bas and (_ds, _v) in saat:
-                _tvd_wk_bas[(_wk, _v)] = str(saat[(_ds, _v)][0]).strip()[:5]
-
-    _tvd_takimlar = sorted({str(t).strip() for t in TAKIMLAR})
-
-    # --- geçmiş veri ile plan takımlarının eşleşmesi ---
-    _tvd_gecmis_takimlar = {str(k[0]).strip() for k in _tvd_gecmis_map}
-    _tvd_eslesmeyen = [t for t in _tvd_takimlar if t not in _tvd_gecmis_takimlar]
-    _tvd_fazla = sorted(_tvd_gecmis_takimlar - set(_tvd_takimlar))
-    if _tvd_eslesmeyen:
-        print(f"!!! UYARI: plandaki {len(_tvd_eslesmeyen)} takımın geçmiş tabloda HİÇ kaydı yok "
-              f"-> {_tvd_eksik_vars} kişi başı gün sayılacak "
-              f"(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN).")
-        for _t in _tvd_eslesmeyen[:10]:
-            print(f"      {_t}")
-        if len(_tvd_eslesmeyen) > 10:
-            print(f"      ... ve {len(_tvd_eslesmeyen) - 10} takım daha")
-        print("    Takım adı 'working_main_group | teamleader_name' formatında eşleşir;")
-        print("    eşleşmeyen çoksa geçmiş tablodaki yazımı kontrol et.")
-    if _tvd_fazla:
-        print(f"NOT: geçmiş tabloda olup planda OLMAYAN {len(_tvd_fazla)} takım var "
-              f"(kapanmış/değişmiş ekipler) - denge hesabına girmiyorlar.")
-
-    print(f"\nFormülasyon: KATSAYI CEZASI (11 Eylül'de L1 sapmadan değiştirildi)")
-    print(f"Ölçek ×{_tvd_olcek}  |  W = {_tvd_w}  |  "
-          f"tavan {int(TAKIM_VARDIYA_DENGE_MAX_HAFTA)} hafta "
-          f"(aşım {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W})")
-
-    # tek paylaşımlı sıfır değişkeni - OBJECTIVE arayüzünü korumak için
-    _tvd_sifir = model.NewIntVar(0, 0, "tvd_sabit_sifir")
-
-    # ================== HER DENGE VARDİYASI İÇİN AYRI HESAP ==================
-    for _bas in TAKIM_VARDIYA_DENGE_BASLANGICLARI:
-        _bas = str(_bas).strip()[:5]
-
-        # bu başlangıçlı vardiyanın açık olduğu (hafta -> vardiya kodları)
-        _tvd_hafta_v = {}
-        for (_wk, _v), _b in _tvd_wk_bas.items():
-            if _b == _bas:
-                _tvd_hafta_v.setdefault(_wk, set()).add(_v)
-
-        if not _tvd_hafta_v:
-            print(f"\n!!! UYARI: '{_bas}' başlangıçlı vardiya planda HİÇBİR haftada yok "
-                  f"-> denge kurulmadı.")
-            print(f"    Plandaki başlangıç saatleri: {sorted(set(_tvd_wk_bas.values()))}")
+    # --- BU AY: çözümden agent-gün sayımı (hafta içi, başlangıç saatine göre) ---
+    # Modele değişken eklemeden, sadece çözüm okunarak yapılıyor.
+    _kd_buay_ag = {}          # (takim, baslangic) -> agent-gün
+    for (_a, _ds), _v in cozum_atama.items():
+        if cozum_calisma.get((_a, _ds), 0) != 1 or _v is None:
             continue
-
-        # --- o vardiyayı FİİLEN alabilen takımlar (base seçeneği olanlar) ---
-        _tvd_uygun = []
-        for _t in _tvd_takimlar:
-            if any((_t, _wk, _v) in team_week_base
-                   for _wk, _vset in _tvd_hafta_v.items() for _v in _vset):
-                _tvd_uygun.append(_t)
-        if len(_tvd_uygun) < 2:
-            print(f"\n!!! UYARI: '{_bas}' için o vardiyayı alabilen takım sayısı "
-                  f"{len(_tvd_uygun)} -> denge anlamsız, atlandı.")
+        if pd.to_datetime(_ds).weekday() > 4:
+            continue          # geçmiş sadece hafta içi sayıyor
+        _st = _kd_saat.get((_ds, _v))
+        if not _st:
             continue
+        _b = str(_st[0]).strip()[:5]
+        _t = agent_team.get(str(_a).strip())
+        if _t is None or pd.isna(_t):
+            continue
+        _key = (str(_t).strip(), _b)
+        _kd_buay_ag[_key] = _kd_buay_ag.get(_key, 0) + 1
 
-        # --- geçmiş kişi başı gün + veri sağlığı ---
-        _gec = {}
-        for _t in _tvd_uygun:
-            _v_ham = float(_tvd_gecmis_map.get((_t, _bas), _tvd_eksik_vars))
-            if not math.isfinite(_v_ham) or _v_ham < 0:
-                raise SystemExit(
-                    f"Geçmiş kişi başı gün GEÇERSİZ: takim={_t}, baslangic={_bas}, "
-                    f"deger={_v_ham}. [HÜCRE 3D] gun_agent_ratio kolonunu kontrol et."
-                )
-            if _v_ham > _TVD_MAX_GECMIS:
-                raise SystemExit(
-                    f"Geçmiş kişi başı gün ABSÜRT BÜYÜK: takim={_t}, baslangic={_bas}, "
-                    f"deger={_v_ham} (sınır {_TVD_MAX_GECMIS}). gun_agent_ratio yanlış "
-                    f"bölenle hesaplanmış ya da satırlar birden fazla kesitten toplanmış."
-                )
-            _gec[_t] = _v_ham
-            takim_vardiya_denge_gecmis[(_t, _bas)] = _v_ham
+    _kd_rows = []
+    for (_t, _b), _w_t in sorted(_kd_katsayi.items()):
+        _n = _kd_mevcut_map.get(_t)
+        _ag = int(_kd_buay_ag.get((_t, _b), 0))
+        _hf = (int(_kd_solver.Value(_kd_hafta[(_t, _b)]))
+               if (_t, _b) in _kd_hafta else None)
+        _as = (int(_kd_solver.Value(_kd_asim[(_t, _b)]))
+               if (_t, _b) in _kd_asim else 0)
+        _gec_kb = float(_kd_gecmis.get((_t, _b), 0.0))
+        _kd_rows.append({
+            "takim": _t,
+            "baslangic": _b,
+            "agent_sayisi": _n,
+            # --- GEÇMİŞ (Ocak - önceki ay sonu) ---
+            "gecmis_ham_agent_gun": round(float(_kd_ham_map.get((_t, _b), 0.0)), 1),
+            "gecmis_kisi_basi_gun": round(_gec_kb, 2),
+            "ortalama": round(float(_kd_hedef.get(_b, 0.0)), 2),
+            "ortalamadan_fark": round(_gec_kb - float(_kd_hedef.get(_b, 0.0)), 2),
+            "ceza_katsayisi": int(_w_t),
+            "hafta_basina_ceza": int(_w_t) * _kd_w,
+            # --- BU AY (çözümden) ---
+            "bu_ay_agent_gun": _ag,
+            "bu_ay_kisi_basi_gun": (round(_ag / _n, 2) if _n else None),
+            "bu_ay_hafta": _hf,
+            "tavan_asimi_hafta": _as,
+            "odenen_ceza": (int(_kd_solver.Value(_kd_ceza[(_t, _b)])) * _kd_w
+                            if (_t, _b) in _kd_ceza else 0),
+        })
 
-        # --- KATSAYI: ortalamanın ÜSTÜNDEKİ kadar, altındakiler 0 ---
-        # Sıfır noktası ortalama. Altındaki takımlar için katsayı 0 olduğu için
-        # o vardiyaya girmeleri bedava; üstündekiler için pozitif.
-        _ort = sum(_gec.values()) / len(_gec)
-        takim_vardiya_denge_hedef[_bas] = _ort
+    takim_vardiya_denge_sonuc_df = pd.DataFrame(_kd_rows).sort_values(
+        ["baslangic", "gecmis_kisi_basi_gun"]
+    ).reset_index(drop=True)
 
-        for _t in _tvd_uygun:
-            _w_t = max(0, int(round(_tvd_olcek * (_gec[_t] - _ort))))
-            takim_vardiya_denge_katsayi[(_t, _bas)] = _w_t
+    _toplam_asan = 0
+    print("=== TAKIM VARDİYA GEÇMİŞ DENGESİ (katsayı cezası formülasyonu) ===")
+    for _b, _g in takim_vardiya_denge_sonuc_df.groupby("baslangic"):
+        _asan = _g[_g["tavan_asimi_hafta"] > 0]
+        _toplam_asan += len(_asan)
+        _alan = _g[_g["bu_ay_agent_gun"] > 0]
+        _bedava = _g[_g["ceza_katsayisi"] == 0]
+        _cezali = _g[_g["ceza_katsayisi"] > 0]
 
-            _hafta_terms = [
-                team_week_base[(_t, _wk, _v)]
-                for _wk, _vset in _tvd_hafta_v.items()
-                for _v in _vset
-                if (_t, _wk, _v) in team_week_base
-            ]
-            if not _hafta_terms:
-                continue
+        print(f"\n--- '{_b}' başlangıçlı vardiya | {len(_g)} takım ---")
+        print(f"  bu ay o vardiyada çalışan takım : {len(_alan)} / {len(_g)}")
+        print(f"  bu ay dağıtılan AGENT-GÜN       : {int(_g['bu_ay_agent_gun'].sum()):,}")
+        print(f"  katsayısı 0 (bedava) takım      : {len(_bedava)}")
+        print(f"  cezalı takım                    : {len(_cezali)}")
 
-            _hft = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_hafta_{_bas}_{_t}")
-            model.Add(_hft == sum(_hafta_terms))
-            takim_vardiya_denge_hafta[(_t, _bas)] = _hft
+        # --- KURALIN ÇALIŞTIĞININ KANITI ---
+        # Katsayısı 0 olanlar o vardiyayı ALMALI, cezalılar ALMAMALI.
+        if len(_bedava) and len(_cezali):
+            _b_ort = _bedava["bu_ay_kisi_basi_gun"].mean()
+            _c_ort = _cezali["bu_ay_kisi_basi_gun"].mean()
+            print(f"  bu ay kişi başı ortalama:")
+            print(f"      katsayısı 0 olanlar         : {_b_ort:.2f} gün")
+            print(f"      cezalı olanlar              : {_c_ort:.2f} gün")
+            if pd.notna(_b_ort) and pd.notna(_c_ort):
+                print(f"      fark                        : {_b_ort - _c_ort:+.2f} gün  "
+                      f"({'DOĞRU YÖN (az almışa verildi)' if _b_ort > _c_ort else 'DİKKAT: çok almışa veriliyor'})")
 
-            # ---- aylık tavan (SOFT) ----
-            _asim = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_tavan_asim_{_bas}_{_t}")
-            model.Add(_hft <= int(TAKIM_VARDIYA_DENGE_MAX_HAFTA) + _asim)
-            takim_vardiya_denge_asim[(_t, _bas)] = _asim
+        if len(_g) and _g["gecmis_kisi_basi_gun"].nunique() > 1:
+            _kor = _g["gecmis_kisi_basi_gun"].corr(_g["bu_ay_kisi_basi_gun"])
+            print(f"  geçmiş-bu ay korelasyonu        : {_kor:+.2f} "
+                  f"({'DOĞRU YÖN' if _kor < 0 else 'DİKKAT: çok alana veriliyor'})")
 
-            # ---- katsayı cezası ----
-            # Katsayı 0 ise değişken üretilmez: objective'e hiç terim girmez,
-            # model gereksiz büyümez.
-            if _w_t > 0:
-                _cz = model.NewIntVar(0, _w_t * len(_tvd_hafta_v),
-                                      f"tvd_ceza_{_bas}_{_t}")
-                model.Add(_cz == _w_t * _hft)
-                takim_vardiya_denge_ceza[(_t, _bas)] = _cz
-                takim_vardiya_denge_sapma[(_t, _bas)] = (_cz, _tvd_sifir)
+        print(f"  ödenen ceza (objective'e giren)  : {int(_g['odenen_ceza'].sum()):,}")
+        print(f"  aylık tavanı ({int(globals().get('TAKIM_VARDIYA_DENGE_MAX_HAFTA', 0))} hafta) "
+              f"aşan takım: {len(_asan)}")
+        if len(_asan):
+            print("    (kapasite koruması zorladı - tavan SOFT olduğu için model durmadı)")
+            for _, _r in _asan.head(5).iterrows():
+                print(f"      {_r['takim']}: {int(_r['bu_ay_hafta'])} hafta "
+                      f"(+{int(_r['tavan_asimi_hafta'])})")
 
-            takim_vardiya_denge_rows.append({
-                "takim": _t,
-                "baslangic": _bas,
-                "gecmis_kisi_basi_gun": round(_gec[_t], 2),
-                "ortalama": round(_ort, 2),
-                "ortalamadan_fark": round(_gec[_t] - _ort, 2),
-                "ceza_katsayisi": _w_t,
-                "hafta_basina_ceza": _w_t * _tvd_w,
-                "secilebilir_hafta": len(_hafta_terms),
-                "kapsanan_hafta": len(_tvd_hafta_v),
-            })
+        _kol = ["gecmis_kisi_basi_gun", "ortalamadan_fark", "ceza_katsayisi",
+                "bu_ay_agent_gun", "bu_ay_kisi_basi_gun", "bu_ay_hafta"]
+        print("\n  GEÇMİŞTE EN ÇOK alan 5 takım (bu ay girmemeli):")
+        print(_g.nlargest(5, "gecmis_kisi_basi_gun")[["takim"] + _kol].to_string(index=False))
+        print("\n  GEÇMİŞTE EN AZ alan 5 takım (bu ay girmeli):")
+        print(_g.nsmallest(5, "gecmis_kisi_basi_gun")[["takim"] + _kol].to_string(index=False))
 
-        # ---- ÖN KONTROL ÇIKTISI (solve'dan ÖNCE bakılır) ----
-        _ks = pd.Series({_t: takim_vardiya_denge_katsayi[(_t, _bas)] for _t in _tvd_uygun})
-        _gs = pd.Series(_gec)
-        _cezali = int((_ks > 0).sum())
-        print(f"\n=== DENGE KURULDU: '{_bas}' başlangıçlı vardiya ===")
-        print(f"  o vardiyayı alabilen takım   : {len(_tvd_uygun)}")
-        print(f"  kapsanan hafta               : {len(_tvd_hafta_v)} "
-              f"{sorted(_tvd_hafta_v)}")
-        print(f"  GEÇMİŞ kişi başı min/ort/max : {_gs.min():.2f} / {_ort:.2f} / "
-              f"{_gs.max():.2f} gün")
-        print(f"  yayılım (max-min)            : {(_gs.max() - _gs.min()):.2f} kişi başı gün")
-        print(f"  katsayısı 0 olan takım       : {len(_ks) - _cezali} "
-              f"(ortalamanın altında - o vardiyaya girmesi BEDAVA)")
-        print(f"  cezalı takım                 : {_cezali} (ortalamanın üstünde)")
-        print(f"  >> AĞIRLIK KALİBRASYONU")
-        print(f"     en pahalı takımın 1 haftası: {int(_ks.max()) * _tvd_w:,} puan "
-              f"(katsayı {int(_ks.max())} × W {_tvd_w})")
-        if _cezali:
-            print(f"     cezalı takım ortalaması    : "
-                  f"{int(_ks[_ks > 0].mean()) * _tvd_w:,} puan/hafta")
-        print(f"     KIYAS: eksik slot 50.000 (buffer içi) / 300.000 (buffer altı), "
-              f"tavan aşımı {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W}")
-        print(f"     Hafta başına ceza eksik slot bedelini geçiyorsa coverage'dan "
-              f"taviz verilir - W'yi düşür.")
-        print(f"  GEÇMİŞTE EN ÇOK alan 5 takım (bu ay pahalı):")
-        for _t, _g in _gs.sort_values(ascending=False).head(5).items():
-            print(f"      {_g:>7.2f} gün  katsayı {takim_vardiya_denge_katsayi[(_t, _bas)]:>6}   {_t}")
-        print(f"  GEÇMİŞTE EN AZ alan 5 takım (bu ay bedava):")
-        for _t, _g in _gs.sort_values().head(5).items():
-            print(f"      {_g:>7.2f} gün  katsayı {takim_vardiya_denge_katsayi[(_t, _bas)]:>6}   {_t}")
+    # --- DENGENİN OBJECTIVE'E FİİLEN KATTIĞI PUAN ---
+    # Coverage bozulduğunda "suçlu denge mi" sorusunun tek kesin cevabı bu.
+    _kd_toplam_ceza = int(takim_vardiya_denge_sonuc_df["odenen_ceza"].sum())
+    _kd_asim_katki = 0
+    if _kd_asim and "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W" in globals():
+        _kd_asim_katki = sum(int(_kd_solver.Value(_v)) for _v in _kd_asim.values()) \
+            * int(TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W)
+    print(f"\n=== DENGENİN OBJECTIVE'E KATKISI ===")
+    print(f"  katsayı cezası     : {_kd_toplam_ceza:,}")
+    print(f"  tavan aşımı cezası : {_kd_asim_katki:,}")
+    print(f"  DENGE TOPLAM       : {_kd_toplam_ceza + _kd_asim_katki:,}")
+    try:
+        _kd_obj = _kd_solver.ObjectiveValue()
+        _kd_oran = (100 * (_kd_toplam_ceza + _kd_asim_katki) / _kd_obj) if _kd_obj else 0
+        print(f"  toplam objective   : {_kd_obj:,.0f}")
+        print(f"  dengenin payı      : %{_kd_oran:.3f}")
+        if _kd_oran > 1:
+            print("  !!! Denge objective'in %1'inden fazlasını tutuyor - coverage'a "
+                  "bulaşmaya başlıyor olabilir. COVERAGE_GUNLUK'u önceki run ile kıyasla.")
+    except Exception:
+        pass
+    print(f"  KIYAS: eksik slot 50.000 (buffer içi) / 300.000 (buffer altı)")
 
-takim_vardiya_denge_df = pd.DataFrame(takim_vardiya_denge_rows)
+    if "kaydet" in globals():
+        kaydet("Takım vardiya aylık tavanı (denge)", _toplam_asan, tur="SOFT")
 
-print(f"\nToplam denge değişkeni: hafta={len(takim_vardiya_denge_hafta)}, "
-      f"ceza={len(takim_vardiya_denge_ceza)}, "
-      f"tavan aşımı={len(takim_vardiya_denge_asim)}")
-print(f"TAKIM_VARDIYA_DENGE_W = {globals().get('TAKIM_VARDIYA_DENGE_W')} "
-      f"(objective'e [HÜCRE] - OBJECTIVE hücresinde giriyor)")
-print("Bu kural artık x'e HİÇ dokunmuyor - modele bindirdiği yük ihmal edilebilir.")
+    print(f"\nDetay: takim_vardiya_denge_sonuc_df "
+          f"({takim_vardiya_denge_sonuc_df.shape[0]} satır) -> Excel TAKIM_VARDIYA_DENGE")
+    print("  geçmişin satır satır ham hâli        -> Excel TAKIM_VARDIYA_GECMIS_HAM")

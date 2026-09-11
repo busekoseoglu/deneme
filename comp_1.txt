@@ -116,6 +116,14 @@ else:
             "CONFIG'de ENABLE_TAKIM_VARDIYA_DENGE = False yap.)"
         )
 
+    # 2026-09-11: Python'un builtin sum()'i LinearExpr'lerde ic ice (nested)
+    # ifade agaci kurar; binlerce terimde ortools bunu ozyinelemeli duzlestirir
+    # ve derin yiginla segfault riski dogar. LinearExpr.Sum listeyi DUZ alir.
+    try:
+        _lin_sum = cp_model.LinearExpr.Sum
+    except Exception:
+        _lin_sum = sum
+
     _tvd_olcek = int(TAKIM_VARDIYA_DENGE_OLCEK)
     _tvd_hs_dahil = bool(TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL)
     _tvd_arife_kod = globals().get("arife_ozel_vardiya_kodlari", set())
@@ -272,7 +280,7 @@ else:
 
             _ag_ust = len(_terms)
             _ag = model.NewIntVar(0, _ag_ust, f"tvd_agentgun_{_bas}_{_t}")
-            model.Add(_ag == sum(_terms))
+            model.Add(_ag == _lin_sum(_terms))
             takim_vardiya_denge_agentgun[(_t, _bas)] = _ag
 
             # ---- kişi başı (ölçekli) = KATSAYI x agent_gun ----
@@ -319,11 +327,24 @@ else:
                 _tvd_hafta_v.setdefault(_wk, set()).add(_v)
 
         # ---- ölçekli L1 sapma: N*kumulatif[t] - Σ kumulatif ----
+        # 2026-09-11: Σ kumulatif ARA DEĞİŞKENE alındı. Eskiden bu toplam
+        # (N terim) sapma kısıtının HER BİRİNE açık açık yazılıyordu -> N x N
+        # terim, 40 takımda 1.600 nonzero ve N tane YOĞUN kısıt. Artık tek bir
+        # _toplam değişkeni var; sapma kısıtları 4 terime düşüyor.
+        # Matematik birebir aynı, sadece seyrek (sparse) hâli.
         _N = len(_gecerli_t)
-        _toplam_kum = sum(_kum_ifadeler)
+        _gec_sabit_toplam = sum(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
+        _kb_listesi = [takim_vardiya_denge_buay[(t, _bas)] for t in _gecerli_t]
         _max_gec = max(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
-        _max_buay = max(takim_vardiya_denge_buay[(t, _bas)].Proto().domain[-1]
-                        for t in _gecerli_t)
+        _kb_ustleri = [takim_vardiya_denge_buay[(t, _bas)].Proto().domain[-1]
+                       for t in _gecerli_t]
+        _max_buay = max(_kb_ustleri)
+
+        _toplam_kum = model.NewIntVar(
+            _gec_sabit_toplam, _gec_sabit_toplam + sum(_kb_ustleri),
+            f"tvd_toplam_kum_{_bas}")
+        model.Add(_toplam_kum == _gec_sabit_toplam + _lin_sum(_kb_listesi))
+
         _lim = _N * (_max_gec + _max_buay) + 1
 
 
@@ -345,7 +366,7 @@ else:
             ]
             if _hafta_terms:
                 _hft = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_hafta_{_bas}_{_t}")
-                model.Add(_hft == sum(_hafta_terms))
+                model.Add(_hft == _lin_sum(_hafta_terms))
                 takim_vardiya_denge_hafta[(_t, _bas)] = _hft
                 _asim = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_tavan_asim_{_bas}_{_t}")
                 model.Add(_hft <= int(TAKIM_VARDIYA_DENGE_MAX_HAFTA) + _asim)
@@ -404,3 +425,22 @@ print(f"\nToplam denge değişkeni: agent_gun={len(takim_vardiya_denge_agentgun)
       f"tavan aşımı={len(takim_vardiya_denge_asim)}")
 print(f"TAKIM_VARDIYA_DENGE_W = {globals().get('TAKIM_VARDIYA_DENGE_W')} "
       f"(objective'e [HÜCRE] - OBJECTIVE hücresinde giriyor)")
+
+# ===== 2026-09-11 - BU HÜCRENİN MODELE BİNDİRDİĞİ YÜK =====
+# Kernel crash avında lazım: bu kural açıkken model ne kadar büyüyor?
+# agent-gün toplamları x'in binlerce boolean'ına dokunuyor; sayı beklenenden
+# çok büyükse (ör. milyonlar) kapsamı daraltmak gerekir.
+if ENABLE_TAKIM_VARDIYA_DENGE and takim_vardiya_denge_agentgun:
+    _yuk_bool = sum(
+        int(_v.Proto().domain[-1]) for _v in takim_vardiya_denge_agentgun.values()
+    )
+    _yuk_var = (len(takim_vardiya_denge_agentgun) + len(takim_vardiya_denge_buay)
+                + 2 * len(takim_vardiya_denge_sapma) + len(takim_vardiya_denge_hafta)
+                + len(takim_vardiya_denge_asim)
+                + len(TAKIM_VARDIYA_DENGE_BASLANGICLARI))
+    print(f"\nBU HÜCRENİN YÜKÜ: ~{_yuk_var:,} yeni değişken | "
+          f"agent-gün toplamlarında ~{_yuk_bool:,} x terimi")
+    print("  Model boyutunu [KONTROL 0] - SOLVER hücresi solve'dan önce basıyor.")
+    print("  x terimi yüz binleri geçiyorsa kapsam daraltılmalı "
+          "(ör. denge vardiyası sayısını azalt).")
+# ===========================================================

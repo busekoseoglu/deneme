@@ -1,92 +1,85 @@
 # %% [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ (SOFT)
-# Takımların geçmişte belirli bir vardiyada KİŞİ BAŞI kaç gün çalıştığına bakıp
-# bu ayın dağıtımını dengeler. Amaç: yıl sonunda tüm takımların o vardiyadaki
-# kişi başı çalışma günü birbirine yakın olsun - aynı kişiler hep aynı vardiyada
-# kalmasın.
+# Geçmişte belirli bir vardiyada KİŞİ BAŞI çok çalışmış takımın o vardiyaya
+# yine yazılmasını pahalı, az çalışmışın yazılmasını bedava yapar.
+# Amaç: aynı kişiler hep aynı vardiyada kalmasın.
 #
-# ÖN KOŞUL: [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL)
-#             -> takim_vardiya_gecmis_map (gun_agent_ratio toplamı, float)
-#             -> takim_mevcut_map         (agent_sayisi = kişi başı bölen)
-#           [HÜCRE 9] - CP-SAT MODEL      -> x
-#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA -> team_week_base (sadece tavan için)
+# ÖN KOŞUL: [HÜCRE 3D] - TAKIM VARDİYA GEÇMİŞİ (SQL) -> takim_vardiya_gecmis_map
+#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA    -> team_week_base
 #
-# ============ 2026-09-07 - BİRİM DEĞİŞTİ: TAKIM-GÜN -> KİŞİ BAŞI GÜN ============
-# ESKİ: gecmis ve bu_ay'ın ikisi de takım-gündü.
-#         bu_ay[t] = Σ_hafta team_week_base[(t,wk,v)] × hafta içi gün
-#       Takım büyüklüğü hesaba girmiyordu, normalizasyon yapılmıyordu.
+# ======= 2026-09-11 - FORMÜLASYON DEĞİŞTİ: L1 SAPMA -> KATSAYI CEZASI =======
+# ESKİ (7-11 Eylül): kişi başı kümülatif ortalamaya yaklaştırılıyordu.
+#     kum[t] = gecmis[t] + bu_ay[t]        (bu_ay, x'ten agent-gün / mevcut)
+#     N x kum[t] - Sigma kum = arti - eksi ,  ceza = W x Sigma(arti + eksi)
 #
-# YENİ: geçmiş tablo gun_agent_ratio taşıyor = total_gun_sayisi / agent_sayisi,
-#       yani kişi başı gün (bkz. [HÜCRE 3D]). Bu ayın katkısı
-#       team_week_base'ten TÜRETİLEMEZ - base takım-gün üretir, kişi-gün değil.
-#       Bu yüzden bu ay doğrudan x'ten sayılır:
+# NEDEN BIRAKILDI - GERÇEK PLANDA ÖLÇÜLDÜ (11 Eylül):
+#   W=0 -> hafta içi eksik 13-18 kişi/gün  (eski, iyi hâl)
+#   W=1 -> hafta içi eksik ~30 kişi/gün    (coverage bozuldu)
 #
-#         agent_gun[t] = Σ_{a ∈ takım t} Σ_{hafta içi gün} Σ_{v: başlangıç = v*} x[(a,ds,v)]
-#         bu_ay_kb[t]  = agent_gun[t] / agent_sayisi[t]        (kişi başı)
+# Sebebi ağırlık değil YAPI. İki kusuru vardı:
 #
-#       Bölen VERİDEN gelir (agent_sayisi kolonu). Geçmişteki gun_agent_ratio
-#       hangi bölenle hesaplandıysa model de aynısını kullanır; notebook kendi
-#       saymaz. [HÜCRE 3D] ratio == total / agent_sayisi tutuyor mu diye bakar.
-#       team_size_map'e düşülürse iki taraf sessizce ayrışabilir - o yüzden
-#       fallback olsa bile UYARI basılır.
+#   1) GRANÜLERLİK ŞİŞMESİ. Bir takım o vardiyaya ancak TAM HAFTA girebiliyor
+#      (hafta içi takım base kilidi). "Kişi başı kümülatif eşit olsun" hedefine
+#      yaklaşmanın tek yolu her takımı sırayla o vardiyaya sokmak; bu da talep
+#      gerektirmese bile vardiyayı şişiriyor. Toplamı COVERAGE belirlemeli,
+#      denge yalnızca KİMİN gireceğini seçmeli - eski kural ikisini karıştırdı.
 #
-# BUNUN İKİ SONUCU VAR:
-#   1) Muafiyetli ve devir alan agentlar artık sayıya GİRİYOR. x'ten saydığımız
-#      için takım base'ini takip etmeyenler de dahil - yeni verinin semantiği bu.
-#   2) Denge artık x'i DOĞRUDAN itiyor (eskiden sadece base'i seçiyordu), yani
-#      coverage ile daha sert yarışıyor. Ağırlık kalibrasyonu kritik.
-# ================================================================================
+#   2) N ÇARPANI. Ortalamayı bölmeden hesaplamak için sapma takım sayısıyla
+#      çarpılıyordu. Takım sayısı büyük olduğu için terim W=1'de bile onlarca
+#      milyona çıkıyor ve coverage'ı (eksik slot 50.000 / 300.000) eziyordu.
+#      W tamsayı olduğu için 1'in altına inmek de mümkün değildi.
 #
-# MATEMATİK (her denge vardiyası v* için ayrı ayrı):
+# YENİ: geçmişten SABİT bir ceza katsayısı türetilip takımın o vardiyadaki her
+# base haftasına uygulanıyor.
 #
-#   kum[t] = gecmis_kb[t] + bu_ay_kb[t]          (ikisi de ×OLCEK ölçekli tamsayı)
-#   N × kum[t] − Σ_t kum[t]  =  sapma_arti[t] − sapma_eksi[t]
-#   ceza = TAKIM_VARDIYA_DENGE_W × Σ (sapma_arti + sapma_eksi)      [OBJECTIVE'de]
+#     w[t]  = max(0, gecmis_kisi_basi[t] - ortalama)        x OLCEK, tamsayı
+#     ceza  = W x Sigma_t Sigma_hafta  w[t] x team_week_base[(t, hafta, v*)]
 #
-# N ile çarpım BÖLME YAPMAMAK içindir: ortalamadan sapmanın N katı, tamsayı kalır.
-# Ceza ortalamadan UZAKLIKLA ORANTILI - sert bir eşik/kesme yok. Geçmişte kişi
-# başı az almış takımın sapma_eksi'si büyük olduğu için model o vardiyayı ona
-# vermeye meyleder; çok almışa vermemeye. Kimse sıfırlanmaz, herkes ortalamaya
-# doğru itilir ("insafsız olmasın").
+# ŞİŞİRME BASKISI NEDEN YOK: bütün katsayılar >= 0. Modele o vardiyadan bir
+# hafta daha eklemek objective'i ASLA düşürmüyor, yani fazla üretmenin ödülü
+# yok. Ortalamanın ALTINDA kalan takım için katsayı 0 -> girmesi bedava.
+# Üstündeki için pozitif -> girmesi pahalı. Coverage kaç takım gerekiyorsa
+# onu belirliyor, denge o kotayı geçmişte az almışlara yönlendiriyor.
 #
-# ÖLÇEK / BÖLME: kişi başı gün ondalıklı, CP-SAT tamsayı ister. Her şey
-# TAKIM_VARDIYA_DENGE_OLCEK ile çarpılır (100 -> 0.01 gün hassasiyet).
+# KÜMÜLATİF MUHASEBE ARTIK MODELDE DEĞİL VERİDE. Model bu ayın katkısını
+# kümülatife eklemiyor; gerek de yok, çünkü geçmiş tablo her ay yeniden
+# üretiliyor ve bu ayın katkısı gelecek ayın verisine kendiliğinden giriyor.
 #
-# 2026-09-11: bölme MODELDEN ÇIKARILDI. Önce _kb değişkeni iki eşitsizlikle
-# floor(OLCEK*agent_gun/mevcut)'a bağlanıyordu; bu bölme yapısı CP-SAT
-# presolve'unu şişirip KERNEL CRASH verdi. Artık bölme Python'da bir kez
-# yapılıp katsayıya gömülüyor:  kb == round(OLCEK/mevcut) * agent_gun
-# Model tarafında kalan tek işlem sabitle çarpma.
+# BUNUN İKİ YAN FAYDASI:
+#   - x'ten agent-gün sayımı KALKTI. Modele bindirilen yük ~sıfır; 11 Eylül'de
+#     hücrenin kernel crash vermesine yol açan bütün yapı (bölme, ara toplam
+#     değişkeni, binlerce x terimi) ortadan kalktı.
+#   - Kişi başı bölen (agent_sayisi) ve katsayı yuvarlaması gerekmiyor;
+#     geçmiş zaten kişi başı geliyor, sistematik yuvarlama hatası bitti.
 #
-# Katsayı tam sayıya yuvarlandığı için takım başına SİSTEMATİK hata var
-# (30 kişilik takımda %10). Kullanıcı kabul etti: kural SOFT, "nice to have".
-# Hücre hatanın büyüklüğünü ve en kötü takımları basıyor.
+# RAPORLAMA: "bu ay hangi takıma ne kadar verildi" artık çözümden
+# ([KONTROL] - TAKIM VARDİYA GEÇMİŞ DENGESİ hücresinde cozum_atama'dan)
+# hesaplanıyor - modele değişken eklemeden.
+# ============================================================================
 #
-# HAFTA İÇİ: geçmiş veri sadece hafta içi sayıyor, bu ay da öyle sayılır
-# (TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL). Resmi tatil / arife hafta içiyse
-# geçmişe girmiş -> bu ayda da SAYILIR. (Eski hücre onları hariç tutuyordu.)
-#
-# AYLIK TAVAN AYNI KALDI: hâlâ team_week_base üzerinden, HAFTA bazında.
+# AYLIK TAVAN AYNI KALDI: takım o vardiyada ayda en fazla
+# TAKIM_VARDIYA_DENGE_MAX_HAFTA hafta (SOFT, aşım cezası ayrı ağırlıkta).
 # Tavan başka bir iş yapıyor - "takım ay boyu aynı vardiyada park etmesin",
-# yani gündüz rotasyonunun kardeşi. Denge ise "yıl içinde kişi başı adalet".
-# İkisi aynı değişkene bağlanırsa ikisi de bulanıklaşır.
-#
-# Vardiya BAŞLANGIÇ SAATİNDEN eşleşir, koddan değil (kodlar aydan aya değişir).
-# Yeni vardiya dengelemek için CONFIG'deki tuple'a eklemek yeterli:
-#     TAKIM_VARDIYA_DENGE_BASLANGICLARI = ("15:00", "00:00")
-#
-# 00:00 NOTU: AYDA MAX 2 HAFTA GECE/AKŞAM (HARD) kuralına dokunulmaz. Denge onun
-# ALTINDA çalışır - tavanı zorlamaz, 2 haftalık hakkın hangi takımlara gideceğini
-# belirler. Denge SOFT olduğu için çakışmada HARD her zaman kazanır.
+# yani gündüz rotasyonunun kardeşi. Denge ise "geçmişte az almışa ver".
 #
 # TAVAN NEDEN SOFT: [HÜCRE] - HAFTALIK TAKIM BASE KAPASİTE KORUMASI her hafta o
 # vardiyaya yeterli takım seçilmesini ZORUNLU kılıyor. Tavan HARD olsaydı ikisi
 # çelişip INFEASIBLE verebilirdi.
+#
+# Vardiya BAŞLANGIÇ SAATİNDEN eşleşir, koddan değil (kodlar aydan aya değişir):
+#     TAKIM_VARDIYA_DENGE_BASLANGICLARI = ("15:00", "00:00")
+#
+# 00:00 NOTU: AYDA MAX 2 HAFTA GECE/AKŞAM (HARD) kuralına dokunulmaz. Denge onun
+# ALTINDA çalışır; çakışmada HARD her zaman kazanır.
+#
+# NOT: TAKIM_VARDIYA_DENGE_OLCEK yalnızca katsayıyı tamsayıya çevirmek için
+# kullanılıyor. TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL bu hücrede artık ÖLÜ
+# (x'ten sayım kalktığı için); CONFIG'de durması zararsız.
 
 _tvd_gerekli = [
     "ENABLE_TAKIM_VARDIYA_DENGE", "TAKIM_VARDIYA_DENGE_BASLANGICLARI",
     "TAKIM_VARDIYA_DENGE_W", "TAKIM_VARDIYA_DENGE_MAX_HAFTA",
     "TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W", "TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN",
-    "TAKIM_VARDIYA_DENGE_OLCEK", "TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL",
+    "TAKIM_VARDIYA_DENGE_OLCEK",
 ]
 _tvd_eksik = [k for k in _tvd_gerekli if k not in globals()]
 if _tvd_eksik:
@@ -94,21 +87,18 @@ if _tvd_eksik:
         f"CONFIG'de tanımlı olmalı: {_tvd_eksik} -> [CONFIG] hücresini çalıştır."
     )
 
-takim_vardiya_denge_agentgun = {}  # (takim, baslangic) -> IntVar   bu ayki AGENT-gün
-takim_vardiya_denge_buay = {}      # (takim, baslangic) -> IntVar   bu ayki kişi başı (ölçekli)
-takim_vardiya_denge_hafta = {}     # (takim, baslangic) -> IntVar   bu ayki hafta (tavan için)
-takim_vardiya_denge_sapma = {}     # (takim, baslangic) -> (arti, eksi)  OBJECTIVE okur
-takim_vardiya_denge_asim = {}      # (takim, baslangic) -> IntVar   tavan aşımı, OBJECTIVE okur
-takim_vardiya_denge_gecmis = {}    # (takim, baslangic) -> int      sabit geçmiş (ölçekli)
-takim_vardiya_denge_mevcut = {}    # takim -> int                   kullanılan bölen
-takim_vardiya_denge_katsayi = {}   # takim -> int                   OLCEK/mevcut, yuvarlanmış
-# 2026-09-11: ust sinirlar Python'da tutulur. Onceden IntVar'in protobuf
-# referansindan okunuyordu; o referans modelin dizisine DOGRUDAN bakar ve
-# sonraki NewIntVar cagrilari diziyi yeniden konumlandirinca bosa duser ->
-# segfault. Hucre model kurulurken KERNEL CRASH veriyordu (11 Eylul).
-takim_vardiya_denge_ag_ust = {}    # (takim, baslangic) -> int  agent-gün üst sınırı
-takim_vardiya_denge_kb_ust = {}    # (takim, baslangic) -> int  kişi başı üst sınırı
+takim_vardiya_denge_katsayi = {}   # (takim, baslangic) -> int   ceza katsayısı (>=0, ölçekli)
+takim_vardiya_denge_gecmis = {}    # (takim, baslangic) -> float geçmiş kişi başı gün
+takim_vardiya_denge_hedef = {}     # baslangic -> float          ortalama (katsayı sıfır noktası)
+takim_vardiya_denge_hafta = {}     # (takim, baslangic) -> IntVar bu ayki base haftası
+takim_vardiya_denge_asim = {}      # (takim, baslangic) -> IntVar tavan aşımı, OBJECTIVE okur
+takim_vardiya_denge_ceza = {}      # (takim, baslangic) -> IntVar w[t] x hafta, OBJECTIVE okur
 takim_vardiya_denge_rows = []
+
+# OBJECTIVE hücresi takim_vardiya_denge_sapma'yı (arti, eksi) ikilisi olarak
+# okuyor. Formülasyon değişti ama ARAYÜZ KORUNUYOR ki OBJECTIVE hücresine
+# dokunmak gerekmesin: birinci eleman ceza değişkeni, ikincisi sabit 0.
+takim_vardiya_denge_sapma = {}
 
 if not ENABLE_TAKIM_VARDIYA_DENGE:
     print("ENABLE_TAKIM_VARDIYA_DENGE = False -> takım vardiya geçmiş dengesi KURULMADI.")
@@ -121,59 +111,29 @@ else:
             "hücresini çalıştır. (Dengeyi bilinçli olarak kapatmak için "
             "CONFIG'de ENABLE_TAKIM_VARDIYA_DENGE = False yap.)"
         )
-
-    # 2026-09-11: Python'un builtin sum()'i LinearExpr'lerde ic ice (nested)
-    # ifade agaci kurar; binlerce terimde ortools bunu ozyinelemeli duzlestirir
-    # ve derin yiginla segfault riski dogar. LinearExpr.Sum listeyi DUZ alir.
-    try:
-        _lin_sum = cp_model.LinearExpr.Sum
-    except Exception:
-        _lin_sum = sum
+    if "team_week_base" not in globals():
+        raise SystemExit(
+            "team_week_base yok. Önce [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA hücresini çalıştır."
+        )
 
     import math
 
     _tvd_olcek = int(TAKIM_VARDIYA_DENGE_OLCEK)
-    # Bir takımın tek bir vardiyada kişi başı çalışabileceği makul üst sınır.
-    # Ocak-Ağustos ~176 hafta içi günü; 400 bol güvenli pay bırakır. Aşılırsa
-    # veri bozuk demektir ve hücre okunur hatayla durur - sessiz devam ederse
-    # CP-SAT'a taşan alan sınırı gider, çökme riski doğar.
-    _TVD_MAX_GECMIS = 400.0
-    _tvd_hs_dahil = bool(TAKIM_VARDIYA_DENGE_HAFTA_SONU_DAHIL)
+    _tvd_w = int(TAKIM_VARDIYA_DENGE_W)
     _tvd_arife_kod = globals().get("arife_ozel_vardiya_kodlari", set())
     _tvd_eksik_vars = float(TAKIM_VARDIYA_GECMIS_EKSIK_VARSAYILAN)
+    # Ocak-Ağustos ~176 hafta içi günü; bunun üstü veri hatasıdır.
+    _TVD_MAX_GECMIS = 400.0
 
-    # --- BÖLEN: veriden gelen agent_sayisi; yoksa team_size_map'e düşer ---
-    _tvd_mevcut_map = globals().get("takim_mevcut_map") or {}
-    _tvd_team_size = globals().get("team_size_map") or {}
-    if not _tvd_mevcut_map:
-        print("!!! UYARI: takim_mevcut_map YOK - kişi başı bölen team_size_map'ten alınacak.")
-        print("    (takim_mevcut_map, [HÜCRE 3D]'de agent_sayisi kolonundan üretilir.)")
-        print("    Bu, iş biriminin veride kullandığı bölenden FARKLI olabilir; farkı")
-        print("    kimse görmez, denge sessizce yanlış ölçer. [HÜCRE 3D]'yi çalıştır.")
-
-    # --- sayılan plan günleri: hafta içi (resmi tatil / arife DAHİL) ---
-    _tvd_gunler = [
-        ds for ds in PLAN_GUNLER
-        if _tvd_hs_dahil or pd.to_datetime(ds).weekday() in (0, 1, 2, 3, 4)
-    ]
-
-    # --- (gün, vardiya) -> başlangıç saati ---
-    _tvd_gun_bas = {}
-    for _ds in _tvd_gunler:
+    # --- (hafta, vardiya) -> başlangıç saati ---
+    _tvd_wk_bas = {}
+    for _ds in PLAN_GUNLER:
+        _wk = day_week[_ds]
         for _v in gun_vardiyalari.get(_ds, []):
             if _v in _tvd_arife_kod:
                 continue
-            if (_ds, _v) in saat:
-                _tvd_gun_bas[(_ds, _v)] = str(saat[(_ds, _v)][0]).strip()[:5]
-
-    # --- takım -> agent listesi ---
-    _tvd_uyeler = {}
-    for _a in AGENTS:
-        _a = str(_a).strip()
-        _t = agent_team.get(_a)
-        if _t is None or pd.isna(_t):
-            continue
-        _tvd_uyeler.setdefault(str(_t).strip(), []).append(_a)
+            if (_wk, _v) not in _tvd_wk_bas and (_ds, _v) in saat:
+                _tvd_wk_bas[(_wk, _v)] = str(saat[(_ds, _v)][0]).strip()[:5]
 
     _tvd_takimlar = sorted({str(t).strip() for t in TAKIMLAR})
 
@@ -195,296 +155,145 @@ else:
         print(f"NOT: geçmiş tabloda olup planda OLMAYAN {len(_tvd_fazla)} takım var "
               f"(kapanmış/değişmiş ekipler) - denge hesabına girmiyorlar.")
 
-    # --- her takım için BÖLEN belirle, iki kaynak arasındaki farkı raporla ---
-    _tvd_bolen_fark = []
-    _tvd_bolensiz = []
-    for _t in _tvd_takimlar:
-        _n_veri = _tvd_mevcut_map.get(_t)
-        _n_model = _tvd_team_size.get(_t)
-        if _n_model is None:
-            _n_model = len(_tvd_uyeler.get(_t, []))
-        _n = _n_veri if _n_veri else _n_model
-        if not _n or int(_n) <= 0:
-            _tvd_bolensiz.append(_t)
-            continue
-        takim_vardiya_denge_mevcut[_t] = int(_n)
-        if _n_veri and _n_model and int(_n_veri) != int(_n_model):
-            _tvd_bolen_fark.append({
-                "takim": _t, "veriden_agent_sayisi": int(_n_veri),
-                "modeldeki_mevcut": int(_n_model),
-                "fark": int(_n_veri) - int(_n_model),
-            })
+    print(f"\nFormülasyon: KATSAYI CEZASI (11 Eylül'de L1 sapmadan değiştirildi)")
+    print(f"Ölçek ×{_tvd_olcek}  |  W = {_tvd_w}  |  "
+          f"tavan {int(TAKIM_VARDIYA_DENGE_MAX_HAFTA)} hafta "
+          f"(aşım {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W})")
 
-    takim_vardiya_denge_bolen_fark_df = pd.DataFrame(_tvd_bolen_fark)
-    if _tvd_bolen_fark:
-        print(f"\n!!! DİKKAT: {len(_tvd_bolen_fark)} takımda veriden gelen agent_sayisi ile "
-              f"modeldeki mevcut FARKLI.")
-        print("    VERİDEN gelen kullanıldı (geçmiş kişi başı günler onunla hesaplandığı için).")
-        print("    Fark büyükse geçmiş tablo eski bir kadro kesitiyle üretilmiş olabilir.")
-        print(takim_vardiya_denge_bolen_fark_df
-              .reindex(takim_vardiya_denge_bolen_fark_df["fark"].abs()
-                       .sort_values(ascending=False).index)
-              .head(10).to_string(index=False))
-    if _tvd_bolensiz:
-        print(f"\n!!! UYARI: {len(_tvd_bolensiz)} takımın mevcudu bulunamadı/0 "
-              f"-> denge hesabına girmiyorlar: {_tvd_bolensiz[:5]}")
-
-    print(f"\nSayılan plan günü: {len(_tvd_gunler)} "
-          f"({'hafta sonu DAHİL' if _tvd_hs_dahil else 'sadece hafta içi'}, "
-          f"resmi tatil/arife dahil)")
-    print(f"Ölçek: ×{_tvd_olcek}  (kişi başı gün -> tamsayı, {1 / _tvd_olcek:g} gün hassasiyet)")
-
-    # 2026-09-11: bölme katsayıya gömüldüğü için yuvarlama hatası burada görünür.
-    # Hata SİSTEMATİK - katsayısı aşağı yuvarlanan takımın katkısı hep eksik
-    # sayılır, model ona o vardiyayı olduğundan ucuz görür.
-    _kh = []
-    for _t, _n in sorted(takim_vardiya_denge_mevcut.items()):
-        _tam = _tvd_olcek / _n
-        _yuv = max(1, int(round(_tam)))
-        _kh.append({"takim": _t, "agent_sayisi": _n, "tam_katsayi": round(_tam, 2),
-                    "kullanilan": _yuv,
-                    "hata_yuzde": round(100 * abs(_yuv - _tam) / _tam, 1)})
-    _kh_df = pd.DataFrame(_kh)
-    if len(_kh_df):
-        print(f"Katsayı yuvarlama hatası: ortalama {_kh_df['hata_yuzde'].mean():.1f}%, "
-              f"en kötü {_kh_df['hata_yuzde'].max():.1f}%")
-        _kh_kotu = _kh_df[_kh_df["hata_yuzde"] > 10]
-        if len(_kh_kotu):
-            print(f"  %10'dan fazla sapan {len(_kh_kotu)} takım "
-                  f"(SOFT kural olduğu için kabul edildi - 11 Eylül):")
-            print(_kh_kotu.sort_values("hata_yuzde", ascending=False)
-                  .head(8).to_string(index=False))
-        _kh_dip = _kh_df[_kh_df["tam_katsayi"] < 0.5]
-        if len(_kh_dip):
-            print(f"  !!! {len(_kh_dip)} takımın tam katsayısı 0.5'in ALTINDA "
-                  f"-> 1'e yükseltildi, katkısı ciddi şekilde ABARTILIYOR:")
-            print(_kh_dip.to_string(index=False))
+    # tek paylaşımlı sıfır değişkeni - OBJECTIVE arayüzünü korumak için
+    _tvd_sifir = model.NewIntVar(0, 0, "tvd_sabit_sifir")
 
     # ================== HER DENGE VARDİYASI İÇİN AYRI HESAP ==================
     for _bas in TAKIM_VARDIYA_DENGE_BASLANGICLARI:
         _bas = str(_bas).strip()[:5]
 
-        # bu başlangıçlı vardiyanın açık olduğu (gün, vardiya) çiftleri
-        _tvd_gun_v = {}
-        for (_ds, _v), _b in _tvd_gun_bas.items():
-            if _b == _bas:
-                _tvd_gun_v.setdefault(_ds, []).append(_v)
-
-        if not _tvd_gun_v:
-            print(f"\n!!! UYARI: '{_bas}' başlangıçlı vardiya sayılan günlerin HİÇBİRİNDE yok "
-                  f"-> denge kurulmadı.")
-            print(f"    Plandaki başlangıç saatleri: {sorted(set(_tvd_gun_bas.values()))}")
-            continue
-
-        # ---- takım başına agent-gün ve kişi başı değişkenleri ----
-        # 2026-09-11: flush'lı KONTROL NOKTALARI. Hücre model kurulurken kernel
-        # crash verdiğinde Jupyter tamponu kaybediyor ve nerede öldüğü
-        # görünmüyordu. flush=True ile son basılan satır crash noktasını verir.
-        print(f"  [kurulum] '{_bas}': agent-gün değişkenleri "
-              f"({len(_tvd_takimlar)} takım, {len(_tvd_gun_v)} gün)...", flush=True)
-        _kum_ifadeler, _gecerli_t = [], []
-        for _tsira, _t in enumerate(_tvd_takimlar, start=1):
-            _n = takim_vardiya_denge_mevcut.get(_t)
-            if not _n:
-                continue
-            _terms = []
-            for _ds, _vler in _tvd_gun_v.items():
-                for _a in _tvd_uyeler.get(_t, []):
-                    for _v in _vler:
-                        if (_a, _ds, _v) in x:
-                            _terms.append(x[(_a, _ds, _v)])
-            if not _terms:
-                continue      # bu takımın hiçbir agentı o vardiyada çalışamıyor
-
-            _ag_ust = len(_terms)
-            _ag = model.NewIntVar(0, _ag_ust, f"tvd_agentgun_{_bas}_{_t}")
-            model.Add(_ag == _lin_sum(_terms))
-            takim_vardiya_denge_agentgun[(_t, _bas)] = _ag
-            takim_vardiya_denge_ag_ust[(_t, _bas)] = _ag_ust
-
-            # ---- kişi başı (ölçekli) = KATSAYI x agent_gun ----
-            # 2026-09-11: BÖLME KALDIRILDI. Eskiden _kb, floor(OLCEK*_ag/_n)'e
-            # iki eşitsizlikle bağlanıyordu; bu "değişkenin bölümü" yapısı
-            # CP-SAT presolve'unu şişirip KERNEL CRASH'e yol açtı (11 Eylül).
-            #
-            # _n sabit olduğu için bölme Python'da bir kez yapılır ve katsayıya
-            # gömülür: 20 kişilik takım -> 100/20 = 5. Model tarafında kalan
-            # tek şey sabitle çarpma, yani düz lineer.
-            #
-            # KATSAYI TAM SAYI OLMAK ZORUNDA, dolayısıyla yuvarlanır:
-            #   20 kişi -> 100/20 = 5      (tam)
-            #   30 kişi -> 100/30 = 3.33 -> 3   (%10 eksik sayılır)
-            # Hata rastgele değil SİSTEMATİK: mevcudu 100'ün tam böleni olmayan
-            # takımın katkısı hep aynı yönde sapar. Kullanıcı 11 Eylül'de kabul
-            # etti - kural SOFT ve "nice to have", bu hassasiyet yeterli.
-            # Daha hassas istenirse TAKIM_VARDIYA_DENGE_OLCEK 1000 yapılır
-            # (hata %1'e iner), o zaman TAKIM_VARDIYA_DENGE_W 10 kat düşürülmeli.
-            _c = max(1, int(round(_tvd_olcek / _n)))
-            takim_vardiya_denge_katsayi[_t] = _c
-            _kb_ust = _c * _ag_ust
-            _kb = model.NewIntVar(0, _kb_ust, f"tvd_buay_kb_{_bas}_{_t}")
-            model.Add(_kb == _c * _ag)          # DÜZ LİNEER - bölme yok
-            takim_vardiya_denge_buay[(_t, _bas)] = _kb
-            takim_vardiya_denge_kb_ust[(_t, _bas)] = _kb_ust
-
-            _gec_ham = float(_tvd_gecmis_map.get((_t, _bas), _tvd_eksik_vars))
-            if not math.isfinite(_gec_ham) or _gec_ham < 0:
-                raise SystemExit(
-                    f"Geçmiş kişi başı gün GEÇERSİZ: takim={_t}, baslangic={_bas}, "
-                    f"deger={_gec_ham}. [HÜCRE 3D] gun_agent_ratio kolonunu kontrol et."
-                )
-            if _gec_ham > _TVD_MAX_GECMIS:
-                raise SystemExit(
-                    f"Geçmiş kişi başı gün ABSÜRT BÜYÜK: takim={_t}, "
-                    f"baslangic={_bas}, deger={_gec_ham} (sınır {_TVD_MAX_GECMIS}). "
-                    f"gun_agent_ratio yanlış bölenle hesaplanmış ya da satırlar "
-                    f"birden fazla kesitten toplanmış olabilir."
-                )
-            _gec = int(round(_tvd_olcek * _gec_ham))
-            takim_vardiya_denge_gecmis[(_t, _bas)] = _gec
-            _kum_ifadeler.append(_gec + _kb)
-            _gecerli_t.append(_t)
-            if _tsira % 10 == 0:
-                print(f"    ... {_tsira}/{len(_tvd_takimlar)} takım "
-                      f"({len(_gecerli_t)} geçerli)", flush=True)
-
-        if len(_gecerli_t) < 2:
-            print(f"\n!!! UYARI: '{_bas}' için denge kurulacak takım sayısı {len(_gecerli_t)} "
-                  f"-> denge anlamsız, atlandı.")
-            continue
-
-        # ---- AYLIK TAVAN: hâlâ team_week_base üzerinden, HAFTA bazında ----
-        # (gün bazlı denge ile aynı değişkeni paylaşmaz - bilinçli, bkz. başlık yorumu)
+        # bu başlangıçlı vardiyanın açık olduğu (hafta -> vardiya kodları)
         _tvd_hafta_v = {}
-        _twb = globals().get("team_week_base", {})
-        for _ds in _tvd_gun_v:
-            _wk = day_week[_ds]
-            for _v in _tvd_gun_v[_ds]:
+        for (_wk, _v), _b in _tvd_wk_bas.items():
+            if _b == _bas:
                 _tvd_hafta_v.setdefault(_wk, set()).add(_v)
 
-        # ---- ölçekli L1 sapma: N*kumulatif[t] - Σ kumulatif ----
-        # 2026-09-11: Σ kumulatif ARA DEĞİŞKENE alındı. Eskiden bu toplam
-        # (N terim) sapma kısıtının HER BİRİNE açık açık yazılıyordu -> N x N
-        # terim, 40 takımda 1.600 nonzero ve N tane YOĞUN kısıt. Artık tek bir
-        # _toplam değişkeni var; sapma kısıtları 4 terime düşüyor.
-        # Matematik birebir aynı, sadece seyrek (sparse) hâli.
-        _N = len(_gecerli_t)
-        _gec_sabit_toplam = sum(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
-        _kb_listesi = [takim_vardiya_denge_buay[(t, _bas)] for t in _gecerli_t]
-        _max_gec = max(takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t)
-        _kb_ustleri = [takim_vardiya_denge_kb_ust[(t, _bas)] for t in _gecerli_t]
-        _max_buay = max(_kb_ustleri)
+        if not _tvd_hafta_v:
+            print(f"\n!!! UYARI: '{_bas}' başlangıçlı vardiya planda HİÇBİR haftada yok "
+                  f"-> denge kurulmadı.")
+            print(f"    Plandaki başlangıç saatleri: {sorted(set(_tvd_wk_bas.values()))}")
+            continue
 
-        _toplam_kum = model.NewIntVar(
-            _gec_sabit_toplam, _gec_sabit_toplam + sum(_kb_ustleri),
-            f"tvd_toplam_kum_{_bas}")
-        model.Add(_toplam_kum == _gec_sabit_toplam + _lin_sum(_kb_listesi))
+        # --- o vardiyayı FİİLEN alabilen takımlar (base seçeneği olanlar) ---
+        _tvd_uygun = []
+        for _t in _tvd_takimlar:
+            if any((_t, _wk, _v) in team_week_base
+                   for _wk, _vset in _tvd_hafta_v.items() for _v in _vset):
+                _tvd_uygun.append(_t)
+        if len(_tvd_uygun) < 2:
+            print(f"\n!!! UYARI: '{_bas}' için o vardiyayı alabilen takım sayısı "
+                  f"{len(_tvd_uygun)} -> denge anlamsız, atlandı.")
+            continue
 
-        _lim = _N * (_max_gec + _max_buay) + 1
-        # int64 tasmasi CP-SAT'in C++ tarafinda cokmeye yol acabilir; burada dur.
-        if _lim > 2 ** 62:
-            raise SystemExit(
-                f"Sapma alan sınırı taşıyor: _lim={_lim} (N={_N}, "
-                f"max_gecmis={_max_gec}, max_buay={_max_buay}). Geçmiş veride "
-                f"absürt değer var ya da ölçek çok büyük."
-            )
+        # --- geçmiş kişi başı gün + veri sağlığı ---
+        _gec = {}
+        for _t in _tvd_uygun:
+            _v_ham = float(_tvd_gecmis_map.get((_t, _bas), _tvd_eksik_vars))
+            if not math.isfinite(_v_ham) or _v_ham < 0:
+                raise SystemExit(
+                    f"Geçmiş kişi başı gün GEÇERSİZ: takim={_t}, baslangic={_bas}, "
+                    f"deger={_v_ham}. [HÜCRE 3D] gun_agent_ratio kolonunu kontrol et."
+                )
+            if _v_ham > _TVD_MAX_GECMIS:
+                raise SystemExit(
+                    f"Geçmiş kişi başı gün ABSÜRT BÜYÜK: takim={_t}, baslangic={_bas}, "
+                    f"deger={_v_ham} (sınır {_TVD_MAX_GECMIS}). gun_agent_ratio yanlış "
+                    f"bölenle hesaplanmış ya da satırlar birden fazla kesitten toplanmış."
+                )
+            _gec[_t] = _v_ham
+            takim_vardiya_denge_gecmis[(_t, _bas)] = _v_ham
 
+        # --- KATSAYI: ortalamanın ÜSTÜNDEKİ kadar, altındakiler 0 ---
+        # Sıfır noktası ortalama. Altındaki takımlar için katsayı 0 olduğu için
+        # o vardiyaya girmeleri bedava; üstündekiler için pozitif.
+        _ort = sum(_gec.values()) / len(_gec)
+        takim_vardiya_denge_hedef[_bas] = _ort
 
-        print(f"  [kurulum] '{_bas}': {len(_gecerli_t)} takım hazır, "
-              f"sapma kısıtları (alan sınırı {_lim:,})...", flush=True)
+        for _t in _tvd_uygun:
+            _w_t = max(0, int(round(_tvd_olcek * (_gec[_t] - _ort))))
+            takim_vardiya_denge_katsayi[(_t, _bas)] = _w_t
 
-        for _t in _gecerli_t:
-            _gec = takim_vardiya_denge_gecmis[(_t, _bas)]
-            _kb = takim_vardiya_denge_buay[(_t, _bas)]
-
-            _arti = model.NewIntVar(0, _lim, f"tvd_sapma_arti_{_bas}_{_t}")
-            _eksi = model.NewIntVar(0, _lim, f"tvd_sapma_eksi_{_bas}_{_t}")
-            model.Add(_N * (_gec + _kb) - _toplam_kum == _arti - _eksi)
-            takim_vardiya_denge_sapma[(_t, _bas)] = (_arti, _eksi)
-
-            # ---- aylık tavan (SOFT): en fazla TAKIM_VARDIYA_DENGE_MAX_HAFTA hafta ----
             _hafta_terms = [
-                _twb[(_t, _wk, _v)]
+                team_week_base[(_t, _wk, _v)]
                 for _wk, _vset in _tvd_hafta_v.items()
                 for _v in _vset
-                if (_t, _wk, _v) in _twb
+                if (_t, _wk, _v) in team_week_base
             ]
-            if _hafta_terms:
-                _hft = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_hafta_{_bas}_{_t}")
-                model.Add(_hft == _lin_sum(_hafta_terms))
-                takim_vardiya_denge_hafta[(_t, _bas)] = _hft
-                _asim = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_tavan_asim_{_bas}_{_t}")
-                model.Add(_hft <= int(TAKIM_VARDIYA_DENGE_MAX_HAFTA) + _asim)
-                takim_vardiya_denge_asim[(_t, _bas)] = _asim
+            if not _hafta_terms:
+                continue
+
+            _hft = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_hafta_{_bas}_{_t}")
+            model.Add(_hft == sum(_hafta_terms))
+            takim_vardiya_denge_hafta[(_t, _bas)] = _hft
+
+            # ---- aylık tavan (SOFT) ----
+            _asim = model.NewIntVar(0, len(_tvd_hafta_v), f"tvd_tavan_asim_{_bas}_{_t}")
+            model.Add(_hft <= int(TAKIM_VARDIYA_DENGE_MAX_HAFTA) + _asim)
+            takim_vardiya_denge_asim[(_t, _bas)] = _asim
+
+            # ---- katsayı cezası ----
+            # Katsayı 0 ise değişken üretilmez: objective'e hiç terim girmez,
+            # model gereksiz büyümez.
+            if _w_t > 0:
+                _cz = model.NewIntVar(0, _w_t * len(_tvd_hafta_v),
+                                      f"tvd_ceza_{_bas}_{_t}")
+                model.Add(_cz == _w_t * _hft)
+                takim_vardiya_denge_ceza[(_t, _bas)] = _cz
+                takim_vardiya_denge_sapma[(_t, _bas)] = (_cz, _tvd_sifir)
 
             takim_vardiya_denge_rows.append({
                 "takim": _t,
                 "baslangic": _bas,
-                "agent_sayisi": takim_vardiya_denge_mevcut[_t],
-                "katsayi": takim_vardiya_denge_katsayi.get(_t),
-                "katsayi_hata_yuzde": round(
-                    100 * abs(takim_vardiya_denge_katsayi.get(_t, 0)
-                              - _tvd_olcek / takim_vardiya_denge_mevcut[_t])
-                    / (_tvd_olcek / takim_vardiya_denge_mevcut[_t]), 1),
-                "gecmis_kisi_basi_gun": round(_gec / _tvd_olcek, 2),
-                "bu_ay_agentgun_ust_limit": takim_vardiya_denge_ag_ust[(_t, _bas)],
-                "kapsanan_gun": len(_tvd_gun_v),
+                "gecmis_kisi_basi_gun": round(_gec[_t], 2),
+                "ortalama": round(_ort, 2),
+                "ortalamadan_fark": round(_gec[_t] - _ort, 2),
+                "ceza_katsayisi": _w_t,
+                "hafta_basina_ceza": _w_t * _tvd_w,
+                "secilebilir_hafta": len(_hafta_terms),
                 "kapsanan_hafta": len(_tvd_hafta_v),
             })
 
-        print(f"  [kurulum] '{_bas}': BİTTİ", flush=True)
-
         # ---- ÖN KONTROL ÇIKTISI (solve'dan ÖNCE bakılır) ----
-        _gec_seri = pd.Series({
-            t: takim_vardiya_denge_gecmis[(t, _bas)] / _tvd_olcek for t in _gecerli_t
-        })
-        # bu ay hiç dağıtılmasa objective'e giren sapma ne kadar olurdu?
-        # AĞIRLIK KALİBRASYONU BURADAN YAPILIR: bu sayı × W, denge kaleminin
-        # objective'deki büyüklüğüdür. coverage eksiği 300.000/slot ile kıyasla.
-        _kum0 = pd.Series({t: takim_vardiya_denge_gecmis[(t, _bas)] for t in _gecerli_t})
-        _sapma0 = int((_N * _kum0 - _kum0.sum()).abs().sum())
+        _ks = pd.Series({_t: takim_vardiya_denge_katsayi[(_t, _bas)] for _t in _tvd_uygun})
+        _gs = pd.Series(_gec)
+        _cezali = int((_ks > 0).sum())
         print(f"\n=== DENGE KURULDU: '{_bas}' başlangıçlı vardiya ===")
-        print(f"  denge takım sayısı        : {_N}")
-        print(f"  kapsanan gün / hafta      : {len(_tvd_gun_v)} gün, {len(_tvd_hafta_v)} hafta")
-        print(f"  aylık tavan               : {int(TAKIM_VARDIYA_DENGE_MAX_HAFTA)} hafta (SOFT, "
-              f"aşım cezası {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W}, team_week_base üzerinden)")
-        print(f"  GEÇMİŞ kişi başı min/ort/max : {_gec_seri.min():.1f} / "
-              f"{_gec_seri.mean():.1f} / {_gec_seri.max():.1f} gün")
-        print(f"  geçmişte hiç almamış takım   : {int((_gec_seri == 0).sum())}")
-        print(f"  mevcut yayılım (max-min)     : {(_gec_seri.max() - _gec_seri.min()):.1f} kişi başı gün")
-        print(f"  >> AĞIRLIK KALİBRASYONU: bu ay hiç dağıtılmazsa Σ sapma = {_sapma0:,}")
-        print(f"     objective katkısı ≈ {_sapma0:,} × W({TAKIM_VARDIYA_DENGE_W}) "
-              f"= {_sapma0 * int(TAKIM_VARDIYA_DENGE_W):,}")
-        print(f"     (coverage eksiği 300.000/slot ile kıyasla; büyükse W'yi düşür)")
-        print(f"  EN AZ alan 5 takım (bu ay öncelikli):")
-        for _t, _g in _gec_seri.sort_values().head(5).items():
-            print(f"      {_g:>7.1f} gün   {_t}")
-        print(f"  EN ÇOK alan 5 takım (bu ay geri planda):")
-        for _t, _g in _gec_seri.sort_values().tail(5).items():
-            print(f"      {_g:>7.1f} gün   {_t}")
+        print(f"  o vardiyayı alabilen takım   : {len(_tvd_uygun)}")
+        print(f"  kapsanan hafta               : {len(_tvd_hafta_v)} "
+              f"{sorted(_tvd_hafta_v)}")
+        print(f"  GEÇMİŞ kişi başı min/ort/max : {_gs.min():.2f} / {_ort:.2f} / "
+              f"{_gs.max():.2f} gün")
+        print(f"  yayılım (max-min)            : {(_gs.max() - _gs.min()):.2f} kişi başı gün")
+        print(f"  katsayısı 0 olan takım       : {len(_ks) - _cezali} "
+              f"(ortalamanın altında - o vardiyaya girmesi BEDAVA)")
+        print(f"  cezalı takım                 : {_cezali} (ortalamanın üstünde)")
+        print(f"  >> AĞIRLIK KALİBRASYONU")
+        print(f"     en pahalı takımın 1 haftası: {int(_ks.max()) * _tvd_w:,} puan "
+              f"(katsayı {int(_ks.max())} × W {_tvd_w})")
+        if _cezali:
+            print(f"     cezalı takım ortalaması    : "
+                  f"{int(_ks[_ks > 0].mean()) * _tvd_w:,} puan/hafta")
+        print(f"     KIYAS: eksik slot 50.000 (buffer içi) / 300.000 (buffer altı), "
+              f"tavan aşımı {TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W}")
+        print(f"     Hafta başına ceza eksik slot bedelini geçiyorsa coverage'dan "
+              f"taviz verilir - W'yi düşür.")
+        print(f"  GEÇMİŞTE EN ÇOK alan 5 takım (bu ay pahalı):")
+        for _t, _g in _gs.sort_values(ascending=False).head(5).items():
+            print(f"      {_g:>7.2f} gün  katsayı {takim_vardiya_denge_katsayi[(_t, _bas)]:>6}   {_t}")
+        print(f"  GEÇMİŞTE EN AZ alan 5 takım (bu ay bedava):")
+        for _t, _g in _gs.sort_values().head(5).items():
+            print(f"      {_g:>7.2f} gün  katsayı {takim_vardiya_denge_katsayi[(_t, _bas)]:>6}   {_t}")
 
 takim_vardiya_denge_df = pd.DataFrame(takim_vardiya_denge_rows)
 
-print(f"\nToplam denge değişkeni: agent_gun={len(takim_vardiya_denge_agentgun)}, "
-      f"kişi_başı={len(takim_vardiya_denge_buay)}, "
-      f"sapma çifti={len(takim_vardiya_denge_sapma)}, "
+print(f"\nToplam denge değişkeni: hafta={len(takim_vardiya_denge_hafta)}, "
+      f"ceza={len(takim_vardiya_denge_ceza)}, "
       f"tavan aşımı={len(takim_vardiya_denge_asim)}")
 print(f"TAKIM_VARDIYA_DENGE_W = {globals().get('TAKIM_VARDIYA_DENGE_W')} "
       f"(objective'e [HÜCRE] - OBJECTIVE hücresinde giriyor)")
-
-# ===== 2026-09-11 - BU HÜCRENİN MODELE BİNDİRDİĞİ YÜK =====
-# Kernel crash avında lazım: bu kural açıkken model ne kadar büyüyor?
-# agent-gün toplamları x'in binlerce boolean'ına dokunuyor; sayı beklenenden
-# çok büyükse (ör. milyonlar) kapsamı daraltmak gerekir.
-if ENABLE_TAKIM_VARDIYA_DENGE and takim_vardiya_denge_agentgun:
-    _yuk_bool = sum(takim_vardiya_denge_ag_ust.values())
-    _yuk_var = (len(takim_vardiya_denge_agentgun) + len(takim_vardiya_denge_buay)
-                + 2 * len(takim_vardiya_denge_sapma) + len(takim_vardiya_denge_hafta)
-                + len(takim_vardiya_denge_asim)
-                + len(TAKIM_VARDIYA_DENGE_BASLANGICLARI))
-    print(f"\nBU HÜCRENİN YÜKÜ: ~{_yuk_var:,} yeni değişken | "
-          f"agent-gün toplamlarında ~{_yuk_bool:,} x terimi")
-    print("  Model boyutunu [KONTROL 0] - SOLVER hücresi solve'dan önce basıyor.")
-    print("  x terimi yüz binleri geçiyorsa kapsam daraltılmalı "
-          "(ör. denge vardiyası sayısını azalt).")
-# ===========================================================
+print("Bu kural artık x'e HİÇ dokunmuyor - modele bindirdiği yük ihmal edilebilir.")

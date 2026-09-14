@@ -137,6 +137,20 @@ else:
 
         _kol = ["gecmis_kisi_basi_gun", "ortalamadan_fark", "ceza_katsayisi",
                 "bu_ay_agent_gun", "bu_ay_kisi_basi_gun", "bu_ay_hafta"]
+
+        # 2026-09-11: "BU AY KİM ALDI" listesi eklendi. Önceki hâl yalnızca
+        # geçmişe göre sıralıyordu; bu ayın dağıtımını görmek için tabloyu
+        # Excel'de tekrar sıralamak gerekiyordu.
+        print("\n  BU AY EN ÇOK ALAN 10 takım:")
+        _bu_alan = _g[_g["bu_ay_agent_gun"] > 0].nlargest(10, "bu_ay_agent_gun")
+        if len(_bu_alan):
+            print(_bu_alan[["takim"] + _kol].to_string(index=False))
+            print(f"    bunlardan CEZALI olan: "
+                  f"{int((_bu_alan['ceza_katsayisi'] > 0).sum())} / {len(_bu_alan)}"
+                  f"   (az olması iyi - kural çalışıyorsa cezalılar listede olmamalı)")
+        else:
+            print("    bu ay bu vardiyada hiçbir takım çalışmamış.")
+
         print("\n  GEÇMİŞTE EN ÇOK alan 5 takım (bu ay girmemeli):")
         print(_g.nlargest(5, "gecmis_kisi_basi_gun")[["takim"] + _kol].to_string(index=False))
         print("\n  GEÇMİŞTE EN AZ alan 5 takım (bu ay girmeli):")
@@ -164,6 +178,23 @@ else:
     except Exception:
         pass
     print(f"  KIYAS: eksik slot 50.000 (buffer içi) / 300.000 (buffer altı)")
+
+    # --- W KALİBRASYONU: mevcut ceza büyüklüğü ve önerilen çarpan ---
+    # Hedef: en pahalı takımın 1 haftası 5.000-20.000 bandında olsun
+    # (tavan aşımı 5.000 ile aynı mertebe, eksik slot 50.000'in belirgin altı).
+    _kd_hbc = takim_vardiya_denge_sonuc_df["hafta_basina_ceza"]
+    if len(_kd_hbc) and _kd_hbc.max() > 0:
+        _kd_max_hbc = int(_kd_hbc.max())
+        print(f"\n=== W KALİBRASYONU ===")
+        print(f"  şu anki W                      : {_kd_w}")
+        print(f"  en pahalı takımın 1 haftası    : {_kd_max_hbc:,} puan")
+        print(f"  hedef bant                     : 5.000 - 20.000 puan/hafta")
+        print(f"  ÖNERİLEN W (hedef 10.000 için) : "
+              f"{max(1, round(10000 / (_kd_max_hbc / max(1, _kd_w))))}")
+    elif len(_kd_hbc):
+        print(f"\n=== W KALİBRASYONU ===")
+        print(f"  Bütün katsayılar 0 ya da W=0 - kural etkisiz. "
+              f"W'yi artır ya da geçmiş verideki yayılımı kontrol et.")
 
     if "kaydet" in globals():
         kaydet("Takım vardiya aylık tavanı (denge)", _toplam_asan, tur="SOFT")

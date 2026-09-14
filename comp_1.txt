@@ -45,7 +45,33 @@ else:
 
     # --- BU AY: çözümden agent-gün sayımı (hafta içi, başlangıç saatine göre) ---
     # Modele değişken eklemeden, sadece çözüm okunarak yapılıyor.
-    _kd_buay_ag = {}          # (takim, baslangic) -> agent-gün
+    # 2026-09-14: agent-gün BASE / BASE DIŞI diye AYRIŞTIRILIYOR.
+    # Kural yalnızca team_week_base'e ceza yazıyor, yani sadece takımın base'ini
+    # etkileyebiliyor. Muafiyetli agentlar ve sarkan haftada devir alanlar takım
+    # base'ini TAKİP ETMİYOR - onların 15:00 çalışması kuralın erişemediği bir
+    # atama. İkisini tek sayıda toplamak korelasyonu ölçülemez hâle getiriyordu:
+    # W artıyor, metrik oynamıyor, çünkü metriğin bir kısmı kuralın dışında.
+    _kd_twb = globals().get("team_week_base", {})
+    _kd_dw = globals().get("day_week", {})
+
+    # (takim, hafta) -> o haftanın base başlangıç saati (çözümden)
+    _kd_base_bas = {}
+    if _kd_twb:
+        for (_t_, _wk_, _v_), _var_ in _kd_twb.items():
+            try:
+                if _kd_solver.Value(_var_) != 1:
+                    continue
+            except Exception:
+                continue
+            # bu vardiyanın başlangıcı: o haftanın herhangi bir gününden
+            for _ds_ in PLAN_GUNLER:
+                if _kd_dw.get(_ds_) == _wk_ and (_ds_, _v_) in _kd_saat:
+                    _kd_base_bas[(str(_t_).strip(), _wk_)] = \
+                        str(_kd_saat[(_ds_, _v_)][0]).strip()[:5]
+                    break
+
+    _kd_buay_ag = {}          # (takim, baslangic) -> agent-gün (TOPLAM)
+    _kd_buay_base = {}        # (takim, baslangic) -> base haftalarında olan kısım
     for (_a, _ds), _v in cozum_atama.items():
         if cozum_calisma.get((_a, _ds), 0) != 1 or _v is None:
             continue
@@ -58,12 +84,58 @@ else:
         _t = agent_team.get(str(_a).strip())
         if _t is None or pd.isna(_t):
             continue
-        _key = (str(_t).strip(), _b)
+        _t = str(_t).strip()
+        _key = (_t, _b)
         _kd_buay_ag[_key] = _kd_buay_ag.get(_key, 0) + 1
+        # takımın O HAFTAKİ base'i bu başlangıç mı?
+        if _kd_base_bas.get((_t, _kd_dw.get(_ds))) == _b:
+            _kd_buay_base[_key] = _kd_buay_base.get(_key, 0) + 1
+
+    # --- BÖLEN TUTARLILIĞI: veriden gelen agent_sayisi vs MODELİN üyeleri ---
+    # 2026-09-14: İki taraf aynı kişileri saymayabilir. df_tam, [HÜCRE 4] ve
+    # [HÜCRE 5]'ten geçmiş hâli: PT'liler (kismi_calisan_flg=1) ve eğitim
+    # ekipleri ELENMİŞ. Veriden gelen agent_sayisi kaynak sistemin mevcudu ise
+    # onları İÇERİYOR olabilir. O zaman kişi başı sayılar iki tarafta farklı
+    # tabana bölünür ve korelasyon yanlış ölçülür.
+    _kd_model_uye = {}
+    for _a_ in AGENTS:
+        _t_ = agent_team.get(str(_a_).strip())
+        if _t_ is None or pd.isna(_t_):
+            continue
+        _t_ = str(_t_).strip()
+        _kd_model_uye[_t_] = _kd_model_uye.get(_t_, 0) + 1
+
+    _kd_bolen_fark = []
+    for _t_, _nm in sorted(_kd_model_uye.items()):
+        _nv = _kd_mevcut_map.get(_t_)
+        if _nv and int(_nv) != int(_nm):
+            _kd_bolen_fark.append({
+                "takim": _t_, "veriden_agent_sayisi": int(_nv),
+                "modelin_uye_sayisi": int(_nm),
+                "fark": int(_nv) - int(_nm),
+                "fark_yuzde": round(100 * (int(_nv) - int(_nm)) / int(_nv), 1),
+            })
+    takim_denge_bolen_fark_df = pd.DataFrame(_kd_bolen_fark)
+    if _kd_bolen_fark:
+        _bf = takim_denge_bolen_fark_df
+        print(f"\n!!! BÖLEN UYUŞMAZLIĞI: {len(_bf)} / {len(_kd_model_uye)} takımda "
+              f"veriden gelen agent_sayisi ile modelin üye sayısı FARKLI.")
+        print(f"    ortalama fark %{_bf['fark_yuzde'].abs().mean():.1f}, "
+              f"en büyük %{_bf['fark_yuzde'].abs().max():.1f}")
+        print("    Sebebi büyük olasılıkla PT (kismi_calisan_flg) ve eğitim ekipleri:")
+        print("    df_tam onları ELEDİ, veriden gelen mevcut onları İÇERİYOR olabilir.")
+        print("    Bu, kişi başı sayıları iki tarafta farklı tabana böler ->")
+        print("    korelasyon ölçümü bozulur. En büyük 10 fark:")
+        print(_bf.reindex(_bf["fark_yuzde"].abs().sort_values(ascending=False).index)
+              .head(10).to_string(index=False))
+        print("    (tablo: takim_denge_bolen_fark_df)")
+    else:
+        print("\nBölen tutarlı: veriden gelen agent_sayisi = modelin üye sayısı ✓")
 
     _kd_rows = []
     for (_t, _b), _w_t in sorted(_kd_katsayi.items()):
         _n = _kd_mevcut_map.get(_t)
+        _n_model = _kd_model_uye.get(_t)
         _ag = int(_kd_buay_ag.get((_t, _b), 0))
         _hf = (int(_kd_solver.Value(_kd_hafta[(_t, _b)]))
                if (_t, _b) in _kd_hafta else None)
@@ -74,6 +146,7 @@ else:
             "takim": _t,
             "baslangic": _b,
             "agent_sayisi": _n,
+            "modelin_uye_sayisi": _n_model,
             # --- GEÇMİŞ (Ocak - önceki ay sonu) ---
             "gecmis_ham_agent_gun": round(float(_kd_ham_map.get((_t, _b), 0.0)), 1),
             "gecmis_kisi_basi_gun": round(_gec_kb, 2),
@@ -83,7 +156,15 @@ else:
             "hafta_basina_ceza": int(_w_t) * _kd_w,
             # --- BU AY (çözümden) ---
             "bu_ay_agent_gun": _ag,
+            # base haftalarında olan kısım = kuralın ETKİLEYEBİLDİĞİ atama
+            "bu_ay_agent_gun_base": int(_kd_buay_base.get((_t, _b), 0)),
+            # kalanı muafiyetli / devir agentlar = kuralın DIŞI
+            "bu_ay_agent_gun_base_disi": _ag - int(_kd_buay_base.get((_t, _b), 0)),
+            # veriden gelen bölene göre (geçmişle aynı taban)
             "bu_ay_kisi_basi_gun": (round(_ag / _n, 2) if _n else None),
+            # modelin fiilen planladığı kişilere göre - bölen uyuşmazlığında
+            # hangisinin doğru olduğunu görmek için ikisi de duruyor
+            "bu_ay_kisi_basi_gun_model": (round(_ag / _n_model, 2) if _n_model else None),
             "bu_ay_hafta": _hf,
             "tavan_asimi_hafta": _as,
             "odenen_ceza": (int(_kd_solver.Value(_kd_ceza[(_t, _b)])) * _kd_w
@@ -121,10 +202,33 @@ else:
                 print(f"      fark                        : {_b_ort - _c_ort:+.2f} gün  "
                       f"({'DOĞRU YÖN (az almışa verildi)' if _b_ort > _c_ort else 'DİKKAT: çok almışa veriliyor'})")
 
+        # --- KURALIN GÜCÜ NEREYE YETİYOR ---
+        # Kural yalnızca base'i etkiliyor; agent-günün base DIŞI kısmı
+        # (muafiyetli + devir agentlar) onun erişemediği atama.
+        _ag_top = int(_g["bu_ay_agent_gun"].sum())
+        _ag_base = int(_g["bu_ay_agent_gun_base"].sum())
+        _ag_dis = _ag_top - _ag_base
+        print(f"  agent-gün dağılımı:")
+        print(f"      takım base'inden        : {_ag_base:,}"
+              f"  (%{100 * _ag_base / _ag_top:.0f} - KURALIN ETKİ ALANI)"
+              if _ag_top else "      (bu ay hiç atama yok)")
+        if _ag_top:
+            print(f"      muaf / devir agentlar  : {_ag_dis:,}"
+                  f"  (%{100 * _ag_dis / _ag_top:.0f} - kural dokunamaz)")
+            if _ag_dis > _ag_base:
+                print(f"      !!! Base DIŞI kısım daha büyük. Kural bu vardiyanın "
+                      f"yarısından fazlasını kontrol etmiyor;")
+                print(f"          ağırlık artırmak korelasyonu çeviremez.")
+
         if len(_g) and _g["gecmis_kisi_basi_gun"].nunique() > 1:
+            # ASIL METRİK: kuralın kontrol ettiği değişkenle korelasyon
+            _kor_hf = _g["gecmis_kisi_basi_gun"].corr(_g["bu_ay_hafta"])
+            print(f"  KORELASYON (geçmiş - base haftası) : {_kor_hf:+.2f} "
+                  f"({'DOĞRU YÖN (az almışa verildi)' if _kor_hf < 0 else 'DİKKAT'})")
+            print(f"     ^ kuralın kontrol ettiği değişken - BUNA BAKILACAK")
             _kor = _g["gecmis_kisi_basi_gun"].corr(_g["bu_ay_kisi_basi_gun"])
-            print(f"  geçmiş-bu ay korelasyonu        : {_kor:+.2f} "
-                  f"({'DOĞRU YÖN' if _kor < 0 else 'DİKKAT: çok alana veriliyor'})")
+            print(f"  korelasyon (geçmiş - toplam agent-gün): {_kor:+.2f}")
+            print(f"     ^ içinde muaf/devir atamaları var, kural sorumlu değil")
 
         print(f"  ödenen ceza (objective'e giren)  : {int(_g['odenen_ceza'].sum()):,}")
         print(f"  aylık tavanı ({int(globals().get('TAKIM_VARDIYA_DENGE_MAX_HAFTA', 0))} hafta) "
@@ -136,7 +240,8 @@ else:
                       f"(+{int(_r['tavan_asimi_hafta'])})")
 
         _kol = ["gecmis_kisi_basi_gun", "ortalamadan_fark", "ceza_katsayisi",
-                "bu_ay_agent_gun", "bu_ay_kisi_basi_gun", "bu_ay_hafta"]
+                "bu_ay_hafta", "bu_ay_agent_gun_base",
+                "bu_ay_agent_gun_base_disi", "bu_ay_agent_gun"]
 
         # 2026-09-11: "BU AY KİM ALDI" listesi eklendi. Önceki hâl yalnızca
         # geçmişe göre sıralıyordu; bu ayın dağıtımını görmek için tabloyu

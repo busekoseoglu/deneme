@@ -116,21 +116,29 @@ else:
                 "fark_yuzde": round(100 * (int(_nv) - int(_nm)) / int(_nv), 1),
             })
     takim_denge_bolen_fark_df = pd.DataFrame(_kd_bolen_fark)
+    # 2026-09-14: BU BİR HATA DEĞİL, BEKLENEN DURUM. Fark normal çünkü df_tam
+    # PT'lileri (kismi_calisan_flg=1) ve eğitim ekiplerini eliyor; veriden gelen
+    # agent_sayisi ise önceki ayın tam mevcudu. İş birimi kararı: bütün kişi başı
+    # hesaplarda VERİDEN GELEN kullanılır - geçmişteki gun_agent_ratio de onunla
+    # hesaplandığı için iki taraf aynı tabana bölünmüş olur.
+    # Burada sadece farkın BÜYÜKLÜĞÜ izleniyor: bir takımda anormal büyük fark
+    # varsa o takımın mevcudu ay içinde ciddi değişmiş ya da veri eski demektir.
     if _kd_bolen_fark:
         _bf = takim_denge_bolen_fark_df
-        print(f"\n!!! BÖLEN UYUŞMAZLIĞI: {len(_bf)} / {len(_kd_model_uye)} takımda "
-              f"veriden gelen agent_sayisi ile modelin üye sayısı FARKLI.")
-        print(f"    ortalama fark %{_bf['fark_yuzde'].abs().mean():.1f}, "
+        print(f"\nBölen: veriden gelen agent_sayisi kullanılıyor (önceki ay mevcudu).")
+        print(f"  modelin üye sayısından farklı olan takım: "
+              f"{len(_bf)} / {len(_kd_model_uye)}  -> NORMAL (PT + eğitim elenmiş)")
+        print(f"  ortalama fark %{_bf['fark_yuzde'].abs().mean():.1f}, "
               f"en büyük %{_bf['fark_yuzde'].abs().max():.1f}")
-        print("    Sebebi büyük olasılıkla PT (kismi_calisan_flg) ve eğitim ekipleri:")
-        print("    df_tam onları ELEDİ, veriden gelen mevcut onları İÇERİYOR olabilir.")
-        print("    Bu, kişi başı sayıları iki tarafta farklı tabana böler ->")
-        print("    korelasyon ölçümü bozulur. En büyük 10 fark:")
-        print(_bf.reindex(_bf["fark_yuzde"].abs().sort_values(ascending=False).index)
-              .head(10).to_string(index=False))
-        print("    (tablo: takim_denge_bolen_fark_df)")
+        _bf_buyuk = _bf[_bf["fark_yuzde"].abs() > 40]
+        if len(_bf_buyuk):
+            print(f"  !!! %40'tan fazla sapan {len(_bf_buyuk)} takım - mevcut ay içinde "
+                  f"ciddi değişmiş ya da veri eski olabilir:")
+            print(_bf_buyuk.reindex(_bf_buyuk["fark_yuzde"].abs()
+                  .sort_values(ascending=False).index).head(10).to_string(index=False))
+        print("  (tablo: takim_denge_bolen_fark_df)")
     else:
-        print("\nBölen tutarlı: veriden gelen agent_sayisi = modelin üye sayısı ✓")
+        print("\nBölen: veriden gelen agent_sayisi = modelin üye sayısı ✓")
 
     _kd_rows = []
     for (_t, _b), _w_t in sorted(_kd_katsayi.items()):
@@ -160,11 +168,13 @@ else:
             "bu_ay_agent_gun_base": int(_kd_buay_base.get((_t, _b), 0)),
             # kalanı muafiyetli / devir agentlar = kuralın DIŞI
             "bu_ay_agent_gun_base_disi": _ag - int(_kd_buay_base.get((_t, _b), 0)),
-            # veriden gelen bölene göre (geçmişle aynı taban)
+            # 2026-09-14: KİŞİ BAŞI HESAP HER YERDE VERİDEN GELEN agent_sayisi
+            # İLE YAPILIR (iş birimi kararı). Sebebi: geçmişteki gun_agent_ratio
+            # o bölenle hesaplandı; modelin kendi üye sayısını kullanmak
+            # geçmişle KIYASLANAMAZ bir sayı üretir.
+            # agent_sayisi önceki ayın mevcudu - geçmişle aynı taban olduğu için
+            # doğru olan bu, bu ayın mevcudu değil.
             "bu_ay_kisi_basi_gun": (round(_ag / _n, 2) if _n else None),
-            # modelin fiilen planladığı kişilere göre - bölen uyuşmazlığında
-            # hangisinin doğru olduğunu görmek için ikisi de duruyor
-            "bu_ay_kisi_basi_gun_model": (round(_ag / _n_model, 2) if _n_model else None),
             "bu_ay_hafta": _hf,
             "tavan_asimi_hafta": _as,
             "odenen_ceza": (int(_kd_solver.Value(_kd_ceza[(_t, _b)])) * _kd_w

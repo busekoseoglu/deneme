@@ -23,3 +23,10 @@ display(df_tam[df_tam["agent_user_code"].astype(str).str.strip() == a])
 print("kıdem:", globals().get("kidem_ay_map", {}).get(a))
 print("tip:", {str(d): t for d, t in tip_map.get(a, {}).items()})
 print("geçmiş:", globals().get("gecmis_calisma", {}).get(a))
+
+
+
+a = "AGENT_KODU"
+for ds in PLAN_GUNLER[:5]:
+    print(ds, "| çalışıyor:", cozum_calisma.get((a, ds), 0),
+          "| vardiya:", cozum_atama.get((a, ds)))

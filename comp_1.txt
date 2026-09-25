@@ -1,11 +1,17 @@
-from collections import defaultdict
-hafta = defaultdict(list)
-for ds in PLAN_GUNLER:
-    hafta[str(day_week[ds])].append(ds)
+a = "U0102109"
+t = df_tam.loc[df_tam["agent_user_code"].astype(str).str.strip() == a, "takim"].iloc[0]
 ust = globals().get("fazla_atama_ust_limiti", {})
-for wk in sorted(hafta):
-    kap = sum(int(talep[(ds, v)]) + int(ust.get((ds, v), GENEL_MAX_FAZLA_ATAMA))
-              for ds in hafta[wk] for v in gun_vardiyalari.get(ds, []))
-    gerek = int(off_tavan_debug_df.loc[
-        off_tavan_debug_df["hafta"].astype(str) == wk, "min_calisma"].sum())
-    print(f"{wk}: kapasite {kap:>6} | zorunlu minimum {gerek:>6} | fark {kap - gerek:>6}")
+say = {}
+for (aa, ds), v in cozum_atama.items():
+    if cozum_calisma.get((aa, ds), 0) == 1:
+        say[(ds, v)] = say.get((ds, v), 0) + 1
+
+print("takım:", t, "| üye:", int((df_tam["takim"] == t).sum()))
+for ds in PLAN_GUNLER:
+    if str(day_week[ds]) != "2026-W41":
+        continue
+    for v in gun_vardiyalari.get(ds, []):
+        if solver.Value(team_week_base[(t, "2026-W41", v)]) == 1:
+            cap = int(talep[(ds, v)]) + int(ust.get((ds, v), GENEL_MAX_FAZLA_ATAMA))
+            n = say.get((ds, v), 0)
+            print(ds, v, f"atanan {n} / tavan {cap}", "<-- DOLU" if n >= cap else "")

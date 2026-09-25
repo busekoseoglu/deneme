@@ -15,3 +15,11 @@ for ds in PLAN_GUNLER:
             cap = int(talep[(ds, v)]) + int(ust.get((ds, v), GENEL_MAX_FAZLA_ATAMA))
             n = say.get((ds, v), 0)
             print(ds, v, f"atanan {n} / tavan {cap}", "<-- DOLU" if n >= cap else "")
+
+
+
+a = "AGENT_KODU"
+display(df_tam[df_tam["agent_user_code"].astype(str).str.strip() == a])
+print("kıdem:", globals().get("kidem_ay_map", {}).get(a))
+print("tip:", {str(d): t for d, t in tip_map.get(a, {}).items()})
+print("geçmiş:", globals().get("gecmis_calisma", {}).get(a))

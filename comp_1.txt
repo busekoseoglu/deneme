@@ -59,8 +59,28 @@ for _co_p in ["MAX_CONSECUTIVE_WORK_DAYS", "MODEL_OFF_HAFTALIK_MAX"]:
         raise SystemExit(f"CONFIG'de tanımlı olmalı: {_co_p} -> [CONFIG] hücresini çalıştır.")
 
 _co_gecmis = globals().get("gecmis_calisma_gunleri", {})
+_co_gecmis_off = globals().get("gecmis_off_gunleri", {})
 _co_sayilmaz = set(calisma_disi_date_set)          # resmi tatil + arife
 _CO_ILK = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+
+# 2026-09-28 DUZELTME: off tavani hucresi sarkan haftada gecmis off'lari tavandan
+# DUSUYOR (tavan_kalan = max(len(korunan), tavan - gecmis_off)). Supap bunu
+# yapmazsa o haftanin min_calisma'sini OLDUGUNDAN DUSUK hesaplar ve 28-30 Eylul'de
+# off almis agentlari kacirir. Asagisi ayni hesabi birebir tekrarliyor.
+_CO_SARKAN = {(_CO_ILK - pd.Timedelta(days=_k + 1).to_pytimedelta())
+              for _k in range(_CO_ILK.weekday())}
+# dusum SADECE plan tarafinda hafta ici gunu olan sarkan haftada uygulanir
+if not any(pd.to_datetime(ds).date().weekday() < 5
+           and pd.to_datetime(ds).date().isocalendar()[:2] == _CO_ILK.isocalendar()[:2]
+           for ds in PLAN_GUNLER):
+    _CO_SARKAN = set()
+if not globals().get("ENABLE_SARKAN_HAFTA_SUREKLILIK", True):
+    _CO_SARKAN = set()
+
+_co_h = pd.to_numeric(df_tam.get("hamile_flg", 0), errors="coerce").fillna(0).astype(int)
+_co_s = pd.to_numeric(df_tam.get("sut_izni_flg", 0), errors="coerce").fillna(0).astype(int)
+_CO_HS = set(df_tam.loc[(_co_h == 1) | (_co_s == 1), "agent_user_code"]
+             .astype(str).str.strip())
 _co_hafta = {}
 for _co_ds in PLAN_GUNLER:
     _co_hafta.setdefault(pd.to_datetime(_co_ds).date().isocalendar()[:2], []).append(_co_ds)
@@ -93,7 +113,16 @@ def _co_haftalik_mumkun(a, sat_ds, sun_ds):
             _zorunlu.append(_ds)
     if not _sayilan:
         return True
-    _min_calisma = len(_sayilan) - max(MODEL_OFF_HAFTALIK_MAX, len(_zorunlu))
+    _tavan = max(MODEL_OFF_HAFTALIK_MAX, len(_zorunlu))
+    _tavan_kalan = _tavan
+    if _CO_SARKAN and pd.to_datetime(_gunler[0]).date() == _CO_ILK:
+        _korunan = set(_zorunlu)
+        if a in _CO_HS:
+            _korunan |= {_d2 for _d2 in _sayilan
+                         if pd.to_datetime(_d2).weekday() in (5, 6)}
+        _tavan_kalan = max(len(_korunan),
+                           _tavan - len(_CO_SARKAN & set(_co_gecmis_off.get(a, set()))))
+    _min_calisma = len(_sayilan) - _tavan_kalan
     if _min_calisma <= 0:
         return True
 

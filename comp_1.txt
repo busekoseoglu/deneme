@@ -216,7 +216,12 @@ if ENABLE_CIFT_OFF_KURALI:
             cift_off_pair_debug_rows.append({"agent_user_code":a,"pair_index":pair_index,"sat_date":pd.to_datetime(sat_ds).strftime("%Y-%m-%d"),"sun_date":pd.to_datetime(sun_ds).strftime("%Y-%m-%d"),"sat_forced_off":sat_forced_off,"sun_forced_off":sun_forced_off,"is_selectable":is_selectable,"pair_capacity_loss":pair_capacity_loss,"max_calisabilir_gun":max_calisabilir_gun_for_cift,"baz_gereken_calisma":baz_gereken_calisma_for_cift,"max_work_if_selected":max_work_if_this_pair_selected,"haftalik_mumkun":_co_hafta_ok,"is_feasible_selectable":is_feasible_selectable})
         feasible_selectable_pair_infos = [info for info in selectable_pair_infos if info["is_feasible_selectable"]]
         if feasible_selectable_pair_infos and not tum_plan_izinli:
-            model.Add(sum(info["pair_var"] for info in feasible_selectable_pair_infos) >= 1)
+            # 2026-09-28: HAVUZ DARALTILMAZ. Fizibilite testi yalnizca "kural bu agent
+            # icin kurulsun mu" kararini verir; kisit TUM secilebilir ciftler uzerinden
+            # kurulur. Havuzu daraltmak modeli sadece SIKAR: elenen cifti model zaten
+            # secemez, ama geriye tek cift birakmak onu ZORUNLU yapar ve infeasible
+            # uretir (28 Eylul'de yasandi, 1 saniyede infeasible).
+            model.Add(sum(info["pair_var"] for info in selectable_pair_infos) >= 1)
             cift_off_kisit_sayisi += 1; cift_off_zorunlulugu_olan_agent += 1
             kuruldu=True; skip_reason=""
         else:

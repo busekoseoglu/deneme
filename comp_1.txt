@@ -48,6 +48,7 @@ GECMIS_KOLON_MAX_GUN = 7
 
 RENK = {
     "izin":        "E4D7F5",   # açık mor
+    "dogum_izni":  "B4A7D6",   # koyu mor - doğum izni (2026-09-29)
     "off_t":       "CCE5FF",   # açık mavi
     "off_t2":      "9FC5E8",   # koyu mavi
     "off":         "E8E8E8",   # gri
@@ -69,6 +70,7 @@ RENK = {
 
 LEJANT = [
     ("İZİN",              "izin",        "Yıllık izin / idari izin - HARD, model değiştiremez"),
+    ("DOĞUM İZNİ",        "dogum_izni",  "dogum_izni_flg = 1 olan agentın izin günleri"),
     ("OFF_T",             "off_t",       "Agent off talebi (off_t) - SOFT, model karşıladı"),
     ("OFF_T2",            "off_t2",      "Agent off talebi (off_t2) - HARD, her zaman karşılanır"),
     ("OFF",               "off",         "Modelin kendi verdiği off (talep yok)"),
@@ -139,6 +141,15 @@ if _tatil_kisitli_x is None:
         .astype(str).str.strip()
     )
 _tatil_kisitli_x = {str(a).strip() for a in _tatil_kisitli_x}
+
+# 2026-09-29: doğum izinli agentların izin günleri TAKVIM'de ayrı etiketlenir.
+# Bayrak yoksa küme boş kalır ve davranış eskisiyle birebir aynı olur.
+_dogum_izinli_x = set()
+if "dogum_izni_flg" in df_tam.columns:
+    _dg_flg = pd.to_numeric(df_tam["dogum_izni_flg"], errors="coerce").fillna(0).astype(int)
+    _dogum_izinli_x = set(
+        df_tam.loc[_dg_flg == 1, "agent_user_code"].astype(str).str.strip())
+print("doğum izinli agent:", len(_dogum_izinli_x))
 
 _GUN_ADI = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
 
@@ -387,8 +398,8 @@ for _i, a_raw in enumerate(AGENTS):
             hucre_renk[(_i, _kol)] = "g_calisma"
             _n_gecmis_calisma += 1
         elif d in _g_izin.get(a, set()):
-            row[_kol] = "İZİN"
-            hucre_renk[(_i, _kol)] = "g_izin"
+            row[_kol] = "DOĞUM İZNİ" if a in _dogum_izinli_x else "İZİN"
+            hucre_renk[(_i, _kol)] = "dogum_izni" if a in _dogum_izinli_x else "g_izin"
         elif d in _g_h_izin.get(a, set()):
             # süt izni düzeni: off DEĞİL, ayrı kategori
             row[_kol] = "H.İZİN"
@@ -409,8 +420,12 @@ for _i, a_raw in enumerate(AGENTS):
 
         if tip == "izin":
             _n_izin += 1
-            row[_kol] = "İZİN"
-            hucre_renk[(_i, _kol)] = "izin"
+            if a in _dogum_izinli_x:
+                row[_kol] = "DOĞUM İZNİ"
+                hucre_renk[(_i, _kol)] = "dogum_izni"
+            else:
+                row[_kol] = "İZİN"
+                hucre_renk[(_i, _kol)] = "izin"
             continue
 
         if tip == "off_t":

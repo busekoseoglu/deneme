@@ -38,6 +38,29 @@ KRITIK_GUN_2_OFF_W = CONFIG["KRITIK_GUN_2_OFF_W"]
 
 
 
+# ===== 2026-09-28 EKLENEN - HAFTA SONU CEZASI IKINCI KADEME =====
+    # Tek kademeli ceza DOGRUSAL: ceza = W x max(0, gun - esik).
+    # Esigin ALTINDA agent kalmadiginda toplam ceza
+    #   W x (Sum gun - N x esik)  -> Sum gun hafta sonu talebiyle SABIT
+    # oldugu icin toplam da SABITLENIYOR ve model dagitima KAYITSIZ kaliyor.
+    # 28 Eylul'de esik 4 -> 2 yapildi ve sonuc KOTULESTI (bazi agentlar 6 gune cikti).
+    #
+    # Cozum: cezayi DISBUKEY yapmak. Ikinci kademe eklenince her ek gun bir
+    # oncekinden pahali olur ve cok calisandan az calisana aktarmak NET KAZANC saglar:
+    #   3. gun 10.000 | 4. gun 20.000 | 5. gun 60.000 | 6. gun 100.000
+    # 5. gunun marjinali 40.000, MISSING_TO_REQUIRED_W'nin (50.000) ALTINDA kalmali -
+    # yoksa model hafta sonu kovasini bos birakmayi tercih eder.
+    "HAFTA_SONU_KADEME1_GUN": 2,
+    "HAFTA_SONU_KADEME1_W": 10000,
+    # ================================================================
+
+
+# ===== 2026-09-28 EKLENEN - HAFTA SONU CEZASI IKINCI KADEME =====
+HAFTA_SONU_KADEME1_GUN = CONFIG["HAFTA_SONU_KADEME1_GUN"]
+HAFTA_SONU_KADEME1_W = CONFIG["HAFTA_SONU_KADEME1_W"]
+# ================================================================
+
+
 # %% [KISIT] - MESAİYE KALAMAZ: HAFTA SONU + YAN YANA OFF + HAFTALIK DENGE (SOFT)
 # 2026-10-14. Kapsam: mesaiye_kalamaz_flg = 1 ve hamile / süt izinli OLMAYAN agent
 # (onlar hafta sonu zaten çalışamıyor). Ekip bu kişileri hafta sonu çalıştırıyor:

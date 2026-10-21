@@ -1,46 +1,9 @@
-# %% [KISIT] - KRİTİK GÜNLERDE OFF (SOFT)
-# 2026-10-14. İş birimi: bu günlerde çağrı yoğun, off mümkün olduğunca verilmesin. HERKES için.
-#   1. kademe: KRITIK_GUN_1_AY_GUNLERI (1, 5, 15) + KRITIK_GUN_1_HAFTA_GUNLERI (Pzt)
-#   2. kademe: KRITIK_GUN_2_AY_GUNLERI (25)       + KRITIK_GUN_2_HAFTA_GUNLERI (Cum)
-# Off verilen her agent-gün kademe ağırlığını öder; iki kademeye giren gün 1. kademeden.
-# 2026-10-21: asıl kural artık COVERAGE ÇARPANI (kritik_gun_carpan, OBJECTIVE'de). Kişi başı off
-# cezası SADECE hafta içi kritik günlerde (hafta sonunda yığılma yapıyordu, gerekçe CONFIG'de).
-# Cezasız: izin, off_t2, resmi tatil / arife, agentin o gün hiç vardiyası olmayan gün.
-# off_t cezası daha büyük -> kritik güne denk gelen off_t VERİLİR. Ceza [HÜCRE] - OBJECTIVE'de.
-for _p in ("ENABLE_KRITIK_GUN_KURALI", "KRITIK_GUN_1_AY_GUNLERI", "KRITIK_GUN_1_HAFTA_GUNLERI",
-           "KRITIK_GUN_2_AY_GUNLERI", "KRITIK_GUN_2_HAFTA_GUNLERI",
-           "KRITIK_GUN_1_OFF_W", "KRITIK_GUN_2_OFF_W",
-           "KRITIK_GUN_1_COVERAGE_CARPANI", "KRITIK_GUN_2_COVERAGE_CARPANI"):
-    if _p not in globals():
-        raise SystemExit(f"CONFIG'de tanımlı olmalı: {_p} -> [CONFIG] hücresini çalıştır.")
-
-kritik_gunler = {}      # ds -> ağırlık
-kritik_gun_off = []     # (ağırlık, a, ds)
-kritik_gun_carpan = {}  # ds -> coverage cezası çarpanı (OBJECTIVE okur)
-if ENABLE_KRITIK_GUN_KURALI:
-    for ds in PLAN_GUNLER:
-        d = pd.to_datetime(ds).date()
-        if d in calisma_disi_date_set:
-            continue
-        if d.day in KRITIK_GUN_1_AY_GUNLERI or d.weekday() in KRITIK_GUN_1_HAFTA_GUNLERI:
-            kritik_gunler[ds] = KRITIK_GUN_1_OFF_W
-            kritik_gun_carpan[ds] = KRITIK_GUN_1_COVERAGE_CARPANI
-        elif d.day in KRITIK_GUN_2_AY_GUNLERI or d.weekday() in KRITIK_GUN_2_HAFTA_GUNLERI:
-            kritik_gunler[ds] = KRITIK_GUN_2_OFF_W
-            kritik_gun_carpan[ds] = KRITIK_GUN_2_COVERAGE_CARPANI
-    for a_raw in AGENTS:
-        a = str(a_raw).strip()
-        _tip = tip_map.get(a, {})
-        for ds, _w in kritik_gunler.items():
-            if pd.to_datetime(ds).weekday() >= 5:
-                continue   # 2026-10-21: hafta sonu kritik gün -> sadece coverage çarpanı
-            if str(_tip.get(pd.to_datetime(ds).date(), "")).strip().lower() in ("izin", "off_t2"):
-                continue
-            if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])):
-                kritik_gun_off.append((_w, a, ds))
-
-print("ENABLE_KRITIK_GUN_KURALI:", ENABLE_KRITIK_GUN_KURALI)
-print("kritik gün:", len(kritik_gunler),
-      "| 1. kademe:", sum(1 for c in kritik_gun_carpan.values() if c == KRITIK_GUN_1_COVERAGE_CARPANI),
-      "| 2. kademe:", sum(1 for c in kritik_gun_carpan.values() if c != KRITIK_GUN_1_COVERAGE_CARPANI))
-print("cezalı agent-gün:", len(kritik_gun_off))
+_h = df_slot[df_slot["gun"].isin(["Cmt", "Pzr"])].assign(saat=lambda d: d["slot"].str[:2])
+_h = _h[_h["saat"].between("08", "19")].copy()
+_h["hedef_m1"] = _h["tahmin_kap_ihtiyac"] * _h["tahmin_cagri_buffer"] / _h["tahmin_cagri"].where(_h["tahmin_cagri"] > 0)
+_t = _h.groupby(["gun", "saat"])[["kap_ihtiyac", "tahmin_kap_ihtiyac", "hedef_m1",
+                                  "biz_sahadaki", "ekip_sahadaki"]].mean().round(0)
+_t["m1/hedef"] = (_t["biz_sahadaki"] / _t["hedef_m1"]).round(3)
+_t["biz/gercek"] = (_t["biz_sahadaki"] / _t["kap_ihtiyac"]).round(3)
+_t["ekip/gercek"] = (_t["ekip_sahadaki"] / _t["kap_ihtiyac"]).round(3)
+print(_t.to_string())

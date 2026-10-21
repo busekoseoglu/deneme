@@ -1,5 +1,7 @@
 for ds in sorted(results):
     m = (results[ds] or {}).get("kitle", {}).get("mip_info") or {}
-    if m:
-        print(ds, GUN_TR[dt.date.fromisoformat(ds).weekday()], m["total_inhouse_kisi"],
-              m["total_outsource_kisi"], m["total_part_time_kisi"], round(m["outsource_ratio"], 3))
+    if m and ds in bas_ekip.index:
+        e = bas_ekip.loc[ds]
+        print(ds, GUN_TR[dt.date.fromisoformat(ds).weekday()], "erlang_acik:", m["total_shortfall"],
+              "| ekip:", e.get("inhouse", 0), e.get("outsource", 0), e.get("part_time", 0),
+              round(e.get("outsource", 0) / max(1, e.sum()), 3))

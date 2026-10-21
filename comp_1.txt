@@ -1,9 +1,6 @@
-_c = copy.deepcopy(CONFIG)
-_c['solver']['gap_rel_by_queue']['kitle'] = 0.005
-_d30, _ = tahmin_buffer_uygula(prepare_forecast_calls_30(df_forecast, config=_c), _c, ('kitle',), verbose=False)
-_g = [f"2026-09-{d}" for d in range(14, 21)]
-_ipd, _oz = solve_week(_d30, df_shifts_dict['kitle'], 'kitle', _g, config=_c, inhouse_esitlik=False)
-for _ds in ('2026-09-19', '2026-09-20'):
-    print(_ds, "eski:", [results[_ds]['kitle']['mip_info']['fiili_by_slot'][t] for t in ('10:00', '11:00', '12:00', '13:00', '17:00')],
-          "| yeni:", [_ipd[_ds]['fiili_by_slot'][t] for t in ('10:00', '11:00', '12:00', '13:00', '17:00')],
-          "| out:", results[_ds]['kitle']['mip_info']['total_outsource_kisi'], "→", _ipd[_ds]['total_outsource_kisi'])
+from weekly_pipeline_unified_v2 import kap_ihtiyac
+_r = results['2026-09-19']['kitle']; _m = _r['mip_info']; _hr = _r['_config']['hourly_report']
+for t in [f"{h:02d}:00" for h in range(9, 23)]:
+    print(t, "erlang:", _m['erlang_by_slot'].get(t, 0),
+          "kap:", round(kap_ihtiyac(_r['calls_by_slot'].get(t, 0), t, _hr) or 0),
+          "fiili:", _m['fiili_by_slot'].get(t, 0), "pt:", _m['mip_pt_by_slot'].get(t, 0))

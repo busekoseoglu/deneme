@@ -1,28 +1,78 @@
-# %% [ÇIKTI] - AGENT PLAN PICKLE (ARKADAŞIN KARŞILAŞTIRMASI İÇİN)
-# 2026-10-21. Tek tablo: agent_plan (date, vardiya). Bir satır = bir agentın çalıştığı bir gün.
-# Off / izin günleri YAZILMAZ. Arife özel vardiyası (09:00-13:00) kendi saatiyle ayrı satır.
-# Model sadece inhouse agent planlıyor. Kuyruk ve ay dosya adına plandan gelir (sabit yok).
-import pickle
+# %% [TEŞHİS] - SARKAN HAFTA CUMARTESİ YIĞILMASI (SALT OKUNUR)
+# 2026-10-21. Sarkan haftanın Cumartesisinde çalışanları NEDEN çalıştıklarına göre ayırır.
+# Modele dokunmaz. [KONTROL] - ÇÖZÜMÜ ÇIKAR ve [EXCEL] - PLAN ÇIKTISI'ndan sonra çalıştır.
+#   A) o hafta hafta içi off'u var -> haftalık off tavanı telafiyi BU haftaya zorluyor
+#   B) o hafta off yok, ayın başka haftasında var -> AYLIK telafi, model bu Cmt'yi seçmiş
+#   C) hiç hafta içi off yok -> kotanın üstünde fazladan çalışma
+# Ayrıca: Ağustos'tan gelen ardışık çalışma (>= 6 ise ayın 1. günü max-6 zorunlu off).
+from datetime import timedelta
 
-if "cozum_calisma" not in globals() or "cozum_atama" not in globals():
-    raise SystemExit("cozum_calisma / cozum_atama yok. Önce [KONTROL] - ÇÖZÜMÜ ÇIKAR hücresini çalıştır.")
+TESHIS_GUN = None    # None -> sarkan haftanın Cumartesisi; elle "2026-09-05" gibi yazılabilir
 
-_ap_rows = []
-for (a, ds), v in cozum_atama.items():
-    if cozum_calisma.get((a, ds), 0) != 1:
+if "cozum_calisma" not in globals() or "mesai_gunleri_map" not in globals():
+    raise SystemExit("Önce [KONTROL] - ÇÖZÜMÜ ÇIKAR ve [EXCEL] - PLAN ÇIKTISI hücrelerini çalıştır.")
+
+_tp = sorted(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
+_tg = {pd.to_datetime(ds).date(): ds for ds in _tp}
+if TESHIS_GUN:
+    _D = _tg[pd.to_datetime(TESHIS_GUN).date()]
+else:
+    _D = next((ds for ds in _tp if day_week[ds] == day_week[_tp[0]]
+               and pd.to_datetime(ds).weekday() == 5), None)
+    if _D is None:
+        raise SystemExit("Sarkan haftada Cumartesi yok - TESHIS_GUN'u elle yaz.")
+_Dd = pd.to_datetime(_D).date()
+_hafta = [ds for ds in _tp if day_week[ds] == day_week[_D] and pd.to_datetime(ds).weekday() < 5]
+_ay = [ds for ds in _tp if pd.to_datetime(ds).weekday() < 5 and ds not in _hafta]
+_paz = _tg.get(_Dd + timedelta(days=1))
+_ilk = pd.to_datetime(_tp[0]).date()
+_gc = globals().get("gecmis_calisma_gunleri", {})
+
+
+def _off_tipi(a, ds):
+    t = str(tip_map.get(a, {}).get(pd.to_datetime(ds).date(), "")).strip().lower()
+    return t if t in ("izin", "off_t", "off_t2") else "model_off"
+
+
+_tr = []
+for a_raw in AGENTS:
+    a = str(a_raw).strip()
+    if cozum_calisma.get((a, _D), 0) != 1:
         continue
-    b, e = saat[(ds, v)]
-    _ap_rows.append({"date": pd.to_datetime(ds).strftime("%Y-%m-%d"),
-                     "vardiya": f"{str(b).strip()[:5]}-{str(e).strip()[:5]}"})
-df_plan = (pd.DataFrame(_ap_rows, columns=["date", "vardiya"])
-           .sort_values(["date", "vardiya"]).reset_index(drop=True))
+    _h_off = [t for t in (_off_tipi(a, ds) for ds in _hafta if cozum_calisma.get((a, ds), 0) == 0)
+              if t != "izin"]
+    _a_off = [t for t in (_off_tipi(a, ds) for ds in _ay if cozum_calisma.get((a, ds), 0) == 0)
+              if t != "izin"]
+    _seri = 0
+    while (_ilk - timedelta(days=_seri + 1)) in _gc.get(a, set()):
+        _seri += 1
+    _v = cozum_atama.get((a, _D))
+    _tr.append({
+        "agent_user_code": a,
+        "grup": "A: o hafta hafta içi off" if _h_off else ("B: ay içi off" if _a_off else "C: hiç off yok"),
+        "hafta_ici_off": ", ".join(_h_off),
+        "ay_ici_off_sayisi": len(_a_off),
+        "onceki_ay_ardisik_calisma": _seri,
+        "devraldigi_vardiya": globals().get("SARKAN_DEVIR_AGENT", {}).get(a),
+        "cmt_vardiya": "-".join(str(s).strip()[:5] for s in saat.get((_D, _v), ("", ""))),
+        "pazar_da_calisti": bool(_paz and cozum_calisma.get((a, _paz), 0) == 1),
+        "excel_etiketi": ("MESAİ" if _D in mesai_gunleri_map.get(a, set()) else
+                          "TELAFİ" if _D in telafi_gunleri_map.get(a, set()) else
+                          "NORM" if _D in norm_gunleri_map.get(a, set()) else "?"),
+    })
+teshis_cmt_df = pd.DataFrame(_tr)
 
-_ap_bas = pd.to_datetime(min(PLAN_GUNLER))
-AGENT_PLAN_PKL = f"agent_cov_{QUEUE}_{_ap_bas.year}_{_ap_bas.month:02d}_ark.pkl"
-with open(AGENT_PLAN_PKL, "wb") as f:
-    pickle.dump({"agent_plan": df_plan[["date", "vardiya"]]}, f)
-
-print(f"agent_plan: {len(df_plan)} satır | {df_plan['date'].nunique()} gün | "
-      f"çalışan agent-gün: {sum(cozum_calisma.values())} (eşit olmalı)")
-print(f"yazıldı: {AGENT_PLAN_PKL}")
-display(df_plan.head())
+_talep_D = sum(int(talep[(_D, v)]) for v in gun_vardiyalari.get(_D, []) if (_D, v) in talep)
+print(f"{_D} (Cmt): çalışan {len(teshis_cmt_df)} | talep {_talep_D} | fark {len(teshis_cmt_df) - _talep_D:+d}")
+if not teshis_cmt_df.empty:
+    print("\ngrup x Excel etiketi:")
+    print(pd.crosstab(teshis_cmt_df["grup"], teshis_cmt_df["excel_etiketi"], margins=True).to_string())
+    _A = teshis_cmt_df[teshis_cmt_df["grup"].str.startswith("A")]
+    if len(_A):
+        print("\nA grubunda hafta içi off tipi:")
+        print(_A["hafta_ici_off"].str.split(", ").explode().value_counts().to_string())
+    print(f"\nönceki ayın son günlerinde >= 6 gün ardışık çalışmış (1. gün max-6 off): "
+          f"{int((teshis_cmt_df['onceki_ay_ardisik_calisma'] >= 6).sum())}")
+    print(f"Pazar'ı da çalışan: {int(teshis_cmt_df['pazar_da_calisti'].sum())}")
+    print(f"sarkan hafta devir agentı: {int(teshis_cmt_df['devraldigi_vardiya'].notna().sum())}")
+    display(teshis_cmt_df.sort_values(["grup", "excel_etiketi"]).head(20))

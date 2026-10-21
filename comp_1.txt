@@ -1,9 +1,5 @@
-_h = df_slot[df_slot["gun"].isin(["Cmt", "Pzr"])].assign(saat=lambda d: d["slot"].str[:2])
-_h = _h[_h["saat"].between("08", "19")].copy()
-_h["hedef_m1"] = _h["tahmin_kap_ihtiyac"] * _h["tahmin_cagri_buffer"] / _h["tahmin_cagri"].where(_h["tahmin_cagri"] > 0)
-_t = _h.groupby(["gun", "saat"])[["kap_ihtiyac", "tahmin_kap_ihtiyac", "hedef_m1",
-                                  "biz_sahadaki", "ekip_sahadaki"]].mean().round(0)
-_t["m1/hedef"] = (_t["biz_sahadaki"] / _t["hedef_m1"]).round(3)
-_t["biz/gercek"] = (_t["biz_sahadaki"] / _t["kap_ihtiyac"]).round(3)
-_t["ekip/gercek"] = (_t["ekip_sahadaki"] / _t["kap_ihtiyac"]).round(3)
-print(_t.to_string())
+for ds in sorted(results):
+    m = (results[ds] or {}).get("kitle", {}).get("mip_info") or {}
+    if m:
+        print(ds, GUN_TR[dt.date.fromisoformat(ds).weekday()], m["total_inhouse_kisi"],
+              m["total_outsource_kisi"], m["total_part_time_kisi"], round(m["outsource_ratio"], 3))

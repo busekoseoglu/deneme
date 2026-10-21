@@ -1,7 +1,9 @@
-for ds in sorted(results):
-    m = (results[ds] or {}).get("kitle", {}).get("mip_info") or {}
-    if m and ds in bas_ekip.index:
-        e = bas_ekip.loc[ds]
-        print(ds, GUN_TR[dt.date.fromisoformat(ds).weekday()], "erlang_acik:", m["total_shortfall"],
-              "| ekip:", e.get("inhouse", 0), e.get("outsource", 0), e.get("part_time", 0),
-              round(e.get("outsource", 0) / max(1, e.sum()), 3))
+_c = copy.deepcopy(CONFIG)
+_c['solver']['gap_rel_by_queue']['kitle'] = 0.005
+_d30, _ = tahmin_buffer_uygula(prepare_forecast_calls_30(df_forecast, config=_c), _c, ('kitle',), verbose=False)
+_g = [f"2026-09-{d}" for d in range(14, 21)]
+_ipd, _oz = solve_week(_d30, df_shifts_dict['kitle'], 'kitle', _g, config=_c, inhouse_esitlik=False)
+for _ds in ('2026-09-19', '2026-09-20'):
+    print(_ds, "eski:", [results[_ds]['kitle']['mip_info']['fiili_by_slot'][t] for t in ('10:00', '11:00', '12:00', '13:00', '17:00')],
+          "| yeni:", [_ipd[_ds]['fiili_by_slot'][t] for t in ('10:00', '11:00', '12:00', '13:00', '17:00')],
+          "| out:", results[_ds]['kitle']['mip_info']['total_outsource_kisi'], "→", _ipd[_ds]['total_outsource_kisi'])

@@ -19,72 +19,42 @@ EKIP_OFF_HARIC_TIPLER = CONFIG["EKIP_OFF_HARIC_TIPLER"]
 
 
 
-# %% [RAPOR] - W31 TEMMUZ-AĞUSTOS OFF DENGESİ GÖZLEMİ (MODELE ETKİSİ YOK)
-# ESKİ ADI: KURAL 3 - W31 HAFTALIK OFF DENGESİ
-#
-# KURAL KALDIRILDI (2026-08-04, iş birimi kararı):
-#   "1-2 Ağustos'ta izin almasında sorun yok, o yeni aya giriyor."
-#   Yani haftalık off kotası ay sınırını GEÇMİYOR. Temmuz'un son haftasında kaç off
-#   kullanıldığı Ağustos'u bağlamıyor; ne hard tavan, ne soft ceza, ne de borç kalıyor.
-#
-# Bu hücre artık modele HİÇBİR ŞEY eklemiyor - sadece Temmuz-Ağustos geçişini
-# gözlemek için sayıları hesaplayıp w31_debug_df'e koyuyor.
-#
-# Temmuz'dan Ağustos'a TAŞINAN tek kurallar: max 6 gün üst üste + min 11 saat dinlenme.
-# Bunlar yorgunluk/mevzuat kuralı, ay sınırı tanımaz; kendi hücrelerinde duruyor.
-from datetime import timedelta
+# %% [KISIT] - EKİP GÜNLÜK OFF TAVANI (SOFT)
+# Hafta içi her gün, bir ekipte çalışmayan agent sayısı EKIP_GUNLUK_MODEL_OFF_MAX'ı geçmesin.
+# Sayılan: model off + off_t. Sayılmayan: EKIP_OFF_HARIC_TIPLER (izin, off_t2),
+# hafta içine denk gelen arife / resmi tatil, agentın o gün hiç vardiyası olmayan gün.
+# Aşan her kişi EKIP_GUNLUK_OFF_ASIM_W ceza öder ([HÜCRE] - OBJECTIVE).
+_eksik_cfg = [k for k in ("ENABLE_EKIP_GUNLUK_OFF_TAVANI", "EKIP_GUNLUK_MODEL_OFF_MAX",
+                          "EKIP_GUNLUK_OFF_ASIM_W", "EKIP_OFF_HARIC_TIPLER") if k not in globals()]
+if _eksik_cfg:
+    raise SystemExit(f"CONFIG'de tanımlı olmalı, eksik: {_eksik_cfg} -> [CONFIG] hücresini çalıştır.")
 
-if "PLAN_START_DATE" not in globals():
-    PLAN_START_DATE = min(pd.to_datetime(ds).date() for ds in PLAN_GUNLER)
+ekip_off_asim = {}      # (takim, ds) -> IntVar
+if ENABLE_EKIP_GUNLUK_OFF_TAVANI:
+    _haric_e = {str(t).strip().lower() for t in EKIP_OFF_HARIC_TIPLER}
+    _cd_e = set(globals().get("calisma_disi_date_set", set()))
+    for ds in PLAN_GUNLER:
+        _d = pd.to_datetime(ds).date()
+        if _d.weekday() >= 5 or _d in _cd_e:
+            continue
+        _ekip_w = {}
+        for a_raw in AGENTS:
+            a = str(a_raw).strip()
+            if str(tip_map.get(a, {}).get(_d, "")).strip().lower() in _haric_e:
+                continue
+            if not any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])):
+                continue
+            _ekip_w.setdefault(agent_team.get(a), []).append(work[(a, ds)])
+        for t, _ws in _ekip_w.items():
+            if len(_ws) <= EKIP_GUNLUK_MODEL_OFF_MAX:
+                continue
+            _v = model.NewIntVar(0, len(_ws), f"ekip_off_asim_{t}_{ds}")
+            model.Add(len(_ws) - sum(_ws) - EKIP_GUNLUK_MODEL_OFF_MAX <= _v)
+            ekip_off_asim[(t, ds)] = _v
 
-HAFTALIK_OFF_KOTASI = CONFIG.get("HAFTALIK_OFF_KOTASI", 2)
+print(f"ekip günlük off tavanı: {'AÇIK' if ENABLE_EKIP_GUNLUK_OFF_TAVANI else 'KAPALI'} | "
+      f"max {EKIP_GUNLUK_MODEL_OFF_MAX} | W {EKIP_GUNLUK_OFF_ASIM_W} | kurulan ekip-gün: {len(ekip_off_asim)}")
 
-_w31_pzt = PLAN_START_DATE - timedelta(days=PLAN_START_DATE.weekday())
-W31_GUNLER = [_w31_pzt + timedelta(days=k) for k in range(7)]
-W31_TEMMUZ_SET = {d for d in W31_GUNLER if d < PLAN_START_DATE}
-
-_d2ds = {pd.to_datetime(ds).date(): ds for ds in PLAN_GUNLER}
-W31_AGUSTOS_DS = [_d2ds[d] for d in W31_GUNLER if d in _d2ds]
-
-w31_debug_rows = []
-w31_veri_yok = 0
-
-for a_raw in AGENTS:
-    a = str(a_raw).strip()
-    if not (gecmis_kapsam.get(a, set()) & W31_TEMMUZ_SET):
-        w31_veri_yok += 1
-        continue
-
-    temmuz_off = len(gecmis_off_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-    temmuz_izin = len(gecmis_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-    temmuz_haftalik_izin = len(gecmis_haftalik_izin_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-    temmuz_cal = len(gecmis_calisma_gunleri.get(a, set()) & W31_TEMMUZ_SET)
-
-    _zorunlu_off = sum(
-        1 for ds in W31_AGUSTOS_DS
-        if str(tip_map.get(a, {}).get(pd.to_datetime(ds).date(), "")).strip().lower()
-        in ("off_t", "off_t2")
-    )
-
-    w31_debug_rows.append({
-        "agent_user_code": a,
-        "temmuz_calisma": temmuz_cal,
-        "temmuz_off": temmuz_off,
-        "temmuz_izin": temmuz_izin,
-        "temmuz_haftalik_izin": temmuz_haftalik_izin,
-        "agustos_off_talebi": _zorunlu_off,
-    })
-
-w31_debug_df = pd.DataFrame(w31_debug_rows)
-
-print(f"W31 gözlemi ({W31_GUNLER[0]} .. {W31_GUNLER[-1]}) - MODELE ETKİSİ YOK")
-print(f"  Ağustos tarafı: {W31_AGUSTOS_DS}")
-print(f"  Temmuz verisi olan agent: {len(w31_debug_df)} | verisi olmayan: {w31_veri_yok}")
-if len(w31_debug_df):
-    print("\n  Temmuz son haftasında kullanılan off dağılımı:")
-    print(w31_debug_df["temmuz_off"].value_counts().sort_index().to_string())
-    print("\n  1-2 Ağustos için off talebi (off_t/off_t2) olan agent sayısı:")
-    print(w31_debug_df["agustos_off_talebi"].value_counts().sort_index().to_string())
 
 
 

@@ -64,13 +64,16 @@ print(f"coverage ağırlığı -> hafta içi {UNDER_BUFFER_W}/{MISSING_TO_REQUIR
 
 for ds in PLAN_GUNLER:
     _hafta_sonu_mu = pd.to_datetime(ds).weekday() >= 5
-    _u_w = _hs_under_w if _hafta_sonu_mu else UNDER_BUFFER_W
+    # 2026-11-10: surplus katmanında buffer gerçek ihtiyaçtan -> hafta sonu ucuzlatılmaz
+    _u_w = _hs_under_w if _hafta_sonu_mu and not ENABLE_SURPLUS_KATMANI else UNDER_BUFFER_W
     _m_w = _hs_missing_w if _hafta_sonu_mu else MISSING_TO_REQUIRED_W
     _kg_c = globals().get("kritik_gun_carpan", {}).get(ds, 1.0)   # 2026-10-21 kritik gün
     _u_w, _m_w = int(round(_u_w * _kg_c)), int(round(_m_w * _kg_c))
     for v in gun_vardiyalari.get(ds, []):
         objective_terms.append(_u_w * under_buffer[(ds, v)])
         objective_terms.append(_m_w * missing_to_required[(ds, v)])
+        if (ds, v) in globals().get("mip_eksik", {}):   # 2026-11-10: gerçek ihtiyaç altı
+            objective_terms.append(int(round(MIP_EKSIK_W * _kg_c)) * mip_eksik[(ds, v)])
 
         if gece_aksam_vardiyasi_mi[(ds, v)]:
             excess_weight = EXCESS_GECE_AKSAM_W
@@ -234,6 +237,24 @@ print("mesaiye kalamaz terimi -> hafta sonu:", len(globals().get("mk_hs_off_gunl
       "| kritik gün:", len(globals().get("kritik_gun_off", [])))
 # ========================================================================
 
+# ===== 2026-10-19 EKLENEN - TAKIM BUTUNLUGU YUMUSAK (KURUMSAL) =====
+for _e in globals().get("takim_ayrilma_ceza", []):
+    objective_terms.append(TAKIM_AYRILMA_W * _e)
+print("takım ayrılma terimi:", len(globals().get("takim_ayrilma_ceza", [])))
+# ===================================================================
+
+# ===== 2026-10-20 EKLENEN - BOS KOVA CEZASI (hafta sonu çarpanı YOK) =====
+for _var in globals().get("bos_kova", {}).values():
+    objective_terms.append(BOS_KOVA_W * _var)
+# ==========================================================================
+
+# ===== 2026-10-19 EKLENEN - PROVIZYON (KURUMSAL) =====
+for _var in globals().get("prov_gun_muaf", {}).values():
+    objective_terms.append(PROVIZYON_GUN_MUAF_W * _var)
+for _var in globals().get("prov_cift_kacis", {}).values():
+    objective_terms.append(PROVIZYON_CIFT_GUN_W * _var)
+# =====================================================
+
 model.Minimize(sum(objective_terms))
 
 print("Objective term sayısı:", len(objective_terms))
@@ -248,7 +269,6 @@ print("OVER_BUFFER_W:", OVER_BUFFER_W)
 
 
 
-
     # ===== 2026-11-10 EKLENEN - EKIP GUNLUK OFF KADEMELI CEZA =====
     # Ilk asan kisi EKIP_GUNLUK_OFF_ASIM_W (20.000), 2. ve sonrakiler bu deger. Tek gune 6 model
     # off yigiliyordu (diger gunler <= 3). Hafta ici coverage eksigi (50.000) seviyesinde,
@@ -257,9 +277,6 @@ print("OVER_BUFFER_W:", OVER_BUFFER_W)
     # =======================================================
 
 
-
-
 # ===== 2026-11-10 EKLENEN - EKIP GUNLUK OFF KADEMELI CEZA =====
 EKIP_GUNLUK_OFF_ASIM_W2 = CONFIG["EKIP_GUNLUK_OFF_ASIM_W2"]
 # =======================================================
-

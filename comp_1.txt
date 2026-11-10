@@ -1,3 +1,275 @@
+# %% [KISIT] - AY GEÇİŞİ: SARKAN HAFTADA BASE SÜREKLİLİĞİ (SOFT)
+# Plan başladığı ISO hafta önceki aydan SARKAR. Örnek: 1 Eylül 2026 Salı ->
+# W36 haftası 31 Ağustos Pazartesi başlar ama o gün ÖNCEKİ ayın planındadır.
+# İki model aynı haftayı parça parça planlar; bu hücre olmadan takımın base
+# vardiyası hafta ortasında değişir (Pzt 08:00-17:00, Salı 15:00-00:00).
+#
+# KURAL: plan başlangıcından BİR ÖNCEKİ GÜN takım hangi vardiyadaysa, o hafta
+# boyunca O DEVAM ETMESİ TERCİH EDİLİR.
+#
+# 2026-08-28: kural SOFT'a alındı. HARD iken (== 1) kapasite korumasıyla
+# çelişip modeli INFEASIBLE yapıyordu. Artık sapma cezalandırılıyor ama
+# yasaklanmıyor -> model asla durmaz, gerekirse sapar ve raporlar.
+# Ayrıca sadece BİR ÖNCEKİ GÜNE bakılıyor (önceden tüm sarkan günler taranıp
+# baskın vardiya hesaplanıyordu). Süreklilik için belirleyici olan son gündür;
+# 11 saat kuralı da zaten bir önceki güne bakıyor.
+#
+# ÖN KOŞUL: [HÜCRE] - TEMMUZ GEÇMİŞİ - İŞLEME  -> gecmis_calisma
+#           [HÜCRE] - TAKIM HAFTALIK BASE VARDİYA -> team_week_base, agent_week_base
+#
+# SARKAN GÜN SAYISI PLAN_GUNLER'DEN TÜRETİLİR - elle ayar YOK:
+#   ay Pazartesi başlarsa 0 gün -> kural kendiliğinden kurulmaz
+#   ay Pazar    başlarsa 6 gün  -> en kötü durum (geçmiş 7 gün her zaman yeter)
+#
+# EŞLEŞTİRME vardiya KODUNDAN değil SAAT ARALIĞINDAN yapılır; vardiya kodları
+# aydan aya değişebilir, saat aralığı sabit kalır.
+#
+# SABİTLEME YAPILMAYAN DURUMLAR (hepsinde model kendi seçer, rapor edilir):
+#   - takım sarkan günlerde hiç çalışmamış (hepsi off/izin) -> base yok
+#   - geçmiş saat aralığı bu ayın vardiyaları arasında yok  -> eşleşme yok
+#   - o base takım bütünlüğü kuralınca kapatılmış           -> çelişki olurdu
+#   - takımın o hafta hiç base seçeneği yok
+
+if "ENABLE_SARKAN_HAFTA_SUREKLILIK" not in globals():
+    raise SystemExit(
+        "CONFIG'de tanımlı olmalı: ENABLE_SARKAN_HAFTA_SUREKLILIK -> [CONFIG] hücresini çalıştır."
+    )
+
+from datetime import timedelta
+
+sarkan_base_sapma = {}           # takim -> BoolVar  (süreklilik bozulursa 1)
+sarkan_agent_sapma = {}          # agent -> BoolVar  (muaf agent bireysel base bozulursa 1)
+sarkan_hafta_base_rows = []      # tercih edilen / atlanan takımlar
+sarkan_agent_base_rows = []      # muaf agentların bireysel base'i
+sarkan_takim_base_kisiti = 0
+sarkan_agent_base_kisiti = 0
+
+# --- sarkan gün ve hafta (PLAN_GUNLER'den türetilir) ---
+_sh_plan_d = sorted(pd.to_datetime(d).date() for d in PLAN_GUNLER)
+_sh_ilk = _sh_plan_d[0]
+# SADECE bir önceki gün. Ay Pazartesi başlıyorsa önceki gün yok -> kural kurulmaz.
+# 2026-11-10: Cmt/Paz başlarsa da sarkan yok - kilit sadece hafta içi, planda sarkan hafta içi günü yok.
+_sh_onceki = (_sh_ilk - timedelta(days=1)) if 0 < _sh_ilk.weekday() < 5 else None
+_sh_sarkan = [_sh_onceki] if _sh_onceki is not None else []
+_sh_ilk_ds = min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
+_sh_wk = day_week[_sh_ilk_ds]
+
+if not ENABLE_SARKAN_HAFTA_SUREKLILIK:
+    print("ENABLE_SARKAN_HAFTA_SUREKLILIK = False -> ay geçişi süreklilik kuralı KURULMADI.")
+elif not _sh_sarkan:
+    print(f"Sarkan hafta YOK - plan {_sh_ilk} Pazartesi / hafta sonu başlıyor, "
+          f"hafta ay sınırından sarkmıyor. Kural kurulmadı (normal).")
+else:
+    _sh_gecmis = globals().get("gecmis_calisma", {})
+    if not _sh_gecmis:
+        raise SystemExit(
+            "gecmis_calisma yok/boş. Önce [HÜCRE] - TEMMUZ GEÇMİŞİ - İŞLEME hücresini "
+            "çalıştır. (Kuralı bilinçli kapatmak için CONFIG'de "
+            "ENABLE_SARKAN_HAFTA_SUREKLILIK = False yap.)"
+        )
+
+    print(f"Sarkan hafta : {_sh_wk}")
+    print(f"Bakılan gün  : {_sh_onceki}  (plan başlangıcından bir önceki gün)")
+    print(f"Plan ilk günü: {_sh_ilk} ({['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][_sh_ilk.weekday()]})")
+
+    # --- bu ayın sarkan haftasındaki vardiyalar: saat -> vardiya kodu ---
+    _sh_saat_v = {}
+    for _ds in PLAN_GUNLER:
+        if day_week[_ds] != _sh_wk:
+            continue
+        for _v in gun_vardiyalari.get(_ds, []):
+            if _v in globals().get("arife_ozel_vardiya_kodlari", set()):
+                continue
+            if (_ds, _v) in saat:
+                _st = (str(saat[(_ds, _v)][0]).strip()[:5], str(saat[(_ds, _v)][1]).strip()[:5])
+                _sh_saat_v.setdefault(_st, _v)
+
+    # ===== 2026-08-31 - TOLERANSLI SAAT ESLESTIRME =====
+    # Birebir eslestirme, katalog yarim saat kaydiginda (10:00 -> 10:30)
+    # sureklilik kuralini SESSIZCE kurmuyordu. Artik en yakin vardiya secilir.
+    # Bu hucre tek basina calisir: yardimci burada YENIDEN tanimlanir.
+    if "SARKAN_SAAT_TOLERANS_DK" not in globals():
+        raise SystemExit(
+            "CONFIG'de tanımlı olmalı: SARKAN_SAAT_TOLERANS_DK "
+            "-> [CONFIG] hücresini çalıştır."
+        )
+
+    def _sh_dk(_t):
+        _h, _m = str(_t).strip()[:5].split(":")
+        return int(_h) * 60 + int(_m)
+
+    def _sh_fark(_t1, _t2):
+        """DAİRESEL dakika farkı: 23:30 ile 00:00 arası 30'dur, 1410 değil."""
+        _d = abs(_sh_dk(_t1) - _sh_dk(_t2))
+        return min(_d, 1440 - _d)
+
+    def _sh_eslestir(_hedef):
+        """Geçmiş saat aralığına EN YAKIN bu ay vardiyası. (kod, sapma_dk)."""
+        if _hedef in _sh_saat_v:
+            return _sh_saat_v[_hedef], 0
+        if not SARKAN_SAAT_TOLERANS_DK:
+            return None, None
+        _en_v, _en_s = None, None
+        for (_ab, _ae), _av in _sh_saat_v.items():
+            _d1 = _sh_fark(_ab, _hedef[0])
+            _d2 = _sh_fark(_ae, _hedef[1])
+            if _d1 > SARKAN_SAAT_TOLERANS_DK or _d2 > SARKAN_SAAT_TOLERANS_DK:
+                continue
+            _s = _d1 + _d2
+            if _en_s is None or _s < _en_s or (_s == _en_s and str(_av) < str(_en_v)):
+                _en_v, _en_s = _av, _s
+        return _en_v, _en_s
+
+    print(f"Saat eşleştirme toleransı: ±{SARKAN_SAAT_TOLERANS_DK} dk "
+          f"(0 = birebir)")
+    # ===================================================
+
+    # --- takım bütünlüğü kuralının kapattığı base'ler ---
+    _sh_yasak = set()
+    _yd = globals().get("takim_base_yasak_df")
+    if _yd is not None and not _yd.empty:
+        _sh_yasak = {(str(r["takim"]).strip(), r["hafta"], r["vardiya"])
+                     for _, r in _yd.iterrows()}
+
+    # --- agent -> takım ---
+    _sh_takim_uye = {}
+    for _a in AGENTS:
+        _a = str(_a).strip()
+        _t = agent_team.get(_a)
+        if _t is None or pd.isna(_t):
+            continue
+        _sh_takim_uye.setdefault(str(_t).strip(), []).append(_a)
+
+    # ============ 1) TAKIM BASE SÜREKLİLİĞİ ============
+    for _t, _uyeler in sorted(_sh_takim_uye.items()):
+        # sarkan günlerde takımın çalıştığı saat aralıkları (agent-gün sayısıyla)
+        _sayac = {}
+        for _a in _uyeler:
+            _gc = _sh_gecmis.get(_a, {})
+            for _d in _sh_sarkan:
+                if _d not in _gc:
+                    continue
+                _st = (str(_gc[_d][0]).strip()[:5], str(_gc[_d][1]).strip()[:5])
+                _sayac[_st] = _sayac.get(_st, 0) + 1
+
+        if not _sayac:
+            # EDGE CASE: takım sarkan günlerde hiç çalışmamış (off / izin / kayıt yok)
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": None, "vardiya": None,
+                "agent_gun": 0, "durum": "GEÇMİŞ ÇALIŞMA YOK - model serbest seçer"})
+            continue
+
+        _gecmis_st = max(_sayac.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        _agent_gun = _sayac[_gecmis_st]
+        _v, _sh_sapma = _sh_eslestir(_gecmis_st)
+
+        if _v is None:
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": None, "agent_gun": _agent_gun, "saat_sapmasi_dk": None,
+                "durum": f"SAAT EŞLEŞMEDİ - ±{SARKAN_SAAT_TOLERANS_DK} dk içinde aday yok"})
+            continue
+        if (_t, _sh_wk, _v) not in team_week_base:
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": _v, "agent_gun": _agent_gun,
+                "saat_sapmasi_dk": _sh_sapma,
+                "durum": "TAKIM İÇİN BASE SEÇENEĞİ YOK"})
+            continue
+        if (_t, _sh_wk, _v) in _sh_yasak:
+            # bütünlük kuralı bu base'i kapatmış -> == 1 dersek infeasible olur
+            sarkan_hafta_base_rows.append({
+                "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+                "vardiya": _v, "agent_gun": _agent_gun,
+                "saat_sapmasi_dk": _sh_sapma,
+                "durum": "BÜTÜNLÜK KURALI KAPATMIŞ - kadro/kıdem değişmiş olabilir"})
+            continue
+
+        # SOFT: base seçilirse sapma 0 kalır; seçilemezse sapma 1 olur ve ceza alınır.
+        # "== 1" deseydik kapasite korumasıyla çelişip infeasible verirdi.
+        _sp = model.NewBoolVar(f"sarkan_base_sapma_{_t}")
+        model.Add(team_week_base[(_t, _sh_wk, _v)] + _sp >= 1)
+        sarkan_base_sapma[_t] = _sp
+        sarkan_takim_base_kisiti += 1
+        sarkan_hafta_base_rows.append({
+            "takim": _t, "hafta": _sh_wk, "gecmis_saat": "-".join(_gecmis_st),
+            "vardiya": _v, "agent_gun": _agent_gun,
+            "saat_sapmasi_dk": _sh_sapma, "durum": "TERCİH EDİLDİ"})
+
+    # ============ 2) MUAF AGENT BİREYSEL BASE SÜREKLİLİĞİ ============
+    # agent_week_base sadece muaf OLABİLECEK agent-haftalar için üretilir.
+    # Sabitleme KOŞULLU yapılır:  agent_week_base[v] == takim_muaf
+    #   muaf = 1 -> agent geçmişteki v'sinde kalır
+    #   muaf = 0 -> takım base'i artık ona uygun (kıdemi dolmuş olabilir),
+    #               bireysel base sıfırlanır ve agent TAKIMA KATILIR
+    # Böylece "== 1" ile sabitleyip infeasible üretme riski yok.
+    _awb = globals().get("agent_week_base", {})
+    _tmuaf = globals().get("takim_muaf", {})
+    if _awb:
+        for _a in sorted({a for (a, wk, v) in _awb if wk == _sh_wk}):
+            _gc = _sh_gecmis.get(_a, {})
+            _sayac_a = {}
+            for _d in _sh_sarkan:
+                if _d not in _gc:
+                    continue
+                _st = (str(_gc[_d][0]).strip()[:5], str(_gc[_d][1]).strip()[:5])
+                _sayac_a[_st] = _sayac_a.get(_st, 0) + 1
+            if not _sayac_a:
+                # EDGE CASE: agent sarkan günlerde off/izinde -> base yok, model seçer
+                sarkan_agent_base_rows.append({
+                    "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": None,
+                    "vardiya": None, "durum": "GEÇMİŞ ÇALIŞMA YOK - model serbest seçer"})
+                continue
+            _st_a = max(_sayac_a.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            _v_a, _sh_sapma_a = _sh_eslestir(_st_a)
+            if _v_a is None or (_a, _sh_wk, _v_a) not in _awb:
+                sarkan_agent_base_rows.append({
+                    "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": "-".join(_st_a),
+                    "vardiya": _v_a, "saat_sapmasi_dk": _sh_sapma_a,
+                    "durum": "EŞLEŞME YOK ya da agent o vardiyada çalışamıyor"})
+                continue
+            # SOFT: muafsa geçmiş vardiyası tercih edilir, zorlanmaz
+            _sp2 = model.NewBoolVar(f"sarkan_agent_sapma_{_a}")
+            model.Add(_awb[(_a, _sh_wk, _v_a)] + _sp2 >= _tmuaf[(_a, _sh_wk)])
+            sarkan_agent_sapma[_a] = _sp2
+            sarkan_agent_base_kisiti += 1
+            sarkan_agent_base_rows.append({
+                "agent_user_code": _a, "hafta": _sh_wk, "gecmis_saat": "-".join(_st_a),
+                "vardiya": _v_a, "saat_sapmasi_dk": _sh_sapma_a,
+                "durum": "TERCİH EDİLDİ (muaf ise geçmiş vardiyası)"})
+
+sarkan_hafta_base_df = pd.DataFrame(sarkan_hafta_base_rows)
+sarkan_agent_base_df = pd.DataFrame(sarkan_agent_base_rows)
+
+# 2026-08-31: toleransla kurtarılanları ayrıca bas - birebir eşleşme olsaydı
+# bu satırların hepsi "SAAT EŞLEŞMEDİ" olup kural hiç kurulmayacaktı.
+for _ad9, _df9 in (("takım", sarkan_hafta_base_df), ("muaf agent", sarkan_agent_base_df)):
+    if not _df9.empty and "saat_sapmasi_dk" in _df9.columns:
+        _s9 = pd.to_numeric(_df9["saat_sapmasi_dk"], errors="coerce")
+        print(f"{_ad9}: birebir eşleşme {int((_s9 == 0).sum())} | "
+              f"toleransla eşleşen {int((_s9 > 0).sum())} | "
+              f"eşleşmeyen {int(_s9.isna().sum())}")
+
+print(f"\nSüreklilik TERCİHİ kurulan takım    : {sarkan_takim_base_kisiti}")
+print(f"Muaf agent süreklilik tercihi       : {sarkan_agent_base_kisiti}")
+print("   (SOFT - sapma cezalı, model gerekirse sapar, ASLA infeasible olmaz)")
+if not sarkan_hafta_base_df.empty:
+    print("\nTakım base süreklilik durumu:")
+    print(sarkan_hafta_base_df["durum"].value_counts().to_string())
+    _atlanan = sarkan_hafta_base_df[sarkan_hafta_base_df["durum"] != "TERCİH EDİLDİ"]
+    if len(_atlanan):
+        print(f"\nTercih kurulamayan {len(_atlanan)} takım (model kendi seçecek):")
+        display(_atlanan.head(20))
+if not sarkan_agent_base_df.empty:
+    print("\nMuaf agent bireysel base durumu:")
+    print(sarkan_agent_base_df["durum"].value_counts().to_string())
+
+
+
+
+
+
+
 # %% [KISIT] - HAFTA SONU EN AZ 1 OFF (SOFT)
 # 2026-10-14. İş birimi NORM'u sevmiyor: hafta içi 2 off + hafta sonu iki gün çalışma
 # görmek istemiyor, her hafta en az 1 off hafta sonunda olsun. Ceza (agent-hafta başına):
@@ -48,6 +320,8 @@ if ENABLE_HS_EN_AZ_1_OFF:
 
 print("ENABLE_HS_EN_AZ_1_OFF:", ENABLE_HS_EN_AZ_1_OFF, "| W:", HS_EN_AZ_1_OFF_W)
 print("izlenen agent-hafta:", len(hs_tam_calisma))
+
+
 
 
 
@@ -322,6 +596,8 @@ else:
 
 
 
+
+
 # %% [KONTROL] - HAFTALIK OFF TAVANI
 # Bir agent bir haftada en fazla max(2, zorunlu_off) gün off almalı.
 # off_t / off_t2 talepleri tavanın içinde sayılır; izin günleri sayılmaz.
@@ -493,6 +769,7 @@ else:
 
 
 
+
     # ===== 2026-11-10 EKLENEN - HAFTA SONU CIFT CALISMA (TALEP DAHIL) =====
     # True -> hafta ici off TALEP olsa da (Pers+Cuma off_t) Cmt+Paz cift calisma cezali
     # (HS_EN_AZ_1_OFF_W). Haftalik off tavani hafta ici talep + 1 olur, fazla off sadece
@@ -505,3 +782,5 @@ else:
 # ===== 2026-11-10 EKLENEN - HAFTA SONU CIFT CALISMA (TALEP DAHIL) =====
 HS_EN_AZ_1_OFF_TALEP_DAHIL = CONFIG["HS_EN_AZ_1_OFF_TALEP_DAHIL"]
 # =======================================================
+
+

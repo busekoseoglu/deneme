@@ -1,138 +1,265 @@
-# %% [KISIT] - HAFTA SONU EN AZ 1 OFF (SOFT)
-# 2026-10-14. İş birimi NORM'u sevmiyor: hafta içi 2 off + hafta sonu iki gün çalışma
-# görmek istemiyor, her hafta en az 1 off hafta sonunda olsun. Ceza (agent-hafta başına):
-#   Cmt VE Paz çalışılmış  VE  o hafta MODELİN verdiği en az bir hafta içi off var
-# Hafta içi off kişinin TALEBİYSE (off_t / off_t2) ceza yok. İzin / resmi tatil / arife off
-# sayılmaz: izinli hafta + tam hafta sonu NORM değil MESAİ'dir, bu kural dokunmaz.
-# SOFT: hafta sonu kapasite açığı (kişi başı 150.000) bundan pahalı -> gerçekten eksik varsa
-# model yine iki günü de çalıştırabilir. Sadece Cmt ve Paz'ı planda olan haftalar.
-# Mesaiye kalamaz (mk_hafta_sonu_agents) HARİÇ - onlar hafta sonu çalışır. Ceza OBJECTIVE'de.
-# 2026-11-10: HS_EN_AZ_1_OFF_TALEP_DAHIL=True -> hafta içi off TALEP olsa da (Perş+Cuma off_t)
-# Cmt+Paz çift çalışma cezalı. 3. off'a [KISIT] - HAFTALIK OFF TAVANI izin verir. MK bayraktan hariç.
-for _p in ("ENABLE_HS_EN_AZ_1_OFF", "HS_EN_AZ_1_OFF_W", "HS_EN_AZ_1_OFF_TALEP_DAHIL"):
-    if _p not in globals():
-        raise SystemExit(f"CONFIG'de tanımlı olmalı: {_p} -> [CONFIG] hücresini çalıştır.")
+# %% [KISIT] - EKİP GÜNLÜK OFF TAVANI (SOFT)
+# Hafta içi her gün, bir ekipte çalışmayan agent sayısı EKIP_GUNLUK_MODEL_OFF_MAX'ı geçmesin.
+# Sayılan: model off + off_t. Sayılmayan: EKIP_OFF_HARIC_TIPLER (izin, off_t2),
+# hafta içine denk gelen arife / resmi tatil, agentın o gün hiç vardiyası olmayan gün.
+# Aşan her kişi EKIP_GUNLUK_OFF_ASIM_W ceza öder ([HÜCRE] - OBJECTIVE).
+# 2026-11-10: KADEMELİ - ilk aşan kişi W, 2. ve sonrakiler EKIP_GUNLUK_OFF_ASIM_W2 (tek güne 6 off yığılıyordu).
+_eksik_cfg = [k for k in ("ENABLE_EKIP_GUNLUK_OFF_TAVANI", "EKIP_GUNLUK_MODEL_OFF_MAX",
+                          "EKIP_GUNLUK_OFF_ASIM_W", "EKIP_OFF_HARIC_TIPLER",
+                          "EKIP_GUNLUK_OFF_ASIM_W2") if k not in globals()]
+if _eksik_cfg:
+    raise SystemExit(f"CONFIG'de tanımlı olmalı, eksik: {_eksik_cfg} -> [CONFIG] hücresini çalıştır.")
 
-hs_tam_calisma = {}     # (a, hafta) -> BoolVar: 1 = model kaynaklı tam hafta sonu çalışma
-if ENABLE_HS_EN_AZ_1_OFF:
-    _hs1_haric = globals().get("mk_hafta_sonu_agents", set())
-    if HS_EN_AZ_1_OFF_TALEP_DAHIL and "mesaiye_kalamaz_flg" in df_tam.columns:
-        _hs1_haric = _hs1_haric | set(df_tam.loc[pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce")
-                                                 .fillna(0).astype(int) == 1, "agent_user_code"].astype(str).str.strip())
-    for a_raw in AGENTS:
-        a = str(a_raw).strip()
-        if a in _hs1_haric:
+ekip_off_asim = {}      # (takim, ds) -> IntVar
+ekip_off_asim2 = {}     # (takim, ds) -> IntVar: ilk aşan kişiden sonrakiler
+if ENABLE_EKIP_GUNLUK_OFF_TAVANI:
+    _haric_e = {str(t).strip().lower() for t in EKIP_OFF_HARIC_TIPLER}
+    _cd_e = set(globals().get("calisma_disi_date_set", set()))
+    for ds in PLAN_GUNLER:
+        _d = pd.to_datetime(ds).date()
+        if _d.weekday() >= 5 or _d in _cd_e:
             continue
-        _tip = tip_map.get(a, {})
-        for wk, _gunler in week_days.items():
-            _hs = [ds for ds in _gunler if pd.to_datetime(ds).weekday() >= 5]
-            if len(_hs) < 2 or not all((a, ds) in work for ds in _hs):
-                continue
-            # modelin off verebileceği hafta içi günler: talep / izin / tatil / arife değil
-            _hi = [ds for ds in _gunler
-                   if pd.to_datetime(ds).weekday() < 5
-                   and pd.to_datetime(ds).date() not in calisma_disi_date_set
-                   and str(_tip.get(pd.to_datetime(ds).date(), "")).strip().lower()
-                       not in ("izin", "off_t", "off_t2")]
-            if not _hi and not HS_EN_AZ_1_OFF_TALEP_DAHIL:
-                continue
-            _tam = model.NewBoolVar(f"hs_tam_{a}_{wk}")
-            model.Add(_tam >= work[(a, _hs[0])] + work[(a, _hs[1])] - 1)
-            if HS_EN_AZ_1_OFF_TALEP_DAHIL:
-                hs_tam_calisma[(a, wk)] = _tam
-                continue
-            _z = model.NewBoolVar(f"hs_tam_model_off_{a}_{wk}")
-            for ds in _hi:
-                model.Add(_z >= _tam - work[(a, ds)])     # tam hafta sonu + o gün off
-            hs_tam_calisma[(a, wk)] = _z
-
-    # 2026-11-10: ay Pazar başlarsa önceki ayın Cumartesi'si (geçmiş, sabit) + plan Pazar'ı da çift çalışma
-    from datetime import timedelta as _hs_td
-    _hs_ilk_ds = min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
-    _hs_ilk = pd.to_datetime(_hs_ilk_ds).date()
-    if HS_EN_AZ_1_OFF_TALEP_DAHIL and _hs_ilk.weekday() == 6:
-        _hs_gc = globals().get("gecmis_calisma", {})
+        _ekip_w = {}
         for a_raw in AGENTS:
             a = str(a_raw).strip()
-            if a not in _hs1_haric and (a, _hs_ilk_ds) in work and (_hs_ilk - _hs_td(days=1)) in _hs_gc.get(a, {}):
-                hs_tam_calisma[(a, "sarkan_cmt")] = work[(a, _hs_ilk_ds)]
-        print("sarkan Cmt (önceki ay) çalışıp plan Pazar'ı izlenen agent:",
-              sum(1 for k in hs_tam_calisma if k[1] == "sarkan_cmt"))
-
-print("ENABLE_HS_EN_AZ_1_OFF:", ENABLE_HS_EN_AZ_1_OFF, "| W:", HS_EN_AZ_1_OFF_W)
-print("izlenen agent-hafta:", len(hs_tam_calisma))
-
-
-
-
-
-
-
-
-
-
-
-
-# %% [KISIT] - HAFTA SONU EN AZ 1 OFF (SOFT)
-# 2026-10-14. İş birimi NORM'u sevmiyor: hafta içi 2 off + hafta sonu iki gün çalışma
-# görmek istemiyor, her hafta en az 1 off hafta sonunda olsun. Ceza (agent-hafta başına):
-#   Cmt VE Paz çalışılmış  VE  o hafta MODELİN verdiği en az bir hafta içi off var
-# Hafta içi off kişinin TALEBİYSE (off_t / off_t2) ceza yok. İzin / resmi tatil / arife off
-# sayılmaz: izinli hafta + tam hafta sonu NORM değil MESAİ'dir, bu kural dokunmaz.
-# SOFT: hafta sonu kapasite açığı (kişi başı 150.000) bundan pahalı -> gerçekten eksik varsa
-# model yine iki günü de çalıştırabilir. Sadece Cmt ve Paz'ı planda olan haftalar.
-# Mesaiye kalamaz (mk_hafta_sonu_agents) HARİÇ - onlar hafta sonu çalışır. Ceza OBJECTIVE'de.
-# 2026-11-10: HS_EN_AZ_1_OFF_TALEP_DAHIL=True -> hafta içi off TALEP olsa da (Perş+Cuma off_t)
-# Cmt+Paz çift çalışma cezalı. 3. off'a [KISIT] - HAFTALIK OFF TAVANI izin verir. MK bayraktan hariç.
-for _p in ("ENABLE_HS_EN_AZ_1_OFF", "HS_EN_AZ_1_OFF_W", "HS_EN_AZ_1_OFF_TALEP_DAHIL"):
-    if _p not in globals():
-        raise SystemExit(f"CONFIG'de tanımlı olmalı: {_p} -> [CONFIG] hücresini çalıştır.")
-
-hs_tam_calisma = {}     # (a, hafta) -> BoolVar: 1 = model kaynaklı tam hafta sonu çalışma
-if ENABLE_HS_EN_AZ_1_OFF:
-    _hs1_haric = globals().get("mk_hafta_sonu_agents", set())
-    if HS_EN_AZ_1_OFF_TALEP_DAHIL and "mesaiye_kalamaz_flg" in df_tam.columns:
-        _hs1_haric = _hs1_haric | set(df_tam.loc[pd.to_numeric(df_tam["mesaiye_kalamaz_flg"], errors="coerce")
-                                                 .fillna(0).astype(int) == 1, "agent_user_code"].astype(str).str.strip())
-    for a_raw in AGENTS:
-        a = str(a_raw).strip()
-        if a in _hs1_haric:
-            continue
-        _tip = tip_map.get(a, {})
-        for wk, _gunler in week_days.items():
-            _hs = [ds for ds in _gunler if pd.to_datetime(ds).weekday() >= 5]
-            if len(_hs) < 2 or not all((a, ds) in work for ds in _hs):
+            if str(tip_map.get(a, {}).get(_d, "")).strip().lower() in _haric_e:
                 continue
-            # modelin off verebileceği hafta içi günler: talep / izin / tatil / arife değil
-            _hi = [ds for ds in _gunler
-                   if pd.to_datetime(ds).weekday() < 5
-                   and pd.to_datetime(ds).date() not in calisma_disi_date_set
-                   and str(_tip.get(pd.to_datetime(ds).date(), "")).strip().lower()
-                       not in ("izin", "off_t", "off_t2")]
-            if not _hi and not HS_EN_AZ_1_OFF_TALEP_DAHIL:
+            if not any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])):
                 continue
-            _tam = model.NewBoolVar(f"hs_tam_{a}_{wk}")
-            model.Add(_tam >= work[(a, _hs[0])] + work[(a, _hs[1])] - 1)
-            if HS_EN_AZ_1_OFF_TALEP_DAHIL:
-                hs_tam_calisma[(a, wk)] = _tam
+            _ekip_w.setdefault(agent_team.get(a), []).append(work[(a, ds)])
+        for t, _ws in _ekip_w.items():
+            if len(_ws) <= EKIP_GUNLUK_MODEL_OFF_MAX:
                 continue
-            _z = model.NewBoolVar(f"hs_tam_model_off_{a}_{wk}")
-            for ds in _hi:
-                model.Add(_z >= _tam - work[(a, ds)])     # tam hafta sonu + o gün off
-            hs_tam_calisma[(a, wk)] = _z
+            _v = model.NewIntVar(0, len(_ws), f"ekip_off_asim_{t}_{ds}")
+            model.Add(len(_ws) - sum(_ws) - EKIP_GUNLUK_MODEL_OFF_MAX <= _v)
+            ekip_off_asim[(t, ds)] = _v
+            _v2 = model.NewIntVar(0, len(_ws), f"ekip_off_asim2_{t}_{ds}")
+            model.Add(_v - 1 <= _v2)
+            ekip_off_asim2[(t, ds)] = _v2
 
-    # 2026-11-10: ay Pazar başlarsa önceki ayın Cumartesi'si (geçmiş, sabit) + plan Pazar'ı da çift çalışma
-    from datetime import timedelta as _hs_td
-    _hs_ilk_ds = min(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
-    _hs_ilk = pd.to_datetime(_hs_ilk_ds).date()
-    if HS_EN_AZ_1_OFF_TALEP_DAHIL and _hs_ilk.weekday() == 6:
-        _hs_gc = globals().get("gecmis_calisma", {})
-        for a_raw in AGENTS:
-            a = str(a_raw).strip()
-            if a not in _hs1_haric and (a, _hs_ilk_ds) in work and (_hs_ilk - _hs_td(days=1)) in _hs_gc.get(a, {}):
-                hs_tam_calisma[(a, "sarkan_cmt")] = work[(a, _hs_ilk_ds)]
-        print("sarkan Cmt (önceki ay) çalışıp plan Pazar'ı izlenen agent:",
-              sum(1 for k in hs_tam_calisma if k[1] == "sarkan_cmt"))
+print(f"ekip günlük off tavanı: {'AÇIK' if ENABLE_EKIP_GUNLUK_OFF_TAVANI else 'KAPALI'} | "
+      f"max {EKIP_GUNLUK_MODEL_OFF_MAX} | W {EKIP_GUNLUK_OFF_ASIM_W} / 2.+ kişi {EKIP_GUNLUK_OFF_ASIM_W2} | "
+      f"kurulan ekip-gün: {len(ekip_off_asim)}")
 
-print("ENABLE_HS_EN_AZ_1_OFF:", ENABLE_HS_EN_AZ_1_OFF, "| W:", HS_EN_AZ_1_OFF_W)
-print("izlenen agent-hafta:", len(hs_tam_calisma))
+
+
+
+
+
+# %% [HÜCRE] - OBJECTIVE
+# 2026-08-05: off_t talepleri SOFT. Karşılanmayan her off_t günü
+# OFF_TALEP_KARSILANMAMA_W ile cezalandırılır ([KISIT] - OFF_T SOFT hücresi).
+# izin ve off_t2 HARD kaldığı için objective'de karşılıkları yoktur.
+
+objective_terms = []
+
+# 2026-09-29: hafta sonu coverage cezasi CARPAN ile ucuzlatilir. Gerekcesi CONFIG'de.
+# Katsayilar tamsayi olmali (CP-SAT), int() ile yuvarlaniyor.
+if "HAFTA_SONU_COVERAGE_CARPANI" not in globals():
+    raise SystemExit("CONFIG'de tanımlı olmalı: HAFTA_SONU_COVERAGE_CARPANI")
+_hs_under_w = int(round(UNDER_BUFFER_W * HAFTA_SONU_COVERAGE_CARPANI))
+_hs_missing_w = int(round(MISSING_TO_REQUIRED_W * HAFTA_SONU_COVERAGE_CARPANI))
+print(f"coverage ağırlığı -> hafta içi {UNDER_BUFFER_W}/{MISSING_TO_REQUIRED_W} | "
+      f"hafta sonu {_hs_under_w}/{_hs_missing_w} (çarpan {HAFTA_SONU_COVERAGE_CARPANI})")
+
+for ds in PLAN_GUNLER:
+    _hafta_sonu_mu = pd.to_datetime(ds).weekday() >= 5
+    _u_w = _hs_under_w if _hafta_sonu_mu else UNDER_BUFFER_W
+    _m_w = _hs_missing_w if _hafta_sonu_mu else MISSING_TO_REQUIRED_W
+    _kg_c = globals().get("kritik_gun_carpan", {}).get(ds, 1.0)   # 2026-10-21 kritik gün
+    _u_w, _m_w = int(round(_u_w * _kg_c)), int(round(_m_w * _kg_c))
+    for v in gun_vardiyalari.get(ds, []):
+        objective_terms.append(_u_w * under_buffer[(ds, v)])
+        objective_terms.append(_m_w * missing_to_required[(ds, v)])
+
+        if gece_aksam_vardiyasi_mi[(ds, v)]:
+            excess_weight = EXCESS_GECE_AKSAM_W
+        elif mola_destek_vardiyasi_mi[(ds, v)]:
+            excess_weight = EXCESS_MOLA_DESTEK_W
+        else:
+            excess_weight = EXCESS_NORMAL_W
+
+        objective_terms.append(excess_weight * excess_to_required[(ds, v)])
+        objective_terms.append(OVER_BUFFER_W * over_buffer[(ds, v)])
+
+# İkinci mesai ekstra cezası
+for a in AGENTS:
+    objective_terms.append(IKINCI_MESAI_W * ikinci_mesai_aylik[a])
+
+# Hafta sonu çalışma adil dağıtım cezası
+for a in hafta_sonu_calisma_sayisi.keys():
+    objective_terms.append(HAFTA_SONU_FAZLA_CALISMA_W * fazla_hafta_sonu_calisma[a])
+
+# 2026-09-28: hafta sonu cezası 2. kademe (dışbükey). Değişken yoksa eski davranış.
+if "fazla_hafta_sonu_kademe1" in globals() and fazla_hafta_sonu_kademe1:
+    for _a_hk, _var_hk in fazla_hafta_sonu_kademe1.items():
+        objective_terms.append(HAFTA_SONU_KADEME1_W * _var_hk)
+    print("hafta sonu 1. kademe terimi:", len(fazla_hafta_sonu_kademe1),
+          "| eşik:", HAFTA_SONU_KADEME1_GUN, "| W:", HAFTA_SONU_KADEME1_W)
+
+# Arife / resmi tatil mesai ve ihlal cezaları
+if "arife_mesai" in globals() and ARIFE_MESAI_W != 0:
+    for (a, ds, v), var in arife_mesai.items():
+        objective_terms.append(ARIFE_MESAI_W * var)
+
+if "resmi_tatil_mesai" in globals() and RESMI_TATIL_MESAI_W != 0:
+    for (a, ds, v), var in resmi_tatil_mesai.items():
+        objective_terms.append(RESMI_TATIL_MESAI_W * var)
+
+if "resmi_tatil_kisitli_ihlal" in globals():
+    for (a, ds, v), var in resmi_tatil_kisitli_ihlal.items():
+        objective_terms.append(RESMI_TATIL_KISITLI_IHLAL_W * var)
+
+print("ARIFE_MESAI_W:", ARIFE_MESAI_W)
+print("RESMI_TATIL_MESAI_W:", RESMI_TATIL_MESAI_W)
+print("RESMI_TATIL_KISITLI_IHLAL_W:", RESMI_TATIL_KISITLI_IHLAL_W)
+
+# Haftalık hedef sapma cezası - ÖLÜ BLOK (2026-08-10 tespit)
+# weekly_under / weekly_over değişkenlerini üreten hiçbir hücre YOK, hiçbir
+# sürümde de olmamış. Bu iki if hiçbir zaman True olmuyor, WEEKLY_UNDER_W ve
+# WEEKLY_OVER_W objective'e hiç girmiyor. Ağırlıkları değiştirmek bir şey
+# değiştirmez. Aynı işi [KISIT] - HAFTALIK OFF TAVANI yapıyor.
+if "weekly_under" in globals():
+    for (a, wk), var in weekly_under.items():
+        objective_terms.append(WEEKLY_UNDER_W * var)
+if "weekly_over" in globals():
+    for (a, wk), var in weekly_over.items():
+        objective_terms.append(WEEKLY_OVER_W * var)
+
+print("WEEKLY UNDER W:", WEEKLY_UNDER_W)
+print("WEEKLY OVER W:", WEEKLY_OVER_W)
+
+# Günlük fazla atama yığılma cezası
+if "daily_excess_over" in globals():
+    for ds, var in daily_excess_over.items():
+        objective_terms.append(DAILY_EXCESS_OVER_W * var)
+print("DAILY EXCESS SOFT LIMIT:", DAILY_EXCESS_SOFT_LIMIT)
+print("DAILY_EXCESS_OVER_W:", DAILY_EXCESS_OVER_W)
+
+# Partial end week tamamen OFF kalma cezası
+if "partial_end_week_all_off" in globals():
+    for key, var in partial_end_week_all_off.items():
+        objective_terms.append(PARTIAL_END_WEEK_ALL_OFF_W * var)
+print("PARTIAL END WEEK ALL OFF W:", PARTIAL_END_WEEK_ALL_OFF_W)
+
+# off_t soft ceza - değişkenler varsa
+if "off_t_ihlal" in globals():
+    # 2026-09-18: ağırlık agent bazlı (off önceliği). Sözlük yoksa eski davranış.
+    _off_w = globals().get("off_t_agent_ceza_w", {})
+    for (a, ds), var in off_t_ihlal.items():
+        objective_terms.append(_off_w.get(a, OFF_TALEP_KARSILANMAMA_W) * var)
+    print("off_t soft ceza terimi:", len(off_t_ihlal))
+else:
+    print("off_t_ihlal yok -> off_t cezası objective'e girmedi")
+print("OFF_TALEP_KARSILANMAMA_W:", OFF_TALEP_KARSILANMAMA_W)
+
+# haftalık off tavanı aşımı - sadece SOFT modda değişken üretilir
+if "model_off_tavan_asim" in globals() and model_off_tavan_asim:
+    for (a, wk), var in model_off_tavan_asim.items():
+        objective_terms.append(MODEL_OFF_TAVAN_ASIM_W * var)
+    print("haftalık off tavanı soft ceza terimi:", len(model_off_tavan_asim))
+
+# ===== 2026-08-12 EKLENEN - TAKIM VARDIYA GECMIS DENGESI =====
+# Değişkenler [KISIT] - TAKIM VARDİYA GEÇMİŞ DENGESİ (SOFT) hücresinde üretilir.
+# ENABLE_TAKIM_VARDIYA_DENGE = False iken sözlükler BOŞ kalır, buraya hiçbir
+# terim girmez - bu blok o durumda sessizce atlanır.
+if "takim_vardiya_denge_sapma" in globals() and takim_vardiya_denge_sapma:
+    for (_t, _b), (_arti, _eksi) in takim_vardiya_denge_sapma.items():
+        objective_terms.append(TAKIM_VARDIYA_DENGE_W * _arti)
+        objective_terms.append(TAKIM_VARDIYA_DENGE_W * _eksi)
+    print("takım vardiya denge sapma terimi:", 2 * len(takim_vardiya_denge_sapma))
+    print("TAKIM_VARDIYA_DENGE_W:", TAKIM_VARDIYA_DENGE_W)
+
+if "takim_vardiya_denge_asim" in globals() and takim_vardiya_denge_asim:
+    for (_t, _b), _var in takim_vardiya_denge_asim.items():
+        objective_terms.append(TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W * _var)
+    print("takım vardiya aylık tavan aşımı terimi:", len(takim_vardiya_denge_asim))
+    print("TAKIM_VARDIYA_DENGE_MAX_HAFTA:", TAKIM_VARDIYA_DENGE_MAX_HAFTA,
+          "| aşım W:", TAKIM_VARDIYA_DENGE_MAX_HAFTA_ASIM_W)
+# =============================================================
+
+# ===== 2026-08-28 EKLENEN - AY GECISI SAPMA CEZALARI =====
+# Ay geçişi kuralları SOFT: sapma cezalandırılır ama yasaklanmaz.
+# Ağırlıklar coverage'ın ALTINDA -> model önce talebi karşılar, sonra sürekliliği.
+if "sarkan_base_sapma" in globals() and sarkan_base_sapma:
+    for _t, _var in sarkan_base_sapma.items():
+        objective_terms.append(SARKAN_BASE_SAPMA_W * _var)
+    print("ay geçişi - takım süreklilik sapma terimi:", len(sarkan_base_sapma))
+
+if "sarkan_agent_sapma" in globals() and sarkan_agent_sapma:
+    for _a, _var in sarkan_agent_sapma.items():
+        objective_terms.append(SARKAN_KISI_SAPMA_W * _var)
+    print("ay geçişi - muaf agent süreklilik sapma terimi:", len(sarkan_agent_sapma))
+
+if "sarkan_kisi_sapma" in globals() and sarkan_kisi_sapma:
+    for _a, _var in sarkan_kisi_sapma.items():
+        objective_terms.append(SARKAN_KISI_SAPMA_W * _var)
+    print("ay geçişi - kişi bazlı devir sapma terimi:", len(sarkan_kisi_sapma))
+    print("SARKAN_BASE_SAPMA_W:", SARKAN_BASE_SAPMA_W,
+          "| SARKAN_KISI_SAPMA_W:", SARKAN_KISI_SAPMA_W)
+# =========================================================
+
+# ===== 2026-09-04 EKLENEN - GUNDUZ VARDIYA ROTASYONU =====
+# Değişkenler [KISIT] - GÜNDÜZ VARDİYA ROTASYONU (SOFT) hücresinde üretilir.
+# ENABLE_GUNDUZ_ROTASYON = False iken sözlük BOŞ kalır, buraya terim girmez.
+if "gunduz_rotasyon_asim" in globals() and gunduz_rotasyon_asim:
+    for (_t, _sa), _var in gunduz_rotasyon_asim.items():
+        objective_terms.append(GUNDUZ_ROTASYON_W * _var)
+    print("gündüz rotasyon aşım terimi:", len(gunduz_rotasyon_asim))
+    print("GUNDUZ_ROTASYON_W:", GUNDUZ_ROTASYON_W,
+          "| tavan:", GUNDUZ_AYNI_VARDIYA_MAX_HAFTA, "hafta")
+# =========================================================
+
+# ===== 2026-10-14 EKLENEN - MESAIYE KALAMAZ HAFTA SONU / KRITIK GUN =====
+# Terimler kendi [KISIT] hücrelerinde hazırlanır; hücre çalışmadıysa buraya girmez.
+for (_a, _ds) in globals().get("mk_hs_off_gunleri", []):
+    objective_terms.append(MK_HAFTA_SONU_OFF_W * (1 - work[(_a, _ds)]))
+for _var in globals().get("mk_yan_yana_off", {}).values():
+    objective_terms.append(MK_YAN_YANA_OFF_W * _var)
+for _p, _e in globals().get("mk_haftalik_sapma", {}).values():
+    objective_terms.append(MK_HAFTALIK_DENGE_W * (_p + _e))
+for _w, _a, _ds in globals().get("kritik_gun_off", []):
+    objective_terms.append(_w * (1 - work[(_a, _ds)]))
+for _var in globals().get("hs_tam_calisma", {}).values():
+    objective_terms.append(HS_EN_AZ_1_OFF_W * _var)
+for _w, _var in globals().get("gece_kisi_ceza", []):      # 2026-10-16 gece nöbeti
+    objective_terms.append(_w * _var)
+for _var in globals().get("ekip_off_asim", {}).values():  # 2026-10-27 ekip günlük off tavanı
+    objective_terms.append(EKIP_GUNLUK_OFF_ASIM_W * _var)
+for _var in globals().get("ekip_off_asim2", {}).values():  # 2026-11-10 kademeli: 2.+ kişi W2'ye tamamlanır
+    objective_terms.append((EKIP_GUNLUK_OFF_ASIM_W2 - EKIP_GUNLUK_OFF_ASIM_W) * _var)
+print("mesaiye kalamaz terimi -> hafta sonu:", len(globals().get("mk_hs_off_gunleri", [])),
+      "| yan yana:", len(globals().get("mk_yan_yana_off", {})),
+      "| haftalık:", len(globals().get("mk_haftalik_sapma", {})),
+      "| kritik gün:", len(globals().get("kritik_gun_off", [])))
+# ========================================================================
+
+model.Minimize(sum(objective_terms))
+
+print("Objective term sayısı:", len(objective_terms))
+print("UNDER_BUFFER_W:", UNDER_BUFFER_W)
+print("MISSING_TO_REQUIRED_W:", MISSING_TO_REQUIRED_W)
+print("OVERTIME_W:", OVERTIME_W)
+print("EXCESS_GECE_AKSAM_W:", EXCESS_GECE_AKSAM_W)
+print("EXCESS_NORMAL_W:", EXCESS_NORMAL_W)
+print("EXCESS_MOLA_DESTEK_W:", EXCESS_MOLA_DESTEK_W)
+print("OVER_BUFFER_W:", OVER_BUFFER_W)
+
+
+
+
+
+    # ===== 2026-11-10 EKLENEN - EKIP GUNLUK OFF KADEMELI CEZA =====
+    # Ilk asan kisi EKIP_GUNLUK_OFF_ASIM_W (20.000), 2. ve sonrakiler bu deger. Tek gune 6 model
+    # off yigiliyordu (diger gunler <= 3). Hafta ici coverage eksigi (50.000) seviyesinde,
+    # off_t ret alt bandinin (0,6 x 100.000) ALTINDA -> off talebi reddedilmez.
+    "EKIP_GUNLUK_OFF_ASIM_W2": 50000,
+    # =======================================================
+
+
+
+
+# ===== 2026-11-10 EKLENEN - EKIP GUNLUK OFF KADEMELI CEZA =====
+EKIP_GUNLUK_OFF_ASIM_W2 = CONFIG["EKIP_GUNLUK_OFF_ASIM_W2"]
+# =======================================================
+

@@ -802,7 +802,7 @@ _ham_sheetler = [
     ("GUNDUZ_ROTASYON", globals().get("gunduz_rotasyon_detay_df")),
     # 2026-10-27 EKLENEN - EKIP GUNLUK OFF TAVANI ([KONTROL] - EKİP GÜNLÜK OFF TAVANI)
     ("EKIP_GUNLUK_OFF", globals().get("ekip_gunluk_off_df")),
-    # 2026-11-12 - [KONTROL] - İNGİLİZCE 7/24 KAPSAMA (gün x yarım saat ingilizceci sayısı)
+    # 2026-11-12 GOLD - [KONTROL] - İNGİLİZCE 7/24 KAPSAMA (gün x yarım saat ingilizceci sayısı)
     ("INGILIZCE_7_24", globals().get("ingilizce_saat_df")),
 ]
 

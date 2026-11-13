@@ -59,6 +59,7 @@ RENK = {
     "resmi_tatil": "F8CBAD",   # turuncu
     "arife":       "D0E0E3",   # açık camgöbeği - tatil kısıtlı agent 09:00-13:00
     "arife_mesai": "D5A6BD",   # pembemsi - diğer agentlar (ücretli arife mesaisi)
+    "provizyon":   "F9CB9C",   # şeftali - provizyon hafta sonu 10-14 + 18-22 (2026-10-19)
     "norm":        "D9EAD3",   # açık yeşil
     "mesai":       "FFE599",   # sarı
     "telafi":      "B6D7A8",   # yeşil (telafi - ücretli mesai DEĞİL)
@@ -81,6 +82,7 @@ LEJANT = [
     ("RESMİ TATİL MESAİ", "resmi_tatil", "Resmi tatil gününde çalışma (aylık iş günü sayılmaz, ücretli mesai)"),
     ("ARİFE",             "arife",       "Arife günü - hamile/süt/mesaiye kalamaz agent, 09:00-13:00"),
     ("ARİFE MESAİ",       "arife_mesai", "Arife günü - diğer agentlar (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("... PROVİZYON",     "provizyon",   "Provizyoncu hafta sonu bölünmüş vardiya 10-14 + 18-22 (NORM/MESAİ/TELAFİ metinde)"),
     ("NORM + vardiya",    "norm",        "Hafta sonu çalışma, haftalık 5 günlük kota İÇİNDE"),
     ("MESAİ + vardiya",   "mesai",       "Hafta sonu çalışma, AYLIK kotayı aşan (ücretli mesai)"),
     ("TELAFİ + vardiya",  "telafi",      "Hafta sonu çalışma, başka haftadaki fazla off'un telafisi (ücretli mesai DEĞİL)"),
@@ -354,7 +356,7 @@ _kimlik_kolonlari = _kimlik_df_kolonlari + _kidem_kolonlari + _muaf_kolonlari
 
 _ozet_kolonlari = ["toplam_calisma", "hafta_ici_calisma", "norm_hafta_sonu",
                    "telafi_hafta_sonu", "mesai_hafta_sonu", "resmi_tatil_calisma",
-                   "arife_calisma", "arife_mesai", "izin_gun",
+                   "arife_calisma", "arife_mesai", "provizyon_gun", "izin_gun",
                    "off_gun", "off_t_talep", "off_t_karsilanmayan", "off_t2_talep",
                    "gecmis_calisma_gun"]
 
@@ -411,7 +413,7 @@ for _i, a_raw in enumerate(AGENTS):
     _norm_a = norm_gunleri_map.get(a, set())
 
     _n_calisma = _n_hafta_ici = _n_norm = _n_mesai = _n_telafi = _n_rt = 0
-    _n_arife = _n_arife_mesai = 0
+    _n_arife = _n_arife_mesai = _n_prov = 0
     _n_izin = _n_off = _n_off_t = _n_off_t_ihlal = _n_off_t2 = 0
     _n_gecmis_calisma = 0
 
@@ -444,6 +446,9 @@ for _i, a_raw in enumerate(AGENTS):
         tip = str(_tip_dates.get(d, "")).strip().lower()
         calisiyor = cozum_calisma.get((a, ds), 0) == 1
         vardiya = _vardiya_metni(ds, cozum_atama.get((a, ds))) if calisiyor else ""
+        _prov_gun = calisiyor and (ds, cozum_atama.get((a, ds))) in globals().get("prov_vardiyalar", set())
+        if _prov_gun:   # 2026-10-19
+            vardiya = "PROVİZYON " + " + ".join(f"{b}-{e}" for b, e in PROVIZYON_PARCALAR)
 
         if tip == "izin":
             _n_izin += 1
@@ -509,6 +514,10 @@ for _i, a_raw in enumerate(AGENTS):
             row[_kol] = vardiya
             _renk = None
 
+        if _prov_gun:
+            _n_prov += 1
+            _renk = "provizyon"
+
         # off_t talebi vardı ama karşılanmadı -> rengi ezer
         if tip == "off_t":
             _n_off_t_ihlal += 1
@@ -525,6 +534,7 @@ for _i, a_raw in enumerate(AGENTS):
     row["resmi_tatil_calisma"] = _n_rt
     row["arife_calisma"] = _n_arife
     row["arife_mesai"] = _n_arife_mesai
+    row["provizyon_gun"] = _n_prov
     row["izin_gun"] = _n_izin
     row["off_gun"] = _n_off
     row["off_t_talep"] = _n_off_t
@@ -802,8 +812,6 @@ _ham_sheetler = [
     ("GUNDUZ_ROTASYON", globals().get("gunduz_rotasyon_detay_df")),
     # 2026-10-27 EKLENEN - EKIP GUNLUK OFF TAVANI ([KONTROL] - EKİP GÜNLÜK OFF TAVANI)
     ("EKIP_GUNLUK_OFF", globals().get("ekip_gunluk_off_df")),
-    # 2026-11-12 GOLD - [KONTROL] - İNGİLİZCE 7/24 KAPSAMA (gün x yarım saat ingilizceci sayısı)
-    ("INGILIZCE_7_24", globals().get("ingilizce_saat_df")),
 ]
 
 _kural_df = globals().get("ihlal_ozet_df")

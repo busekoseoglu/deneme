@@ -1,20 +1,123 @@
-from sklearn.inspection import permutation_importance
+# =====================================================================
+# HIZLI OPTUNA (örnekleme yok, tam veri)
+# Hızlandırmalar:
+#   1) lgb.Dataset BİR KEZ oluşturulur, tüm trial'larda tekrar kullanılır
+#      (55M satırın binning işlemi her trial'da tekrarlanmaz)
+#   2) Early stopping logloss ile (AP'ye göre çok daha ucuz), sabır = 50
+#   3) learning_rate aralığı yükseltildi -> daha az ağaç
+#   4) max_bin = 127 -> histogram hesabı daha hızlı
+# =====================================================================
+import lightgbm as lgb
+import optuna
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, precision_score, recall_score
 
-feats_b = model_b.feature_name_
+# --- 16 değişkenlik liste ---
+feats = [
+    # "degisken1", "degisken2", ...  # <- kendi 16 değişkenini yaz
+]
 
-idx = X_val.sample(500_000, random_state=42).index
-r = permutation_importance(model_b, X_val.loc[idx, feats_b], y_val.loc[idx],
-                           scoring="average_precision",
-                           n_repeats=3, random_state=42, n_jobs=1)
+X_tr, y_tr = X_train[feats], y_train
+X_v, y_v = X_val[feats], y_val
+K = int(len(y_v) * 0.016)
 
-imp = pd.DataFrame({
-    "feature": feats_b,
-    "perm_imp": r.importances_mean,
-    "std": r.importances_std,
-}).sort_values("perm_imp", ascending=False)
+# --- Dataset'leri BİR KEZ oluştur ---
+DATASET_PARAMS = {"max_bin": 127, "verbose": -1}
+dtrain = lgb.Dataset(X_tr, label=y_tr, params=DATASET_PARAMS, free_raw_data=False)
+dval = lgb.Dataset(X_v, label=y_v, reference=dtrain, free_raw_data=False)
+dtrain.construct()
+dval.construct()
+print("Dataset hazır.")
 
-print(imp.round(4).to_string(index=False))
+FIXED_PARAMS = {
+    "objective": "binary",
+    "metric": "binary_logloss",
+    "boosting_type": "gbdt",
+    "subsample_freq": 1,
+    "max_bin": 127,
+    "seed": 42,
+    "verbose": -1,
+    "num_threads": -1,
+}
 
-imp.set_index("feature")["perm_imp"].sort_values().plot.barh(figsize=(8, 10))
-plt.title("Permutation Importance (val, average precision)")
-plt.show()
+
+def precision_at_k(y, p, k):
+    return np.asarray(y)[np.argsort(-p)[:k]].mean()
+
+
+def objective(trial):
+    max_depth = trial.suggest_int("max_depth", 3, 8)
+    params = {
+        **FIXED_PARAMS,
+        "max_depth": max_depth,
+        "num_leaves": trial.suggest_int("num_leaves", 8, min(127, 2 ** max_depth)),
+        "learning_rate": trial.suggest_float("learning_rate", 0.05, 0.15, log=True),
+        "min_child_samples": trial.suggest_int("min_child_samples", 500, 50000, log=True),
+        "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 50, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 50, log=True),
+        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, 3.0),
+    }
+    n_est = trial.suggest_int("n_estimators", 500, 2500, step=500)
+
+    booster = lgb.train(
+        params, dtrain,
+        num_boost_round=n_est,
+        valid_sets=[dval], valid_names=["val"],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+
+    p = booster.predict(X_v, num_iteration=booster.best_iteration)
+    ap = average_precision_score(y_v, p)
+    pk = precision_at_k(y_v, p, K)
+    pred = (p >= 0.5).astype(int)
+    pr = precision_score(y_v, pred, zero_division=0)
+    rc = recall_score(y_v, pred, zero_division=0)
+
+    best_iter = booster.best_iteration if booster.best_iteration > 0 else n_est
+    trial.set_user_attr("best_iter", int(best_iter))
+    trial.set_user_attr("prec_at_k", float(pk))
+    trial.set_user_attr("precision_05", float(pr))
+    trial.set_user_attr("recall_05", float(rc))
+
+    print(f"Trial {trial.number} | PR-AUC: {ap:.4f} | P@K: {pk:.4f} "
+          f"| P(0.5): {pr:.3f} | R(0.5): {rc:.3f} | iter: {best_iter}")
+    return ap
+
+
+study = optuna.create_study(direction="maximize",
+                            sampler=optuna.samplers.TPESampler(seed=42))
+study.optimize(objective, n_trials=20)
+
+# --- Sonuç tablosu ---
+print(study.trials_dataframe()[["number", "value", "user_attrs_precision_05",
+                                "user_attrs_recall_05", "user_attrs_prec_at_k",
+                                "user_attrs_best_iter"]]
+      .sort_values("value", ascending=False).to_string(index=False))
+
+bt = study.best_trial
+print("\nEn iyi trial:", bt.number, "| PR-AUC:", round(bt.value, 4))
+print(bt.params)
+
+
+# =====================================================================
+# FİNAL MODEL (train + val) - LGBMClassifier olarak, export'a uygun
+# =====================================================================
+best_params = {
+    "objective": "binary",
+    "boosting_type": "gbdt",
+    "subsample_freq": 1,
+    "max_bin": 127,
+    "random_state": 42,
+    "verbosity": -1,
+    "n_jobs": -1,
+    **{k: v for k, v in bt.params.items() if k != "n_estimators"},
+    "n_estimators": int(bt.user_attrs["best_iter"] * 1.1),
+}
+
+final_model = lgb.LGBMClassifier(**best_params)
+final_model.fit(pd.concat([X_train[feats], X_val[feats]]),
+                pd.concat([y_train, y_val]))
+print("Final model eğitildi. Ağaç sayısı:", best_params["n_estimators"])

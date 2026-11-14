@@ -1,15 +1,20 @@
 from sklearn.inspection import permutation_importance
 
-def perm_imp(model, X, y, n=500_000):
-    idx = X.sample(min(n, len(X)), random_state=42).index
-    r = permutation_importance(model, X.loc[idx], y.loc[idx],
-                               scoring="average_precision",
-                               n_repeats=3, random_state=42, n_jobs=1)
-    return pd.Series(r.importances_mean, index=X.columns)
-
 feats_b = model_b.feature_name_
+
+idx = X_val.sample(500_000, random_state=42).index
+r = permutation_importance(model_b, X_val.loc[idx, feats_b], y_val.loc[idx],
+                           scoring="average_precision",
+                           n_repeats=3, random_state=42, n_jobs=1)
+
 imp = pd.DataFrame({
-    "val": perm_imp(model_b, X_val[feats_b], y_val),
-    "oot_eylul": perm_imp(model_b, X_eylul[feats_b], y_eylul, n=1_000_000),
-}).sort_values("oot_eylul", ascending=False)
-print(imp.round(4).to_string())
+    "feature": feats_b,
+    "perm_imp": r.importances_mean,
+    "std": r.importances_std,
+}).sort_values("perm_imp", ascending=False)
+
+print(imp.round(4).to_string(index=False))
+
+imp.set_index("feature")["perm_imp"].sort_values().plot.barh(figsize=(8, 10))
+plt.title("Permutation Importance (val, average precision)")
+plt.show()

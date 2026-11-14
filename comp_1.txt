@@ -1,158 +1,143 @@
-/* =====================================================================
-   YURT DIŞI SEYAHAT GEÇMİŞİ DEĞİŞKENLERİ
-   ---------------------------------------------------------------------
-   Seyahat tanımı target ile birebir aynı:
-     bir müşteri bir ayda yurt dışına çıkmış sayılır, eğer o ay
-       - yurt dışı fiziksel POS işlemi (terminal 11, ülke TR/TU/TUR dışı, entry 1/4/5/7) VEYA
-       - NOF_INTERNATIONAL_ATM_TRX > 0
-     varsa.
+# =====================================================================
+# 1) AYARLAR VE VERİ
+#    Gerekli değişkenler notebook'ta hazır olmalı:
+#    X_train, y_train, X_val, y_val  (syh_ değişkenleri eklenmiş, NULL'lar doldurulmuş)
+#    X_eylul, y_eylul, X_ekim, y_ekim  (OOT - sadece en sonda değerlendirme için)
+# =====================================================================
+import lightgbm as lgb
+import optuna
+import numpy as np
+import pandas as pd
+import joblib
+from sklearn.metrics import (average_precision_score, precision_score,
+                             recall_score, fbeta_score, confusion_matrix)
 
-   Snapshot'lar (data_date) : 2025-09-30 .. 2026-09-30  (ay sonları)
-   Geriye bakış             : 24 ay -> seyahat verisi 2023-10 .. 2026-09
-   Zaman kuralı             : sadece data_date ve öncesindeki aylar kullanılır
-                              (m = 0 -> data_date'in kendi ayı, m = 23 -> 23 ay önce).
-                              Target ayı (data_date + 1) HİÇBİR değişkene girmez.
+DROP = ["syh_ay_say_24m"]
+feats = [c for c in X_train.columns if c not in DROP]
+print("Değişken sayısı:", len(feats))
 
-   Çıktı: BSEN_SYH_GECMIS_DEGISKENLER  (party_id, data_date)
-     - Sadece son 24 ayda en az bir kez yurt dışına çıkmış müşteriler için satır üretilir.
-     - Ana tabloya LEFT JOIN ON party_id, data_date.
-     - Join sonrası boş gelenler = son 24 ayda hiç yurt dışına çıkmamış:
-         *_flg, *_ay_say, *_tutar, *_islem  -> 0 ile doldur
-         syh_son_seyahat_ay_once            -> NULL bırak (LightGBM işler) veya 99 ver
-   ===================================================================== */
+X_tr, y_tr = X_train[feats], y_train
+X_v, y_v = X_val[feats], y_val
 
+K = int(len(y_v) * 0.016)   # val'de, OOT'deki ~0.6 eşiğine denk hacim (bilgi amaçlı)
 
-/* ---------------------------------------------------------------------
-   1) AYLIK SEYAHAT TABLOSU: hangi müşteri hangi ay yurt dışındaydı
-   --------------------------------------------------------------------- */
-CREATE TABLE BSEN_SYH_AYLIK_SEYAHAT NOLOGGING AS
-WITH POS AS (
-    SELECT a.party_id,
-           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
-           COUNT(*) AS pos_islem,
-           SUM(CASE WHEN a.transaction_amount_tl > 0
-                    THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
-    FROM   edw.trx_card_transaction a
-    WHERE  a.card_transaction_date >= DATE '2023-10-01'
-      AND  a.card_transaction_date <  DATE '2026-10-01'            -- saat bileşenine karşı güvenli
-      AND  a.transaction_terminal_tp_id = 11                        -- fiziksel POS
-      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
-      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
-    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
-),
-ATM AS (
-    SELECT c.party_id,
-           c.data_date AS seyahat_ay,
-           MAX(c.nof_international_atm_trx) AS atm_islem
-    FROM   dm.cnf_card_financial_trx_aggr c
-    WHERE  c.data_date BETWEEN DATE '2023-10-31' AND DATE '2026-09-30'
-      AND  c.nof_international_atm_trx > 0
-    GROUP BY c.party_id, c.data_date
-)
-SELECT party_id,
-       seyahat_ay,
-       SUM(pos_islem) AS pos_islem,
-       SUM(pos_tutar) AS pos_tutar,
-       SUM(atm_islem) AS atm_islem
-FROM (
-    SELECT party_id, seyahat_ay, pos_islem, pos_tutar, 0 AS atm_islem FROM pos
-    UNION ALL
-    SELECT party_id, seyahat_ay, 0, 0, atm_islem FROM atm
-)
-GROUP BY party_id, seyahat_ay;
-
-CREATE INDEX IX_SYH_AYLIK ON BSEN_SYH_AYLIK_SEYAHAT (party_id, seyahat_ay);
+FIXED_PARAMS = {
+    "objective": "binary",
+    "metric": "average_precision",   # early stopping bunu izler
+    "boosting_type": "gbdt",
+    "subsample_freq": 1,
+    "n_estimators": 5000,            # üst sınır; early stopping keser
+    "random_state": 42,
+    "verbosity": -1,
+    "n_jobs": -1,
+}
 
 
-/* ---------------------------------------------------------------------
-   2) SNAPSHOT BAZINDA GEÇMİŞ DEĞİŞKENLERİ
-      m = data_date ile seyahat ayı arasındaki ay farkı (0..23)
-      Hedef ay = data_date + 1  ->  geçen yıl hedef ay = data_date - 11  (m = 11)
-   --------------------------------------------------------------------- */
-CREATE TABLE BSEN_SYH_GECMIS_DEGISKENLER NOLOGGING AS
-WITH CAL AS (
-    SELECT DISTINCT last_day_of_month AS data_date
-    FROM   edw.cmn_calendar
-    WHERE  last_day_of_month BETWEEN DATE '2025-09-30' AND DATE '2026-09-30'
-),
-X AS (
-    SELECT s.party_id,
-           c.data_date,
-           MONTHS_BETWEEN(c.data_date, s.seyahat_ay) AS m,   -- iki ay sonu arası -> tam sayı
-           s.pos_islem,
-           s.pos_tutar,
-           s.atm_islem
-    FROM   bsen_syh_aylik_seyahat s
-    JOIN   cal c
-      ON   s.seyahat_ay <= c.data_date                      -- GELECEK YOK: en fazla data_date ayı
-     AND   s.seyahat_ay >  ADD_MONTHS(c.data_date, -24)     -- son 24 ay
-)
-SELECT party_id,
-       data_date,
-
-       -- Snapshot ayında (data_date ayı) yurt dışındaydı mı
-       MAX(CASE WHEN m = 0 THEN 1 ELSE 0 END)               AS syh_snap_ay_flg,
-
-       -- Geçen yıl hedef ay (target ayının 12 ay öncesi)
-       MAX(CASE WHEN m = 11 THEN 1 ELSE 0 END)              AS syh_gecen_yil_hedef_ay_flg,
-       -- Geçen yıl hedef ay ±1 (3 aylık pencere; tatil tarihleri kayabilir)
-       MAX(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END) AS syh_gecen_yil_hedef_donem_flg,
-       SUM(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END) AS syh_gecen_yil_hedef_donem_ay_say,
-       -- İki yıl önce hedef ay (target ayının 24 ay öncesi)
-       MAX(CASE WHEN m = 23 THEN 1 ELSE 0 END)              AS syh_iki_yil_once_hedef_ay_flg,
-
-       -- Sıklık: son N ayda kaç farklı ay yurt dışına çıktı
-       SUM(CASE WHEN m < 3  THEN 1 ELSE 0 END)              AS syh_ay_say_3m,
-       SUM(CASE WHEN m < 6  THEN 1 ELSE 0 END)              AS syh_ay_say_6m,
-       SUM(CASE WHEN m < 12 THEN 1 ELSE 0 END)              AS syh_ay_say_12m,
-       COUNT(*)                                             AS syh_ay_say_24m,
-
-       -- Recency: son seyahatten bu yana geçen ay (0 = snapshot ayında)
-       MIN(m)                                               AS syh_son_seyahat_ay_once,
-
-       -- Yoğunluk: son 12 ay yurt dışı POS / ATM
-       SUM(CASE WHEN m < 12 THEN pos_islem ELSE 0 END)      AS syh_yd_pos_islem_12m,
-       SUM(CASE WHEN m < 12 THEN pos_tutar ELSE 0 END)      AS syh_yd_pos_tutar_12m,
-       SUM(CASE WHEN m < 12 THEN atm_islem ELSE 0 END)      AS syh_yd_atm_islem_12m
-FROM   x
-GROUP BY party_id, data_date;
-
-CREATE INDEX IX_SYH_GECMIS ON BSEN_SYH_GECMIS_DEGISKENLER (party_id, data_date);
+def precision_at_k(y, p, k):
+    return np.asarray(y)[np.argsort(-p)[:k]].mean()
 
 
-/* ---------------------------------------------------------------------
-   3) KONTROLLER
-   --------------------------------------------------------------------- */
+# =====================================================================
+# 2) OPTUNA
+#    Hedef: val PR-AUC (eşikten bağımsız). Eşik en sonda OOT'de seçilir.
+# =====================================================================
+def objective(trial):
+    max_depth = trial.suggest_int("max_depth", 3, 8)
+    params = {
+        "max_depth": max_depth,
+        "num_leaves": trial.suggest_int("num_leaves", 8, min(127, 2 ** max_depth)),
+        "learning_rate": trial.suggest_float("learning_rate", 0.02, 0.1, log=True),
+        "min_child_samples": trial.suggest_int("min_child_samples", 500, 50000, log=True),
+        "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 50, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 50, log=True),
+        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, 3.0),
+    }
+    model = lgb.LGBMClassifier(**FIXED_PARAMS, **params)
+    model.fit(X_tr, y_tr,
+              eval_set=[(X_v, y_v)],
+              callbacks=[lgb.early_stopping(100, verbose=False)])
 
--- 3a) Sızıntı kontrolü: bir snapshot'ın target'ı, bir sonraki snapshot'ın
---     syh_snap_ay_flg değeriyle aynı ayı anlatır -> eşleşme ~%100 olmalı.
---     (Örn: data_date 2026-07-31'in target'ı = Ağustos seyahati
---           = data_date 2026-08-31'deki syh_snap_ay_flg)
-SELECT t.data_date,
-       COUNT(*)                                                    AS n_pozitif,
-       SUM(CASE WHEN g.syh_snap_ay_flg = 1 THEN 1 ELSE 0 END)      AS eslesen,
-       ROUND(AVG(CASE WHEN g.syh_snap_ay_flg = 1 THEN 1 ELSE 0 END), 4) AS eslesme_orani
-FROM   <ANA_TABLO> t                         -- party_id, data_date, yurtdisi_travel_flg
-JOIN   bsen_syh_gecmis_degiskenler g
-  ON   g.party_id  = t.party_id
- AND   g.data_date = ADD_MONTHS(t.data_date, 1)
-WHERE  t.yurtdisi_travel_flg = 1
-GROUP BY t.data_date
-ORDER BY t.data_date;
+    p = model.predict_proba(X_v)[:, 1]
+    ap = average_precision_score(y_v, p)
+    pk = precision_at_k(y_v, p, K)
+    trial.set_user_attr("best_iter", int(model.best_iteration_))
+    trial.set_user_attr("prec_at_k", float(pk))
+    print(f"Trial {trial.number} | PR-AUC: {ap:.4f} | P@K: {pk:.4f} "
+          f"| iter: {model.best_iteration_}")
+    return ap
 
--- 3b) Ay bazında satır sayısı ve doluluk
-SELECT data_date,
-       COUNT(*)                          AS n,
-       ROUND(AVG(syh_snap_ay_flg), 4)    AS snap_ay_oran,
-       ROUND(AVG(syh_gecen_yil_hedef_ay_flg), 4) AS gecen_yil_hedef_oran
-FROM   bsen_syh_gecmis_degiskenler
-GROUP BY data_date
-ORDER BY data_date;
 
--- 3c) Tekrar eden anahtar var mı (0 olmalı)
-SELECT COUNT(*) FROM (
-    SELECT party_id, data_date
-    FROM   bsen_syh_gecmis_degiskenler
-    GROUP BY party_id, data_date
-    HAVING COUNT(*) > 1
-);
+study = optuna.create_study(direction="maximize",
+                            sampler=optuna.samplers.TPESampler(seed=42))
+study.optimize(objective, n_trials=20)
+# Devam etmek istersen: study.optimize(objective, n_trials=10)
+
+bt = study.best_trial
+print("\nEn iyi trial:", bt.number)
+print("PR-AUC:", round(bt.value, 4), "| P@K:", round(bt.user_attrs["prec_at_k"], 4),
+      "| iter:", bt.user_attrs["best_iter"])
+print("Parametreler:", bt.params)
+
+# Tüm trial'ları tablo olarak gör
+trials_df = study.trials_dataframe().sort_values("value", ascending=False)
+print(trials_df.head(10).to_string(index=False))
+
+
+# =====================================================================
+# 3) FİNAL MODEL: train + val ile
+# =====================================================================
+best_params = {**FIXED_PARAMS, **bt.params}
+best_params["n_estimators"] = int(bt.user_attrs["best_iter"] * 1.1)  # veri büyüdü, ~%10 fazla ağaç
+best_params.pop("metric", None)
+
+final_model = lgb.LGBMClassifier(**best_params)
+final_model.fit(pd.concat([X_train[feats], X_val[feats]]),
+                pd.concat([y_train, y_val]))
+print("Final model eğitildi. Ağaç sayısı:", best_params["n_estimators"])
+
+
+# =====================================================================
+# 4) OOT DEĞERLENDİRME (Eylül ve Ekim) - eşik tablosu
+# =====================================================================
+def esik_tablosu(model, X, y, esikler=np.arange(0.3, 0.85, 0.05)):
+    p = model.predict_proba(X[feats])[:, 1]
+    y = np.asarray(y)
+    rows = []
+    for t in esikler:
+        pred = (p >= t).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
+        prec = tp / (tp + fp) if (tp + fp) else 0
+        rows.append({
+            "esik": round(float(t), 2),
+            "precision": prec,
+            "recall": tp / y.sum(),
+            "f05": fbeta_score(y, pred, beta=0.5, zero_division=0),
+            "tp": tp, "fp": fp,
+            "secilen": tp + fp,
+            "lift": prec / y.mean() if prec else 0,
+        })
+    return pd.DataFrame(rows)
+
+
+print("\n=== EYLÜL OOT (Ağustos verisi -> Eylül seyahati) ===")
+print(esik_tablosu(final_model, X_eylul, y_eylul).round(4).to_string(index=False))
+
+print("\n=== EKİM OOT (Eylül verisi -> Ekim seyahati) ===")
+print(esik_tablosu(final_model, X_ekim, y_ekim).round(4).to_string(index=False))
+
+
+# =====================================================================
+# 5) KAYDET
+# =====================================================================
+paket = {
+    "model": final_model,
+    "features": feats,                                  # sıra önemli
+    "params": best_params,
+    "fill_values": {"syh_son_seyahat_ay_once": 999,     # diğer syh_ kolonları: 0
+                    "diger_syh": 0},
+    # "winsor_limits": limits,                          # winsorize kullandıysan ekle
+}
+joblib.dump(paket, "seyahat_model_optuna_v1.pkl")
+print("Model kaydedildi: seyahat_model_optuna_v1.pkl")

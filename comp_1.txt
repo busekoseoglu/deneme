@@ -1,273 +1,158 @@
-# %% [AYARLAR] - İNGİLİZCE BİRLEŞİK RAPOR (KİTLE + GOLD)
-# 2026-11-13. Kitle ve gold Excel çıktılarını okur, ingilizceciler için birleşik 7/24 raporu üretir.
-# Modellere DOKUNMAZ; iki run bittikten sonra çalıştırılır. Dosya yollarını elle ver.
-KITLE_EXCEL = "/BURAYA/vardiya_plani_kitle_YYYYAAGG_SSDD.xlsx"
-GOLD_EXCEL = "/BURAYA/vardiya_plani_gold_YYYYAAGG_SSDD.xlsx"
-CIKTI_KLASOR = "."
-INGILIZCE_MIN_KISI = 1          # yarım saatte en az kaç ingilizceci olmalı (modellerdeki CONFIG ile aynı)
-GECE_PENCERE = ("00:00", "06:00")   # bu aralığı kapsayan vardiya "gece" sayılır (AGENT_LISTE gece haftası)
+/* =====================================================================
+   YURT DIŞI SEYAHAT GEÇMİŞİ DEĞİŞKENLERİ
+   ---------------------------------------------------------------------
+   Seyahat tanımı target ile birebir aynı:
+     bir müşteri bir ayda yurt dışına çıkmış sayılır, eğer o ay
+       - yurt dışı fiziksel POS işlemi (terminal 11, ülke TR/TU/TUR dışı, entry 1/4/5/7) VEYA
+       - NOF_INTERNATIONAL_ATM_TRX > 0
+     varsa.
+
+   Snapshot'lar (data_date) : 2025-09-30 .. 2026-09-30  (ay sonları)
+   Geriye bakış             : 24 ay -> seyahat verisi 2023-10 .. 2026-09
+   Zaman kuralı             : sadece data_date ve öncesindeki aylar kullanılır
+                              (m = 0 -> data_date'in kendi ayı, m = 23 -> 23 ay önce).
+                              Target ayı (data_date + 1) HİÇBİR değişkene girmez.
+
+   Çıktı: BSEN_SYH_GECMIS_DEGISKENLER  (party_id, data_date)
+     - Sadece son 24 ayda en az bir kez yurt dışına çıkmış müşteriler için satır üretilir.
+     - Ana tabloya LEFT JOIN ON party_id, data_date.
+     - Join sonrası boş gelenler = son 24 ayda hiç yurt dışına çıkmamış:
+         *_flg, *_ay_say, *_tutar, *_islem  -> 0 ile doldur
+         syh_son_seyahat_ay_once            -> NULL bırak (LightGBM işler) veya 99 ver
+   ===================================================================== */
 
 
+/* ---------------------------------------------------------------------
+   1) AYLIK SEYAHAT TABLOSU: hangi müşteri hangi ay yurt dışındaydı
+   --------------------------------------------------------------------- */
+CREATE TABLE BSEN_SYH_AYLIK_SEYAHAT NOLOGGING AS
+WITH POS AS (
+    SELECT a.party_id,
+           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
+           COUNT(*) AS pos_islem,
+           SUM(CASE WHEN a.transaction_amount_tl > 0
+                    THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
+    FROM   edw.trx_card_transaction a
+    WHERE  a.card_transaction_date >= DATE '2023-10-01'
+      AND  a.card_transaction_date <  DATE '2026-10-01'            -- saat bileşenine karşı güvenli
+      AND  a.transaction_terminal_tp_id = 11                        -- fiziksel POS
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
+),
+ATM AS (
+    SELECT c.party_id,
+           c.data_date AS seyahat_ay,
+           MAX(c.nof_international_atm_trx) AS atm_islem
+    FROM   dm.cnf_card_financial_trx_aggr c
+    WHERE  c.data_date BETWEEN DATE '2023-10-31' AND DATE '2026-09-30'
+      AND  c.nof_international_atm_trx > 0
+    GROUP BY c.party_id, c.data_date
+)
+SELECT party_id,
+       seyahat_ay,
+       SUM(pos_islem) AS pos_islem,
+       SUM(pos_tutar) AS pos_tutar,
+       SUM(atm_islem) AS atm_islem
+FROM (
+    SELECT party_id, seyahat_ay, pos_islem, pos_tutar, 0 AS atm_islem FROM pos
+    UNION ALL
+    SELECT party_id, seyahat_ay, 0, 0, atm_islem FROM atm
+)
+GROUP BY party_id, seyahat_ay;
+
+CREATE INDEX IX_SYH_AYLIK ON BSEN_SYH_AYLIK_SEYAHAT (party_id, seyahat_ay);
 
 
-# %% [OKU] - TAKVIM + INGILIZCE_7_24 + COVERAGE
-import re
-import pandas as pd
-from datetime import date, timedelta
+/* ---------------------------------------------------------------------
+   2) SNAPSHOT BAZINDA GEÇMİŞ DEĞİŞKENLERİ
+      m = data_date ile seyahat ayı arasındaki ay farkı (0..23)
+      Hedef ay = data_date + 1  ->  geçen yıl hedef ay = data_date - 11  (m = 11)
+   --------------------------------------------------------------------- */
+CREATE TABLE BSEN_SYH_GECMIS_DEGISKENLER NOLOGGING AS
+WITH CAL AS (
+    SELECT DISTINCT last_day_of_month AS data_date
+    FROM   edw.cmn_calendar
+    WHERE  last_day_of_month BETWEEN DATE '2025-09-30' AND DATE '2026-09-30'
+),
+X AS (
+    SELECT s.party_id,
+           c.data_date,
+           MONTHS_BETWEEN(c.data_date, s.seyahat_ay) AS m,   -- iki ay sonu arası -> tam sayı
+           s.pos_islem,
+           s.pos_tutar,
+           s.atm_islem
+    FROM   bsen_syh_aylik_seyahat s
+    JOIN   cal c
+      ON   s.seyahat_ay <= c.data_date                      -- GELECEK YOK: en fazla data_date ayı
+     AND   s.seyahat_ay >  ADD_MONTHS(c.data_date, -24)     -- son 24 ay
+)
+SELECT party_id,
+       data_date,
 
-_GUN = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
-_AY = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
-_SAAT_RE = re.compile(r"(\d{2}:\d{2})-(\d{2}:\d{2})")
+       -- Snapshot ayında (data_date ayı) yurt dışındaydı mı
+       MAX(CASE WHEN m = 0 THEN 1 ELSE 0 END)               AS syh_snap_ay_flg,
 
-def _oku(yol, kuyruk):
-    xl = pd.ExcelFile(yol)
-    for sh in ("TAKVIM", "COVERAGE"):
-        if sh not in xl.sheet_names:
-            raise SystemExit(f"{kuyruk}: '{sh}' sayfası yok -> {yol}")
-    tk = pd.read_excel(xl, "TAKVIM")
-    if "english_flg" not in tk.columns:
-        raise SystemExit(f"{kuyruk}: TAKVIM'de english_flg kolonu yok -> [EXCEL] hücresinin güncel hâli alınmalı.")
-    cov = pd.read_excel(xl, "COVERAGE")
-    i724 = pd.read_excel(xl, "INGILIZCE_7_24") if "INGILIZCE_7_24" in xl.sheet_names else None
-    tarih = pd.to_datetime(cov["tarih"]).dt.date
-    bas = tarih.min()
-    tk = tk[pd.to_numeric(tk["english_flg"], errors="coerce").fillna(0).astype(int) == 1].copy()
-    tk["kuyruk"] = kuyruk
-    print(f"{kuyruk}: {yol}\n   ay {bas:%Y-%m} | ingilizceci {len(tk)} | INGILIZCE_7_24 sayfası "
-          f"{'var' if i724 is not None else 'YOK'}")
-    return tk, (bas.year, bas.month), i724
+       -- Geçen yıl hedef ay (target ayının 12 ay öncesi)
+       MAX(CASE WHEN m = 11 THEN 1 ELSE 0 END)              AS syh_gecen_yil_hedef_ay_flg,
+       -- Geçen yıl hedef ay ±1 (3 aylık pencere; tatil tarihleri kayabilir)
+       MAX(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END) AS syh_gecen_yil_hedef_donem_flg,
+       SUM(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END) AS syh_gecen_yil_hedef_donem_ay_say,
+       -- İki yıl önce hedef ay (target ayının 24 ay öncesi)
+       MAX(CASE WHEN m = 23 THEN 1 ELSE 0 END)              AS syh_iki_yil_once_hedef_ay_flg,
 
-_tk_k, _ay_k, _i724_k = _oku(KITLE_EXCEL, "kitle")
-_tk_g, _ay_g, _i724_g = _oku(GOLD_EXCEL, "gold")
-if _ay_k != _ay_g:
-    raise SystemExit(f"Kitle ({_ay_k}) ve gold ({_ay_g}) farklı ayın planı - aynı ayın son run'larını ver.")
-YIL, AY = _ay_k
+       -- Sıklık: son N ayda kaç farklı ay yurt dışına çıktı
+       SUM(CASE WHEN m < 3  THEN 1 ELSE 0 END)              AS syh_ay_say_3m,
+       SUM(CASE WHEN m < 6  THEN 1 ELSE 0 END)              AS syh_ay_say_6m,
+       SUM(CASE WHEN m < 12 THEN 1 ELSE 0 END)              AS syh_ay_say_12m,
+       COUNT(*)                                             AS syh_ay_say_24m,
 
-def _gun_kolonlari(df):
-    """Kolon adı -> tarih. Plan günü '5 Per', geçmiş gün '31 Eki Cmt'."""
-    m = {}
-    for c in df.columns:
-        s = str(c).strip()
-        p = re.fullmatch(r"(\d{1,2}) (" + "|".join(_GUN) + r")", s)
-        if p:
-            m[c] = date(YIL, AY, int(p.group(1)))
-            continue
-        g = re.fullmatch(r"(\d{1,2}) (" + "|".join(_AY) + r") (" + "|".join(_GUN) + r")", s)
-        if g:
-            _ay = _AY.index(g.group(2)) + 1
-            m[c] = date(YIL - (1 if _ay > AY else 0), _ay, int(g.group(1)))
-    return m
+       -- Recency: son seyahatten bu yana geçen ay (0 = snapshot ayında)
+       MIN(m)                                               AS syh_son_seyahat_ay_once,
 
-ing = pd.concat([_tk_k, _tk_g], ignore_index=True)
-_kol_tarih = {**_gun_kolonlari(_tk_k), **_gun_kolonlari(_tk_g)}
-PLAN_TARIH = sorted({d for d in _kol_tarih.values() if d.year == YIL and d.month == AY})
-print(f"plan günü: {len(PLAN_TARIH)} | toplam ingilizceci: {len(ing)} "
-      f"(kitle {len(_tk_k)}, gold {len(_tk_g)})")
+       -- Yoğunluk: son 12 ay yurt dışı POS / ATM
+       SUM(CASE WHEN m < 12 THEN pos_islem ELSE 0 END)      AS syh_yd_pos_islem_12m,
+       SUM(CASE WHEN m < 12 THEN pos_tutar ELSE 0 END)      AS syh_yd_pos_tutar_12m,
+       SUM(CASE WHEN m < 12 THEN atm_islem ELSE 0 END)      AS syh_yd_atm_islem_12m
+FROM   x
+GROUP BY party_id, data_date;
 
-
-
+CREATE INDEX IX_SYH_GECMIS ON BSEN_SYH_GECMIS_DEGISKENLER (party_id, data_date);
 
 
-# %% [HESAP] - YARIM SAAT KAPSAMA (kuyruk + lokasyon kırılımı)
-def _dk(t):
-    return int(t[:2]) * 60 + int(t[3:5])
+/* ---------------------------------------------------------------------
+   3) KONTROLLER
+   --------------------------------------------------------------------- */
 
-def _aralik(hucre):
-    """TAKVIM hücresinden (bas, bit) dakika; çalışmıyorsa None. 'MESAİ\\n09:00-18:00' de olur."""
-    bul = _SAAT_RE.findall(str(hucre)) if pd.notna(hucre) else []
-    if not bul:
-        return None
-    b, e = _dk(bul[-1][0]), _dk(bul[-1][1])
-    return b, (e + 1440 if e <= b else e)
+-- 3a) Sızıntı kontrolü: bir snapshot'ın target'ı, bir sonraki snapshot'ın
+--     syh_snap_ay_flg değeriyle aynı ayı anlatır -> eşleşme ~%100 olmalı.
+--     (Örn: data_date 2026-07-31'in target'ı = Ağustos seyahati
+--           = data_date 2026-08-31'deki syh_snap_ay_flg)
+SELECT t.data_date,
+       COUNT(*)                                                    AS n_pozitif,
+       SUM(CASE WHEN g.syh_snap_ay_flg = 1 THEN 1 ELSE 0 END)      AS eslesen,
+       ROUND(AVG(CASE WHEN g.syh_snap_ay_flg = 1 THEN 1 ELSE 0 END), 4) AS eslesme_orani
+FROM   <ANA_TABLO> t                         -- party_id, data_date, yurtdisi_travel_flg
+JOIN   bsen_syh_gecmis_degiskenler g
+  ON   g.party_id  = t.party_id
+ AND   g.data_date = ADD_MONTHS(t.data_date, 1)
+WHERE  t.yurtdisi_travel_flg = 1
+GROUP BY t.data_date
+ORDER BY t.data_date;
 
-_ilk = PLAN_TARIH[0]
-_idx = {d: i for i, d in enumerate(PLAN_TARIH)}
-_lok = "lokasyon" if "lokasyon" in ing.columns else None
-SLOT = [f"{k // 2:02d}:{30 * (k % 2):02d}" for k in range(48)]
+-- 3b) Ay bazında satır sayısı ve doluluk
+SELECT data_date,
+       COUNT(*)                          AS n,
+       ROUND(AVG(syh_snap_ay_flg), 4)    AS snap_ay_oran,
+       ROUND(AVG(syh_gecen_yil_hedef_ay_flg), 4) AS gecen_yil_hedef_oran
+FROM   bsen_syh_gecmis_degiskenler
+GROUP BY data_date
+ORDER BY data_date;
 
-kapsama = []        # (tarih, slot, kuyruk, lokasyon, agent)
-plan_vardiya = []   # (agent, kuyruk, tarih, bas, bit)
-for _, r in ing.iterrows():
-    a, q = str(r["agent_user_code"]).strip(), r["kuyruk"]
-    lk = str(r[_lok]).strip() if _lok else ""
-    for c, d in _kol_tarih.items():
-        if c not in r.index:
-            continue
-        ar = _aralik(r[c])
-        if ar is None:
-            continue
-        b, e = ar
-        if d in _idx:
-            plan_vardiya.append((a, q, d, b, e))
-        for gun_ofset in (0, 1):              # aynı gün + gece yarısını geçen kısım ertesi gün
-            hedef = d + timedelta(days=gun_ofset)
-            if hedef not in _idx:
-                continue
-            for k in range(48):
-                s0 = k * 30 + 1440 * gun_ofset
-                if b <= s0 and e >= s0 + 30:
-                    kapsama.append((hedef, k, q, lk, a))
-
-kap = pd.DataFrame(kapsama, columns=["tarih", "slot", "kuyruk", "lokasyon", "agent"]).drop_duplicates()
-_say = kap.groupby(["tarih", "slot", "kuyruk"]).size().unstack("kuyruk", fill_value=0)
-_tam = pd.MultiIndex.from_product([PLAN_TARIH, range(48)], names=["tarih", "slot"])
-_say = _say.reindex(_tam, fill_value=0)
-for q in ("kitle", "gold"):
-    if q not in _say.columns:
-        _say[q] = 0
-_say["toplam"] = _say["kitle"] + _say["gold"]
-print(f"kapsama satırı: {len(kap)} | boş yarım saat (toplam < {INGILIZCE_MIN_KISI}): "
-      f"{int((_say['toplam'] < INGILIZCE_MIN_KISI).sum())}")
-
-# --- sağlama: modelin kendi INGILIZCE_7_24 sayfasıyla aynı mı? ---
-for q, i724 in (("kitle", _i724_k), ("gold", _i724_g)):
-    if i724 is None:
-        print(f"! {q}: INGILIZCE_7_24 sayfası yok, sağlama atlandı")
-        continue
-    i724 = i724.copy(); i724["tarih"] = pd.to_datetime(i724["tarih"]).dt.date
-    _fark = 0
-    for _, r in i724.iterrows():
-        for k, s in enumerate(SLOT):
-            if s in i724.columns and (r["tarih"], k) in _say.index:
-                _fark += int(r[s]) != int(_say.loc[(r["tarih"], k), q])
-    print(f"   sağlama {q}: model sayfasıyla farklı hücre {_fark} (0 olmalı)")
-
-
-
-
-
-
-
-# %% [RAPOR] - SAYFALAR + EXCEL
-from openpyxl.styles import PatternFill, Font, Alignment
-from openpyxl.utils import get_column_letter
-import os
-
-def _pivot(seri):
-    return seri.unstack("slot").reindex(columns=range(48)).set_axis(SLOT, axis=1)
-
-def _araliklar(bos_k):
-    """[3,4,5,9] -> '01:30-03:00, 04:30-05:00'"""
-    out, i = [], 0
-    while i < len(bos_k):
-        j = i
-        while j + 1 < len(bos_k) and bos_k[j + 1] == bos_k[j] + 1:
-            j += 1
-        e = bos_k[j] + 1
-        out.append(f"{SLOT[bos_k[i]]}-{'24:00' if e == 48 else SLOT[e]}")
-        i = j + 1
-    return ", ".join(out)
-
-# 1) BIRLESIK_7_24 - toplam ingilizceci
-birlesik = _pivot(_say["toplam"])
-birlesik.insert(0, "bos_saat", (birlesik < INGILIZCE_MIN_KISI).sum(axis=1) / 2)
-birlesik.insert(1, "fazla_saat", (birlesik[SLOT] > INGILIZCE_MIN_KISI).sum(axis=1) / 2)
-
-# 2) KAYNAK - kitle/gold
-_kit, _gol = _pivot(_say["kitle"]), _pivot(_say["gold"])
-kaynak = _kit.astype(str) + "/" + _gol.astype(str)
-
-# 3) LOKASYON - her yarım saatte lokasyon -> kişi
-_lk = (kap.groupby(["tarih", "slot", "lokasyon"]).size().reset_index(name="n")
-       .assign(t=lambda d: d["lokasyon"] + ":" + d["n"].astype(str))
-       .groupby(["tarih", "slot"])["t"].apply(", ".join))
-lokasyon_df = _lk.reindex(_tam, fill_value="").pipe(_pivot)
-lokasyon_ozet = (kap.groupby(["lokasyon", "kuyruk"]).size().div(2)
-                 .rename("ingilizceci_kisi_saat").reset_index())
-
-# 4) GUNLUK_OZET
-_g = []
-for d in PLAN_TARIH:
-    t, k, g = (_say.loc[d, c].to_numpy() for c in ("toplam", "kitle", "gold"))
-    bos = [i for i in range(48) if t[i] < INGILIZCE_MIN_KISI]
-    _g.append({"tarih": d, "gun": _GUN[d.weekday()], "hafta_sonu": int(d.weekday() >= 5),
-               "bos_saat": len(bos) / 2,
-               "sadece_kitle_saat": int(((k >= INGILIZCE_MIN_KISI) & (g == 0)).sum()) / 2,
-               "sadece_gold_saat": int(((g >= INGILIZCE_MIN_KISI) & (k == 0)).sum()) / 2,
-               "ikisi_birlikte_saat": int(((k > 0) & (g > 0)).sum()) / 2,
-               "fazla_saat": int((t > INGILIZCE_MIN_KISI).sum()) / 2,
-               "max_ayni_anda": int(t.max()),
-               "bos_araliklar": _araliklar(bos)})
-gunluk_ozet = pd.DataFrame(_g)
-
-# 5) SAAT_OZET
-_s = _say.reset_index()
-saat_ozet = (_s.groupby("slot").agg(bos_gun=("toplam", lambda x: int((x < INGILIZCE_MIN_KISI).sum())),
-                                    ort_toplam=("toplam", "mean"), ort_kitle=("kitle", "mean"),
-                                    ort_gold=("gold", "mean"), min_toplam=("toplam", "min"))
-             .round(2).reset_index())
-saat_ozet.insert(0, "saat", [SLOT[k] for k in saat_ozet["slot"]]); saat_ozet = saat_ozet.drop(columns="slot")
-
-# 6) AGENT_LISTE
-_pv = pd.DataFrame(plan_vardiya, columns=["agent", "kuyruk", "tarih", "bas", "bit"])
-_pv["hafta"] = _pv["tarih"].map(lambda d: f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}")
-_g0, _g1 = _dk(GECE_PENCERE[0]), _dk(GECE_PENCERE[1])
-_pv["gece"] = _pv.apply(lambda r: (r["bas"] <= _g0 + 1440 and r["bit"] >= _g1 + 1440)
-                        or (r["bas"] <= _g0 and r["bit"] >= _g1), axis=1)
-_pv["saat"] = _pv.apply(lambda r: f"{r['bas'] // 60:02d}:{r['bas'] % 60:02d}", axis=1)
-# takım çoğunluğu: takımın İNGİLİZCECİ OLMAYAN üyelerinin hafta içi en sık başlangıç saati (= takım base'i)
-_tum = pd.concat([pd.read_excel(KITLE_EXCEL, "TAKVIM").assign(kuyruk="kitle"),
-                  pd.read_excel(GOLD_EXCEL, "TAKVIM").assign(kuyruk="gold")], ignore_index=True)
-_tc = []
-for _, r in _tum[pd.to_numeric(_tum["english_flg"], errors="coerce").fillna(0).astype(int) != 1].iterrows():
-    for c, d in _kol_tarih.items():
-        if d in _idx and d.weekday() < 5 and c in r.index and _aralik(r[c]):
-            b = _aralik(r[c])[0]
-            _tc.append((r.get("takim"), f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}", f"{b // 60:02d}:{b % 60:02d}"))
-_tcd = pd.DataFrame(_tc, columns=["takim", "hafta", "saat"])
-takim_cogunluk = _tcd.groupby(["takim", "hafta"])["saat"].agg(lambda s: s.value_counts().idxmax()).to_dict()
-
-_al = []
-for _, r in ing.iterrows():
-    a = str(r["agent_user_code"]).strip(); p = _pv[_pv["agent"] == a]
-    _hi = p.loc[p["tarih"].map(lambda d: d.weekday() < 5).astype(bool)]
-    _hs = _hi.groupby("hafta")["saat"].agg(lambda s: s.value_counts().idxmax())
-    _farkli = sum(1 for wk, st in _hs.items() if takim_cogunluk.get((r.get("takim"), wk)) not in (None, st))
-    _al.append({"kuyruk": r["kuyruk"], "agent_user_code": a, "agent_name": r.get("agent_name", ""),
-                "takim": r.get("takim", ""), "lokasyon": r.get("lokasyon", ""),
-                "mesaiye_kalamaz_flg": r.get("mesaiye_kalamaz_flg", ""), "sabah_calisir_flg": r.get("sabah_calisir_flg", ""),
-                "calisma_gun": len(p), "hafta_sonu_gun": int(sum(d.weekday() >= 5 for d in p["tarih"])),
-                "gece_gun": int(p["gece"].sum()), "gece_hafta": int(p.loc[p["gece"], "hafta"].nunique()),
-                "takim_cogunlugundan_farkli_hafta": _farkli,
-                "hafta_ici_vardiyalar": ", ".join(f"{wk[-3:]}:{st}" for wk, st in _hs.items())})
-agent_liste = pd.DataFrame(_al)
-_gun_kol = [c for c, d in _kol_tarih.items() if d in _idx]
-agent_takvim = _tum[pd.to_numeric(_tum["english_flg"], errors="coerce").fillna(0).astype(int) == 1][
-    [c for c in ["kuyruk", "agent_user_code", "agent_name", "takim", "lokasyon"] + _gun_kol if c in _tum.columns]]
-
-# --- Excel ---
-CIKTI = os.path.join(CIKTI_KLASOR, f"ingilizce_rapor_{YIL}_{AY:02d}.xlsx")
-_kirmizi, _sari, _yesil = (PatternFill("solid", fgColor=c) for c in ("F4A6A6", "FFE599", "D9EAD3"))
-with pd.ExcelWriter(CIKTI, engine="openpyxl") as w:
-    gunluk_ozet.to_excel(w, sheet_name="GUNLUK_OZET", index=False)
-    birlesik.reset_index().to_excel(w, sheet_name="BIRLESIK_7_24", index=False)
-    kaynak.reset_index().to_excel(w, sheet_name="KAYNAK_KITLE_GOLD", index=False)
-    lokasyon_df.reset_index().to_excel(w, sheet_name="LOKASYON_7_24", index=False)
-    lokasyon_ozet.to_excel(w, sheet_name="LOKASYON_OZET", index=False)
-    saat_ozet.to_excel(w, sheet_name="SAAT_OZET", index=False)
-    agent_liste.to_excel(w, sheet_name="AGENT_LISTE", index=False)
-    agent_takvim.to_excel(w, sheet_name="AGENT_TAKVIM", index=False)
-    ws = w.sheets["BIRLESIK_7_24"]
-    for i in range(len(birlesik)):
-        for j, s in enumerate(SLOT):
-            c = ws.cell(row=i + 2, column=4 + j)        # tarih, bos_saat, fazla_saat, sonra slotlar
-            n = int(birlesik.iloc[i][s])
-            c.fill = _kirmizi if n < INGILIZCE_MIN_KISI else (_sari if n == INGILIZCE_MIN_KISI else _yesil)
-    for sh in w.sheets.values():
-        sh.freeze_panes = "B2"
-        for c in sh[1]:
-            c.font = Font(bold=True, size=9); c.alignment = Alignment(wrap_text=True, horizontal="center")
-        for k in range(1, sh.max_column + 1):
-            sh.column_dimensions[get_column_letter(k)].width = 7 if sh.title in ("BIRLESIK_7_24", "KAYNAK_KITLE_GOLD") and k > 3 else 14
-print(f"\nRapor yazıldı: {CIKTI}")
-print(f"   ay boş saat: {gunluk_ozet['bos_saat'].sum()} | boş saati olan gün: {int((gunluk_ozet['bos_saat'] > 0).sum())}")
-print(f"   sadece kitle: {gunluk_ozet['sadece_kitle_saat'].sum()} sa | sadece gold: {gunluk_ozet['sadece_gold_saat'].sum()} sa | "
-      f"ikisi birlikte: {gunluk_ozet['ikisi_birlikte_saat'].sum()} sa")
-if (gunluk_ozet["bos_saat"] > 0).any():
-    print(gunluk_ozet.loc[gunluk_ozet["bos_saat"] > 0, ["tarih", "gun", "bos_saat", "bos_araliklar"]].to_string(index=False))
-
-
-
-
-
-
+-- 3c) Tekrar eden anahtar var mı (0 olmalı)
+SELECT COUNT(*) FROM (
+    SELECT party_id, data_date
+    FROM   bsen_syh_gecmis_degiskenler
+    GROUP BY party_id, data_date
+    HAVING COUNT(*) > 1
+);

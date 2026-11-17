@@ -1,40 +1,7 @@
-CREATE TABLE BSEN_SYH_PILOT_EKIM_2026 NOLOGGING AS
-WITH POS AS (
-    SELECT a.party_id,
-           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
-           SUM(CASE WHEN a.transaction_amount_tl > 0 THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
-    FROM   edw.trx_card_transaction a
-    WHERE  a.card_transaction_date >= DATE '2024-10-01'
-      AND  a.card_transaction_date <  DATE '2026-10-01'
-      AND  a.transaction_terminal_tp_id = 11
-      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
-      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
-    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
-),
-ATM AS (
-    SELECT c.party_id, c.data_date AS seyahat_ay, MAX(c.nof_international_atm_trx) AS atm_islem
-    FROM   dm.cnf_card_financial_trx_aggr c
-    WHERE  c.data_date BETWEEN DATE '2024-10-31' AND DATE '2026-09-30'
-      AND  c.nof_international_atm_trx > 0
-    GROUP BY c.party_id, c.data_date
-),
-AYLIK AS (
-    SELECT party_id, seyahat_ay, SUM(pos_tutar) AS pos_tutar, SUM(atm_islem) AS atm_islem
-    FROM (SELECT party_id, seyahat_ay, pos_tutar, 0 AS atm_islem FROM pos
-          UNION ALL
-          SELECT party_id, seyahat_ay, 0, atm_islem FROM atm)
-    GROUP BY party_id, seyahat_ay
-),
-X AS (
-    SELECT party_id, MONTHS_BETWEEN(DATE '2026-09-30', seyahat_ay) AS m, pos_tutar, atm_islem
-    FROM   aylik
-)
-SELECT party_id,
-       DATE '2026-09-30'                                      AS data_date,
-       MAX(CASE WHEN m = 0               THEN 1 ELSE 0 END)   AS syh_snap_ay_flg,
-       SUM(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END)   AS syh_gecen_yil_hedef_donem_ay_say,
-       MAX(CASE WHEN m = 23              THEN 1 ELSE 0 END)   AS syh_iki_yil_once_hedef_ay_flg,
-       SUM(CASE WHEN m < 12 THEN pos_tutar ELSE 0 END)        AS syh_yd_pos_tutar_12m,
-       SUM(CASE WHEN m < 12 THEN atm_islem ELSE 0 END)        AS syh_yd_atm_islem_12m
-FROM   x
-GROUP BY party_id;
+SELECT 'yeni' AS tablo, COUNT(*) n, SUM(syh_snap_ay_flg) snap_ay_1,
+       ROUND(SUM(syh_yd_pos_tutar_12m)) pos_tutar_toplam
+FROM   BSEN_SYH_PILOT_EKIM_2026
+UNION ALL
+SELECT 'eski', COUNT(*), SUM(syh_snap_ay_flg), ROUND(SUM(syh_yd_pos_tutar_12m))
+FROM   BSEN_SYH_GECMIS_DEGISKENLER
+WHERE  data_date = DATE '2026-09-30';

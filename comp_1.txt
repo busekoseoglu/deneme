@@ -1,304 +1,35 @@
-# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
-    # INGILIZCE_HEDEF bu kuyruk o hafta GECE NOBETCISIYKEN, INGILIZCE_HEDEF_GECESIZ gece diger kuyruktayken gecerli
-    # (INGILIZCE_GECE_TABLOSU'ndan otomatik). INGILIZCE_HEDEF_HAFTA = {"2026-W47": {"aksam": 1}} elle istisna, ikisini ezer.
-    # Simdilik kitle iki durumda da aksam 2 (gold henuz aksama katki vermiyor). Gold hazir olunca: HEDEF aksam 1.
-    "INGILIZCE_HEDEF_GECESIZ": {"sabah_08": 1, "aksam": 2, "aksam_hafta_sonu": 1},
-    "INGILIZCE_HEDEF_HAFTA": {},
-    # =======================================================
-
-
-
-# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
-INGILIZCE_HEDEF_GECESIZ = CONFIG["INGILIZCE_HEDEF_GECESIZ"]
-INGILIZCE_HEDEF_HAFTA = CONFIG["INGILIZCE_HEDEF_HAFTA"]
-# =======================================================
-
-
-
-# %% [KISIT] - İNGİLİZCE: SABAH 08 / AKŞAM / GECE NÖBETİ (SOFT)
-# 2026-11-17 KİTLE + GOLD (aynı hücre; kuyruk farkı sadece CONFIG'de). english_flg = 1 agentlar ingilizceci.
-# İş birimi: her gün (hafta sonu dahil) ingilizceci TOPLAMI (kitle + gold):
-#   sabah 08 : 08:00'de BAŞLAYAN vardiyada en az 1      -> bu kuyruğun payı INGILIZCE_HEDEF["sabah_08"]
-#   akşam    : 15:00-24:00 arası başlayan vardiyada en az 2 (00:00 hariç) -> INGILIZCE_HEDEF["aksam"],
-#              hafta sonu en az 1 -> INGILIZCE_HEDEF["aksam_hafta_sonu"] (2026-11-17)
-#   gece     : 00:00 vardiyasında TAM 1 - hangi kuyruk INGILIZCE_GECE_TABLOSU'ndan (lokasyon nöbeti gibi);
-#              nöbetçi kuyruk 1 kişi koyar, diğeri 0. İki model aynı tabloyu okur -> toplamda hiç 2 olmaz.
-#              Kuyruk içinde sıra: [HÜCRE 3G] gece/kıdem oranı (en az gece çalışmış önce, GECE_KISI_W);
-#              arka arkaya iki gece haftası INGILIZCE_GECE_ARDISIK_W ("1 hafta 1 hafta, gerekirse 2").
-# Ekip bağı (hafta içi, arife/resmi tatil hariç): ingilizceci ekibinin base'iyle AYNI GRUPTA (sabah 07-15 /
-# akşam 15-24) çalışır, grup içinde başlangıcı kayabilir (ekip 10:30 -> ingilizceci 08:00), hafta boyu tek
-# vardiya (HARD). Grup dışı INGILIZCE_GRUP_DISI_W, ekibin tam base'inden kayma INGILIZCE_TAKIM_DISI_W.
-# 2026-11-17: pay gece haftasına göre - bu kuyruk gece nöbetçiyse INGILIZCE_HEDEF, değilse INGILIZCE_HEDEF_GECESIZ;
-# INGILIZCE_HEDEF_HAFTA[hafta] elle istisna (ikisini de ezer).
-# Gece ekipten bağımsız; hafta sonu herkes ekipten bağımsız. Üst sınır yok (sabah/akşam). Cezalar OBJECTIVE'de.
-# 2026-11-17: sabah çalışan / hamile / süt izinli ingilizceci grup kuralından MUAF - akşam/geceye giremez, ekibi
-# akşamdaysa sabahta kalır (kitledeki takım muafiyetinin mantığı); ekibin base'inden kayma cezası yine geçerli.
-from datetime import timedelta as _ing_td
-
-for _p in ("ENABLE_INGILIZCE", "INGILIZCE_FLAG_KOL", "INGILIZCE_TAKIM_DISI_W", "INGILIZCE_SABAH_ARALIK",
-           "INGILIZCE_AKSAM_ARALIK", "INGILIZCE_SABAH_BAS", "INGILIZCE_GECE_BAS", "INGILIZCE_HEDEF",
-           "INGILIZCE_HEDEF_EKSIK_W", "INGILIZCE_GECE_TABLOSU", "INGILIZCE_GECE_EKSIK_W", "INGILIZCE_GECE_FAZLA_W",
-           "INGILIZCE_GECE_ARDISIK_W", "INGILIZCE_GRUP_DISI_W", "GECE_KISI_W",
-           "INGILIZCE_HEDEF_GECESIZ", "INGILIZCE_HEDEF_HAFTA"):
-    if _p not in globals():
-        raise SystemExit(f"CONFIG'de tanımlı olmalı: {_p} -> [CONFIG] hücresini çalıştır.")
-
-ingilizce_agents = set()
-ing_bos = {}             # 2026-11-17: eski yarım saat kuralı kaldırıldı (boş kalır)
-ing_hedef_eksik = {}     # (ds, grup) -> IntVar   sabah_08 / aksam eksik kişi
-ing_gece_eksik = {}      # ds -> IntVar           nöbetçi kuyrukta gece boş
-ing_gece_fazla = {}      # ds -> IntVar           gece 2. kişi / nöbetçi olmayan kuyrukta gece
-ing_gece_kisi_ceza = []  # (ağırlık, x)           3G sırası
-ing_gece_ardisik = []    # BoolVar                arka arkaya iki gece haftası
-ing_grup_disi = {}       # (a, hafta) -> BoolVar  ekibin grubundan çıkış
-ing_takim_disi = {}      # (a, hafta) -> BoolVar  ekibin tam base'inden kayma (grup içi)
-ing_week_base = {}       # (a, hafta, v) -> BoolVar
-ing_gece_sahibi = {}     # ds -> "kitle" / "gold" / None
-if ENABLE_INGILIZCE:
-    if INGILIZCE_FLAG_KOL not in df_tam.columns:
-        raise SystemExit(f"ENABLE_INGILIZCE = True ama df_tam'da '{INGILIZCE_FLAG_KOL}' kolonu yok.")
-    ingilizce_agents = set(df_tam.loc[
-        pd.to_numeric(df_tam[INGILIZCE_FLAG_KOL], errors="coerce").fillna(0).astype(int) == 1,
-        "agent_user_code"].astype(str).str.strip())
-
-def _ing_dk(_t):
-    _t = str(_t).strip()[:5]
-    return 1440 if _t == "24:00" else int(_t[:2]) * 60 + int(_t[3:5])
-
-_ing_sb = (_ing_dk(INGILIZCE_SABAH_ARALIK[0]), _ing_dk(INGILIZCE_SABAH_ARALIK[1]))
-_ing_ak = (_ing_dk(INGILIZCE_AKSAM_ARALIK[0]), _ing_dk(INGILIZCE_AKSAM_ARALIK[1]))
-_ing_sabah08 = {str(b).strip()[:5] for b in INGILIZCE_SABAH_BAS}
-_ing_gece = {str(b).strip()[:5] for b in INGILIZCE_GECE_BAS}
-
-def _ing_grup(ds, v):
-    """Vardiyanın grubu: 'gece' / 'sabah' / 'aksam' / 'diger' (başlangıç saatinden)."""
-    _b = str(saat[(ds, v)][0]).strip()[:5]
-    if _b in _ing_gece:
-        return "gece"
-    _d = _ing_dk(_b)
-    if _ing_sb[0] <= _d < _ing_sb[1]:
-        return "sabah"
-    if _ing_ak[0] <= _d < _ing_ak[1]:
-        return "aksam"
-    return "diger"
-
-if ingilizce_agents:
-    _ing = sorted(ingilizce_agents)
-    _ozel_v = set(globals().get("arife_ozel_vardiya_kodlari", set())) | {v for _, v in globals().get("prov_vardiyalar", set())}
-    _tablo = [(pd.to_datetime(b).date(), pd.to_datetime(e).date(), str(q).strip()) for b, e, q in INGILIZCE_GECE_TABLOSU]
-
-    def _ing_hedef(ds, _k):
-        """Bu kuyruğun o günkü payı: gece nöbetçiyse HEDEF, değilse HEDEF_GECESIZ; haftalık istisna ezer."""
-        _s = next((q for b, e, q in _tablo if b <= pd.to_datetime(ds).date() <= e), None)
-        _hd = INGILIZCE_HEDEF if _s in (None, QUEUE) else INGILIZCE_HEDEF_GECESIZ
-        return int({**_hd, **INGILIZCE_HEDEF_HAFTA.get(day_week[ds], {})}[_k])
-
-    # --- 3G: gece/kıdem oranı sırası (lokasyon nöbetiyle aynı okuma) ---
-    _ing_oran = {}
-    if "df_gece_oran" in globals():
-        _go_bas = min(pd.to_datetime(d) for d in PLAN_GUNLER)
-        _go_ay = pd.to_numeric(df_gece_oran["rapor_ay_bas"], errors="coerce")
-        if _go_ay.isna().any() or (_go_ay > 12).any():
-            _go_ay = pd.to_datetime(df_gece_oran["rapor_ay_bas"], errors="coerce").dt.month
-        _go = df_gece_oran[(pd.to_numeric(df_gece_oran["yil"], errors="coerce") == _go_bas.year)
-                           & (_go_ay == _go_bas.month)
-                           & df_gece_oran["shift_adj"].astype(str).str.strip().str[:5].isin(_ing_gece)].copy()
-        _go["vardiya_kidem_ratio"] = pd.to_numeric(_go["vardiya_kidem_ratio"], errors="coerce").fillna(0)
-        _ing_oran = _go.assign(agent_user_code=_go["agent_user_code"].astype(str).str.strip()) \
-            .groupby("agent_user_code")["vardiya_kidem_ratio"].sum().to_dict()
-    else:
-        print("!!! df_gece_oran yok ([HÜCRE 3G]) - ingilizce gece sırası eşit kabul edildi.")
-    _r = pd.Series({a: float(_ing_oran.get(a, 0.0)) for a in _ing}, dtype=float).rank(method="average")
-    _puan = ((_r - _r.min()) / (_r.max() - _r.min())) if _r.max() > _r.min() else _r * 0
-
-    _gn_hafta = {}       # (a, hafta) -> BoolVar  o hafta gece çalıştı
-    for ds in PLAN_GUNLER:
-        _d = pd.to_datetime(ds).date()
-        _gv = [v for v in gun_vardiyalari.get(ds, []) if v not in _ozel_v and (ds, v) in saat]
-        _x = lambda _vs: [x[(a, ds, v)] for a in _ing for v in _vs if (a, ds, v) in x]
-        # sabah 08 / akşam
-        _hs = pd.to_datetime(ds).weekday() >= 5
-        for _g, _vs in (("sabah_08", [v for v in _gv if str(saat[(ds, v)][0]).strip()[:5] in _ing_sabah08]),
-                        ("aksam", [v for v in _gv if _ing_grup(ds, v) == "aksam"])):
-            _h = _ing_hedef(ds, _g + "_hafta_sonu" if (_hs and _g == "aksam") else _g)
-            if _h > 0:
-                ing_hedef_eksik[(ds, _g)] = model.NewIntVar(0, _h, f"ing_eksik_{_g}_{ds}")
-                model.Add(sum(_x(_vs)) + ing_hedef_eksik[(ds, _g)] >= _h)
-        # gece nöbeti
-        _sahip = [q for b, e, q in _tablo if b <= _d <= e]
-        ing_gece_sahibi[ds] = _sahip[0] if _sahip else None
-        _gece_vs = [v for v in _gv if _ing_grup(ds, v) == "gece"]
-        _xg = _x(_gece_vs)
-        if not _sahip:
-            print(f"!!! {ds} INGILIZCE_GECE_TABLOSU'nda yok - ingilizce gece kuralı o gün kurulmadı.")
-        elif _xg:
-            _ben = _sahip[0] == QUEUE
-            ing_gece_fazla[ds] = model.NewIntVar(0, len(_xg), f"ing_gece_fazla_{ds}")
-            model.Add(sum(_xg) - ing_gece_fazla[ds] <= (1 if _ben else 0))
-            if _ben:
-                ing_gece_eksik[ds] = model.NewIntVar(0, 1, f"ing_gece_eksik_{ds}")
-                model.Add(sum(_xg) + ing_gece_eksik[ds] >= 1)
-                for a in _ing:
-                    _w = int(round(GECE_KISI_W * float(_puan.get(a, 0))))
-                    for v in _gece_vs:
-                        if (a, ds, v) in x and _w:
-                            ing_gece_kisi_ceza.append((_w, x[(a, ds, v)]))
-        for a in _ing:
-            for v in _gece_vs:
-                if (a, ds, v) in x:
-                    _k = (a, day_week[ds])
-                    if _k not in _gn_hafta:
-                        _gn_hafta[_k] = model.NewBoolVar(f"ing_gece_hafta_{a}_{day_week[ds]}")
-                    model.Add(_gn_hafta[_k] >= x[(a, ds, v)])
-    for a in _ing:                                              # arka arkaya iki gece haftası
-        for _w1, _w2 in zip(WEEKS, WEEKS[1:]):
-            if (a, _w1) in _gn_hafta and (a, _w2) in _gn_hafta:
-                _ard = model.NewBoolVar(f"ing_gece_ard_{a}_{_w2}")
-                model.Add(_ard >= _gn_hafta[(a, _w1)] + _gn_hafta[(a, _w2)] - 1)
-                ing_gece_ardisik.append(_ard)
-
-    # --- ekip bağı: hafta içi ekibin grubunda, hafta boyu tek vardiya ---
-    _tatil_ing = set(globals().get("ozel_tatil_plan_gunleri", set()))
-    _ing_muaf = set()                                           # sabah çalışan / hamile / süt -> grup kuralı yok
-    for _c in ("sabah_calisir_flg", "hamile_flg", "sut_izni_flg"):
-        if _c in df_tam.columns:
-            _ing_muaf |= set(df_tam.loc[pd.to_numeric(df_tam[_c], errors="coerce").fillna(0).astype(int) == 1,
-                                        "agent_user_code"].astype(str).str.strip())
-    _ing_muaf &= ingilizce_agents
-    _tkd = globals().get("takim_disi_hafta_v", set())
-    _grp_wk = {}                                                # (hafta, v) -> grup
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari.get(ds, []):
-            if (ds, v) in saat:
-                _grp_wk.setdefault((day_week[ds], v), _ing_grup(ds, v))
-    for a in _ing:
-        _t = agent_team.get(a)
-        for ds in PLAN_GUNLER:
-            if pd.to_datetime(ds).weekday() >= 5 or ds in _tatil_ing:
-                continue
-            wk = day_week[ds]
-            for v in gun_vardiyalari.get(ds, []):
-                if (a, ds, v) not in x or v in _ozel_v:
-                    continue
-                if (a, wk, v) not in ing_week_base:
-                    ing_week_base[(a, wk, v)] = model.NewBoolVar(f"ing_wb_{a}_{wk}_{v}")
-                model.Add(x[(a, ds, v)] <= ing_week_base[(a, wk, v)])
-                _g = _grp_wk.get((wk, v), "diger")
-                if _g == "gece" or a in _ing_muaf:
-                    continue                                    # gece ekipten bağımsız / muaf ingilizceci
-                _ayni = [team_week_base[(_t, wk, b)] for b in week_vardiyalari.get(wk, [])
-                         if (_t, wk, b) in team_week_base and (wk, b) not in _tkd
-                         and (_grp_wk.get((wk, b)) == _g if _g != "diger" else b == v)]
-                if (a, wk) not in ing_grup_disi:
-                    ing_grup_disi[(a, wk)] = model.NewBoolVar(f"ing_grup_disi_{a}_{wk}")
-                model.Add(x[(a, ds, v)] <= sum(_ayni) + ing_grup_disi[(a, wk)])
-        for wk in WEEKS:
-            _bs = [(v, b) for (a2, w2, v), b in ing_week_base.items()
-                   if a2 == a and w2 == wk and _grp_wk.get((wk, v)) != "gece"]
-            if not _bs:
-                continue
-            model.Add(sum(b for (a2, w2, v), b in ing_week_base.items() if a2 == a and w2 == wk) <= 1)
-            ing_takim_disi[(a, wk)] = model.NewBoolVar(f"ing_takim_disi_{a}_{wk}")
-            for v, b in _bs:                                    # ekibin tam base'inden kayma (grup içi)
-                _tb = team_week_base.get((_t, wk, v))
-                model.Add(ing_takim_disi[(a, wk)] >= b - (_tb if _tb is not None else 0))
-
-print("ENABLE_INGILIZCE:", ENABLE_INGILIZCE, "| kuyruk:", QUEUE, "| ingilizceci:", len(ingilizce_agents),
-      "| hedef:", INGILIZCE_HEDEF)
-print("grup kuralından muaf ingilizceci (sabah çalışan / hamile / süt):", sorted(globals().get("_ing_muaf", set())))
-print("sabah/akşam hedef kısıtı:", len(ing_hedef_eksik), "| gece günü (bu kuyruk nöbetçi):", len(ing_gece_eksik),
-      "/", sum(1 for q in ing_gece_sahibi.values() if q), "| ardışık gece haftası izlenen:", len(ing_gece_ardisik))
-
-
-
-
-
-
-# %% [KONTROL] - İNGİLİZCE: SABAH 08 / AKŞAM / GECE [RAPOR/SOFT]
-# 2026-11-17 KİTLE + GOLD (aynı hücre). Bu hücre modele DOKUNMAZ.
-# INGILIZCE_GRUP (Excel): gün başına sabah 08 / akşam / gece ingilizceci sayısı, bu kuyruğun hedefi ve gece nöbetçi
-# kuyruğu. INGILIZCE_7_24 (Excel): gün x yarım saat ingilizceci sayısı - BİLGİ (kural artık grup bazlı).
-from datetime import timedelta as _ik_td
-
-_ing_k = sorted(globals().get("ingilizce_agents", set()))
-ingilizce_saat_df = pd.DataFrame()
-ingilizce_grup_df = pd.DataFrame()
-if _ing_k:
-    _gun_k = sorted(PLAN_GUNLER, key=lambda s: pd.to_datetime(s))
-    def _ik_dk(_t):
-        _t = str(_t).strip()[:5]
-        return 1440 if _t == "24:00" else int(_t[:2]) * 60 + int(_t[3:5])
-    _ik_s08 = {str(b).strip()[:5] for b in INGILIZCE_SABAH_BAS}
-    _ik_gc = {str(b).strip()[:5] for b in INGILIZCE_GECE_BAS}
-    _ik_ak = (_ik_dk(INGILIZCE_AKSAM_ARALIK[0]), _ik_dk(INGILIZCE_AKSAM_ARALIK[1]))
-    _ik_tablo = [(pd.to_datetime(b).date(), pd.to_datetime(e).date(), str(q).strip()) for b, e, q in INGILIZCE_GECE_TABLOSU]
-    def _ik_hedef(ds, _k):
-        _s = next((q for b, e, q in _ik_tablo if b <= pd.to_datetime(ds).date() <= e), None)
-        _hd = INGILIZCE_HEDEF if _s in (None, QUEUE) else INGILIZCE_HEDEF_GECESIZ
-        return int({**_hd, **INGILIZCE_HEDEF_HAFTA.get(day_week[ds], {})}[_k])
-    # --- grup sayıları ---
-    _rows = []
-    for ds in _gun_k:
-        _n = {"sabah_08": 0, "aksam": 0, "gece": 0}
-        for a in _ing_k:
-            if cozum_calisma.get((a, ds), 0) != 1:
-                continue
-            v = cozum_atama.get((a, ds))
-            if (ds, v) not in saat:
-                continue
-            _b = str(saat[(ds, v)][0]).strip()[:5]
-            _n["sabah_08"] += _b in _ik_s08
-            _n["gece"] += _b in _ik_gc
-            _n["aksam"] += _b not in _ik_gc and _ik_ak[0] <= _ik_dk(_b) < _ik_ak[1]
-        _sahip = next((q for b, e, q in _ik_tablo if b <= pd.to_datetime(ds).date() <= e), None)
-        _hg = (1 if _sahip == QUEUE else 0) if _sahip else None
-        _rows.append({"tarih": ds, "gun": ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"][pd.to_datetime(ds).weekday()],
-                      "sabah_08": _n["sabah_08"], "sabah_08_hedef": _ik_hedef(ds, "sabah_08"),
-                      "aksam": _n["aksam"], "aksam_hedef": _ik_hedef(ds, "aksam_hafta_sonu"
-                                                               if pd.to_datetime(ds).weekday() >= 5 else "aksam"),
-                      "gece": _n["gece"], "gece_hedef": _hg, "gece_nobetci_kuyruk": _sahip})
-    ingilizce_grup_df = pd.DataFrame(_rows)
-    _e = ingilizce_grup_df
-    kaydet("İngilizce sabah 08 eksik (kişi-gün)", int((_e["sabah_08_hedef"] - _e["sabah_08"]).clip(lower=0).sum()), tur="SOFT")
-    kaydet("İngilizce akşam eksik (kişi-gün)", int((_e["aksam_hedef"] - _e["aksam"]).clip(lower=0).sum()), tur="SOFT")
-    _gh = _e.dropna(subset=["gece_hedef"])
-    kaydet("İngilizce gece: nöbetçi kuyrukta boş gece", int(((_gh["gece_hedef"] == 1) & (_gh["gece"] == 0)).sum()), tur="SOFT")
-    kaydet("İngilizce gece: fazla (2. kişi ya da nöbetçi olmayan kuyruk)",
-           int((_gh["gece"] - _gh["gece_hedef"]).clip(lower=0).sum()), tur="SOFT")
-    kaydet("İngilizce: ekibinin grubu dışında (agent-hafta)",
-           sum(int(solver.Value(v)) for v in globals().get("ing_grup_disi", {}).values()), tur="SOFT")
-    kaydet("İngilizce: ekibin base'inden farklı başlangıç (agent-hafta)",
-           sum(int(solver.Value(v)) for v in globals().get("ing_takim_disi", {}).values()), tur="RAPOR")
-    kaydet("İngilizce: arka arkaya iki gece haftası",
-           sum(int(solver.Value(v)) for v in globals().get("ing_gece_ardisik", [])), tur="RAPOR")
-    print(f"kuyruk {QUEUE} | ingilizceci {len(_ing_k)} | gece nöbetçi olduğu gün: {int((_e['gece_hedef'] == 1).sum())}")
-    print(_e[(_e["sabah_08"] < _e["sabah_08_hedef"]) | (_e["aksam"] < _e["aksam_hedef"])
-             | (_e["gece"] != _e["gece_hedef"].fillna(_e["gece"]))].to_string(index=False) or "  hedefler tuttu")
-
-    # --- yarım saat tablosu (BİLGİ) ---
-    def _ik_aralik(_st):
-        _b = int(str(_st[0])[:2]) * 60 + int(str(_st[0])[3:5])
-        _e2 = int(str(_st[1])[:2]) * 60 + int(str(_st[1])[3:5])
-        return _b, (_e2 + 1440 if _e2 <= _b else _e2)
-    _sayac = {ds: [0] * 48 for ds in _gun_k}
-    for a in _ing_k:
-        for _i, ds in enumerate(_gun_k):
-            v = cozum_atama.get((a, ds)) if cozum_calisma.get((a, ds), 0) == 1 else None
-            if v is not None:
-                _b, _e2 = _ik_aralik(saat[(ds, v)])
-                for _k in range(48):
-                    if _b <= _k * 30 and _e2 >= _k * 30 + 30:
-                        _sayac[ds][_k] += 1
-                    if _i + 1 < len(_gun_k) and _b <= _k * 30 + 1440 and _e2 >= _k * 30 + 1470:
-                        _sayac[_gun_k[_i + 1]][_k] += 1
-        _st0 = globals().get("gecmis_calisma", {}).get(a, {}).get(pd.to_datetime(_gun_k[0]).date() - _ik_td(days=1))
-        if _st0 is not None:
-            _b, _e2 = _ik_aralik(_st0)
-            for _k in range(48):
-                if _b <= _k * 30 + 1440 and _e2 >= _k * 30 + 1470:
-                    _sayac[_gun_k[0]][_k] += 1
-    _kol = [f"{_k // 2:02d}:{30 * (_k % 2):02d}" for _k in range(48)]
-    ingilizce_saat_df = pd.DataFrame([[ds] + _sayac[ds] for ds in _gun_k], columns=["tarih"] + _kol)
-    ingilizce_saat_df.insert(1, "bos_saat", [sum(1 for n in _sayac[ds] if n == 0) / 2 for ds in _gun_k])
-else:
-    print("ingilizceci yok / ENABLE_INGILIZCE = False -> kontrol atlandı.")
+CREATE TABLE BSEN_SEYAHAT_2026_KITLE_EYLUL_EKIM_OOT_V2 AS
+WITH BIREYSEL_CUST AS (
+    SELECT A.PARTY_ID,
+           MIN(A.OPEN_DATE) AS OPEN_DATE
+    FROM   DM.CNF_CUSTOMER A
+    INNER JOIN (
+                SELECT CLIENT_NO FROM ODS_KBLIVE.CUST_PDP_PERM_BMS_KKS
+                UNION
+                SELECT CLIENT_NO FROM ODS_KBLIVE.CUST_PDP_PERMISSIONS
+                WHERE  PERMISSION_FLAG = 'Y'
+               ) KVKK
+            ON A.PARTY_ID = KVKK.CLIENT_NO
+    INNER JOIN (
+                SELECT TO_NUMBER(C1.SBU_CODE) SBU_CODE
+                FROM   DM_MIS.PRF_SBU C1
+                WHERE  C1.SBU_CODE NOT LIKE '%X%'
+               ) SBU
+            ON SBU.SBU_CODE = A.PORTFOLIO_SBU_CODE
+    WHERE  A.MVT_STATUS_ID = 1
+      AND  A.CURRENT_STATUS_ID IN (1, 2, 5)
+      AND  A.CUSTOMER_TYPE_ID  IN (1, 4, 47)
+      AND  A.PORTFOLIO_SBU_CODE IN (410, 414, 430, 432, 440, 444, 415, 425)
+    GROUP BY A.PARTY_ID
+),
+CAL AS (
+    SELECT DISTINCT LAST_DAY_OF_MONTH AS DATA_DATE
+    FROM   EDW.CMN_CALENDAR
+    WHERE  LAST_DAY_OF_MONTH BETWEEN DATE '2026-08-31' AND DATE '2026-09-30'
+)
+SELECT B.PARTY_ID,
+       C.DATA_DATE,
+       ADD_MONTHS(C.DATA_DATE, 1) AS TARGET_DATE
+FROM   BIREYSEL_CUST B
+JOIN   CAL C
+  ON   B.OPEN_DATE <= C.DATA_DATE;      -- her snapshot'ta sadece o tarihte hesabı açık olanlar

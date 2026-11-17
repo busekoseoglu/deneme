@@ -1,94 +1,40 @@
-/* =====================================================================
-   PİLOT EKİM - SEYAHAT GEÇMİŞİ DEĞİŞKENLERİ (Z BLOĞU, DÜZELTİLMİŞ)
-   ---------------------------------------------------------------------
-   Kullanım: BSEN_SEYAHATIM_2026_EKIM_PILOT_DEGISKENLER_V2 sorgunda
-             "-- BİR ÖNCEKİ YURT DIŞI ZİYARET DEĞİŞKENLERİ" yorumundan sonraki
-             LEFT JOIN ( ... ) Z ON ... bloğunu BUNUNLA DEĞİŞTİR.
-             Sorgunun geri kalanı (SELECT listesi, MCC / CC / diğer join'ler) aynı kalır.
-
-   Değişen tek şey PRM:
-     Eskisi : snap = TRUNC(SYSDATE,'MM') - 1   -> bugün çalışınca 2026-10-31 oluyordu
-     Yenisi : snap = pilot kitlenin DATA_DATE'i -> 2026-09-30
-              (Ekim 2026'da yurt dışına çıkacakları tahmin etmek için doğru snapshot)
-     bas_gun = snap ayından 23 ay önceki ayın 1'i -> 2024-10-01
-   ===================================================================== */
-
--- BİR ÖNCEKİ YURT DIŞI ZİYARET DEĞİŞKENLERİ
-LEFT JOIN (
-    WITH PRM AS (
-        SELECT MAX(DATA_DATE)                               AS snap,      -- 2026-09-30
-               ADD_MONTHS(TRUNC(MAX(DATA_DATE), 'MM'), -23) AS bas_gun    -- 2024-10-01
-        FROM   BSEN_SEYAHAT_EKIM_2026_PILOT_V2
-    ),
-    POS AS (
-        SELECT a.party_id,
-               LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
-               SUM(CASE WHEN a.transaction_amount_tl > 0
-                        THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
-        FROM   edw.trx_card_transaction a
-        CROSS JOIN prm p
-        WHERE  a.card_transaction_date >= p.bas_gun
-          AND  a.card_transaction_date <  p.snap + 1
-          AND  a.transaction_terminal_tp_id = 11
-          AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
-          AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
-        GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
-    ),
-    ATM AS (
-        SELECT c.party_id,
-               c.data_date AS seyahat_ay,
-               MAX(c.nof_international_atm_trx) AS atm_islem
-        FROM   dm.cnf_card_financial_trx_aggr c
-        CROSS JOIN prm p
-        WHERE  c.data_date BETWEEN LAST_DAY(p.bas_gun) AND p.snap
-          AND  c.nof_international_atm_trx > 0
-        GROUP BY c.party_id, c.data_date
-    ),
-    AYLIK AS (
-        SELECT party_id,
-               seyahat_ay,
-               SUM(pos_tutar) AS pos_tutar,
-               SUM(atm_islem) AS atm_islem
-        FROM (
-            SELECT party_id, seyahat_ay, pos_tutar, 0 AS atm_islem FROM pos
-            UNION ALL
-            SELECT party_id, seyahat_ay, 0, atm_islem FROM atm
-        )
-        GROUP BY party_id, seyahat_ay
-    ),
-    X AS (
-        SELECT s.party_id,
-               p.snap,
-               MONTHS_BETWEEN(p.snap, s.seyahat_ay) AS m,      -- 0 .. 23
-               s.pos_tutar,
-               s.atm_islem
-        FROM   aylik s
-        CROSS JOIN prm p
-    )
-    SELECT party_id,
-           snap                                                   AS data_date,
-           MAX(CASE WHEN m = 0               THEN 1 ELSE 0 END)   AS syh_snap_ay_flg,
-           SUM(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END)   AS syh_gecen_yil_hedef_donem_ay_say,
-           MAX(CASE WHEN m = 23              THEN 1 ELSE 0 END)   AS syh_iki_yil_once_hedef_ay_flg,
-           SUM(CASE WHEN m < 12 THEN pos_tutar ELSE 0 END)        AS syh_yd_pos_tutar_12m,
-           SUM(CASE WHEN m < 12 THEN atm_islem ELSE 0 END)        AS syh_yd_atm_islem_12m
-    FROM   x
-    GROUP BY party_id, snap
-) Z
-  ON  Z.PARTY_ID  = A.PARTY_ID
- AND  Z.DATA_DATE = A.DATA_DATE
-
-
-/* ---------------------------------------------------------------------
-   KONTROL (tablo oluştuktan sonra ayrı çalıştır)
-   Beklenen:
-     n              : pilot kitledeki müşteri sayısı (~15.6M)
-     snap_ay_1      : ~150K - 170K  (Eylül 2026'da yurt dışına çıkan bireysel müşteriler)
-     pos_tutar_dolu : birkaç yüz bin
-   snap_ay_1 = 0 çıkarsa join hâlâ eşleşmiyor demektir.
-   --------------------------------------------------------------------- */
-SELECT COUNT(*)                                                   AS n,
-       SUM(CASE WHEN syh_snap_ay_flg = 1 THEN 1 ELSE 0 END)       AS snap_ay_1,
-       SUM(CASE WHEN syh_yd_pos_tutar_12m > 0 THEN 1 ELSE 0 END)  AS pos_tutar_dolu,
-       SUM(CASE WHEN syh_gecen_yil_hedef_donem_ay_say > 0 THEN 1 ELSE 0 END) AS gecen_yil_dolu
-FROM   BSEN_SEYAHATIM_2026_EKIM_PILOT_DEGISKENLER_V2;
+CREATE TABLE BSEN_SYH_PILOT_EKIM_2026 NOLOGGING AS
+WITH POS AS (
+    SELECT a.party_id,
+           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
+           SUM(CASE WHEN a.transaction_amount_tl > 0 THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
+    FROM   edw.trx_card_transaction a
+    WHERE  a.card_transaction_date >= DATE '2024-10-01'
+      AND  a.card_transaction_date <  DATE '2026-10-01'
+      AND  a.transaction_terminal_tp_id = 11
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
+),
+ATM AS (
+    SELECT c.party_id, c.data_date AS seyahat_ay, MAX(c.nof_international_atm_trx) AS atm_islem
+    FROM   dm.cnf_card_financial_trx_aggr c
+    WHERE  c.data_date BETWEEN DATE '2024-10-31' AND DATE '2026-09-30'
+      AND  c.nof_international_atm_trx > 0
+    GROUP BY c.party_id, c.data_date
+),
+AYLIK AS (
+    SELECT party_id, seyahat_ay, SUM(pos_tutar) AS pos_tutar, SUM(atm_islem) AS atm_islem
+    FROM (SELECT party_id, seyahat_ay, pos_tutar, 0 AS atm_islem FROM pos
+          UNION ALL
+          SELECT party_id, seyahat_ay, 0, atm_islem FROM atm)
+    GROUP BY party_id, seyahat_ay
+),
+X AS (
+    SELECT party_id, MONTHS_BETWEEN(DATE '2026-09-30', seyahat_ay) AS m, pos_tutar, atm_islem
+    FROM   aylik
+)
+SELECT party_id,
+       DATE '2026-09-30'                                      AS data_date,
+       MAX(CASE WHEN m = 0               THEN 1 ELSE 0 END)   AS syh_snap_ay_flg,
+       SUM(CASE WHEN m BETWEEN 10 AND 12 THEN 1 ELSE 0 END)   AS syh_gecen_yil_hedef_donem_ay_say,
+       MAX(CASE WHEN m = 23              THEN 1 ELSE 0 END)   AS syh_iki_yil_once_hedef_ay_flg,
+       SUM(CASE WHEN m < 12 THEN pos_tutar ELSE 0 END)        AS syh_yd_pos_tutar_12m,
+       SUM(CASE WHEN m < 12 THEN atm_islem ELSE 0 END)        AS syh_yd_atm_islem_12m
+FROM   x
+GROUP BY party_id;

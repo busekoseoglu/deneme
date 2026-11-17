@@ -1,48 +1,17 @@
-# ===== 2026-11-17 EKLENEN - INGILIZCE GRUP HEDEFLERI + GECE NOBETI (KITLE + GOLD) =====
-    # Is birimi: her gun ingilizceci TOPLAMI (kitle + gold) - 08:00'de baslayan en az 1, aksam (15:00-24:00 baslayan,
-    # 00:00 haric) en az 2, gece (00:00) TAM 1. Ust sinir yok. Iki model paralel; toplam CONFIG ile bolunur:
-    # INGILIZCE_HEDEF bu kuyrugun payi (kitle 1/2, gold 0/0 basladi; hafta sonu aksam 1 - 2026-11-17). Gece kuyrugu INGILIZCE_GECE_TABLOSU'ndan
-    # (lokasyon nobeti gibi, her ay elle; yarim haftalar ayri satir; IKI NOTEBOOK'TA AYNI olmali).
-    # Hafta ici ingilizceci ekibinin base'iyle ayni grupta (sabah 07-15 / aksam 15-24), grup icinde kayabilir.
-    "INGILIZCE_SABAH_ARALIK": ("07:00", "15:00"),
-    "INGILIZCE_AKSAM_ARALIK": ("15:00", "24:00"),
-    "INGILIZCE_SABAH_BAS": ["08:00"],
-    "INGILIZCE_GECE_BAS": ["00:00"],
-    "INGILIZCE_HEDEF": {"sabah_08": 1, "aksam": 2, "aksam_hafta_sonu": 1},
-    "INGILIZCE_GECE_TABLOSU": [
-        ("2026-11-01", "2026-11-01", "kitle"),   # W44 yarim (Paz)
-        ("2026-11-02", "2026-11-08", "kitle"),   # W45
-        ("2026-11-09", "2026-11-15", "gold"),    # W46  (ORNEK - is birimiyle belirlenecek)
-        ("2026-11-16", "2026-11-22", "kitle"),   # W47
-        ("2026-11-23", "2026-11-29", "kitle"),   # W48
-        ("2026-11-30", "2026-11-30", "kitle"),   # W49 yarim (Pzt) - Aralik planinda devam
-    ],
-    # Eksik kisi-gun 500.000 (coverage buffer alti 300.000 ustunde). Gece 2. kisi / nobetci olmayan kuyruk 1.000.000.
-    # Ekibin grubundan cikis 5.000.000 ("kesinlikle ekipten ayrilmasin"): haftalik hedef kazancindan (5 x 500.000) pahali.
-    # Gece sirasi GECE_KISI_W (3G orani) ile; arka arkaya iki gece haftasi 100.000.
-    "INGILIZCE_HEDEF_EKSIK_W": 500000,
-    "INGILIZCE_GECE_EKSIK_W": 500000,
-    "INGILIZCE_GECE_FAZLA_W": 1000000,
-    "INGILIZCE_GECE_ARDISIK_W": 100000,
-    "INGILIZCE_GRUP_DISI_W": 5000000,
+# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
+    # INGILIZCE_HEDEF bu kuyruk o hafta GECE NOBETCISIYKEN, INGILIZCE_HEDEF_GECESIZ gece diger kuyruktayken gecerli
+    # (INGILIZCE_GECE_TABLOSU'ndan otomatik). INGILIZCE_HEDEF_HAFTA = {"2026-W47": {"aksam": 1}} elle istisna, ikisini ezer.
+    # Simdilik kitle iki durumda da aksam 2 (gold henuz aksama katki vermiyor). Gold hazir olunca: HEDEF aksam 1.
+    "INGILIZCE_HEDEF_GECESIZ": {"sabah_08": 1, "aksam": 2, "aksam_hafta_sonu": 1},
+    "INGILIZCE_HEDEF_HAFTA": {},
     # =======================================================
 
 
 
-# ===== 2026-11-17 EKLENEN - INGILIZCE GRUP HEDEFLERI + GECE NOBETI (KITLE + GOLD) =====
-INGILIZCE_SABAH_ARALIK = CONFIG["INGILIZCE_SABAH_ARALIK"]
-INGILIZCE_AKSAM_ARALIK = CONFIG["INGILIZCE_AKSAM_ARALIK"]
-INGILIZCE_SABAH_BAS = CONFIG["INGILIZCE_SABAH_BAS"]
-INGILIZCE_GECE_BAS = CONFIG["INGILIZCE_GECE_BAS"]
-INGILIZCE_HEDEF = CONFIG["INGILIZCE_HEDEF"]
-INGILIZCE_GECE_TABLOSU = CONFIG["INGILIZCE_GECE_TABLOSU"]
-INGILIZCE_HEDEF_EKSIK_W = CONFIG["INGILIZCE_HEDEF_EKSIK_W"]
-INGILIZCE_GECE_EKSIK_W = CONFIG["INGILIZCE_GECE_EKSIK_W"]
-INGILIZCE_GECE_FAZLA_W = CONFIG["INGILIZCE_GECE_FAZLA_W"]
-INGILIZCE_GECE_ARDISIK_W = CONFIG["INGILIZCE_GECE_ARDISIK_W"]
-INGILIZCE_GRUP_DISI_W = CONFIG["INGILIZCE_GRUP_DISI_W"]
+# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
+INGILIZCE_HEDEF_GECESIZ = CONFIG["INGILIZCE_HEDEF_GECESIZ"]
+INGILIZCE_HEDEF_HAFTA = CONFIG["INGILIZCE_HEDEF_HAFTA"]
 # =======================================================
-
 
 
 
@@ -59,6 +28,8 @@ INGILIZCE_GRUP_DISI_W = CONFIG["INGILIZCE_GRUP_DISI_W"]
 # Ekip bağı (hafta içi, arife/resmi tatil hariç): ingilizceci ekibinin base'iyle AYNI GRUPTA (sabah 07-15 /
 # akşam 15-24) çalışır, grup içinde başlangıcı kayabilir (ekip 10:30 -> ingilizceci 08:00), hafta boyu tek
 # vardiya (HARD). Grup dışı INGILIZCE_GRUP_DISI_W, ekibin tam base'inden kayma INGILIZCE_TAKIM_DISI_W.
+# 2026-11-17: pay gece haftasına göre - bu kuyruk gece nöbetçiyse INGILIZCE_HEDEF, değilse INGILIZCE_HEDEF_GECESIZ;
+# INGILIZCE_HEDEF_HAFTA[hafta] elle istisna (ikisini de ezer).
 # Gece ekipten bağımsız; hafta sonu herkes ekipten bağımsız. Üst sınır yok (sabah/akşam). Cezalar OBJECTIVE'de.
 # 2026-11-17: sabah çalışan / hamile / süt izinli ingilizceci grup kuralından MUAF - akşam/geceye giremez, ekibi
 # akşamdaysa sabahta kalır (kitledeki takım muafiyetinin mantığı); ekibin base'inden kayma cezası yine geçerli.
@@ -67,7 +38,8 @@ from datetime import timedelta as _ing_td
 for _p in ("ENABLE_INGILIZCE", "INGILIZCE_FLAG_KOL", "INGILIZCE_TAKIM_DISI_W", "INGILIZCE_SABAH_ARALIK",
            "INGILIZCE_AKSAM_ARALIK", "INGILIZCE_SABAH_BAS", "INGILIZCE_GECE_BAS", "INGILIZCE_HEDEF",
            "INGILIZCE_HEDEF_EKSIK_W", "INGILIZCE_GECE_TABLOSU", "INGILIZCE_GECE_EKSIK_W", "INGILIZCE_GECE_FAZLA_W",
-           "INGILIZCE_GECE_ARDISIK_W", "INGILIZCE_GRUP_DISI_W", "GECE_KISI_W"):
+           "INGILIZCE_GECE_ARDISIK_W", "INGILIZCE_GRUP_DISI_W", "GECE_KISI_W",
+           "INGILIZCE_HEDEF_GECESIZ", "INGILIZCE_HEDEF_HAFTA"):
     if _p not in globals():
         raise SystemExit(f"CONFIG'de tanımlı olmalı: {_p} -> [CONFIG] hücresini çalıştır.")
 
@@ -115,6 +87,12 @@ if ingilizce_agents:
     _ozel_v = set(globals().get("arife_ozel_vardiya_kodlari", set())) | {v for _, v in globals().get("prov_vardiyalar", set())}
     _tablo = [(pd.to_datetime(b).date(), pd.to_datetime(e).date(), str(q).strip()) for b, e, q in INGILIZCE_GECE_TABLOSU]
 
+    def _ing_hedef(ds, _k):
+        """Bu kuyruğun o günkü payı: gece nöbetçiyse HEDEF, değilse HEDEF_GECESIZ; haftalık istisna ezer."""
+        _s = next((q for b, e, q in _tablo if b <= pd.to_datetime(ds).date() <= e), None)
+        _hd = INGILIZCE_HEDEF if _s in (None, QUEUE) else INGILIZCE_HEDEF_GECESIZ
+        return int({**_hd, **INGILIZCE_HEDEF_HAFTA.get(day_week[ds], {})}[_k])
+
     # --- 3G: gece/kıdem oranı sırası (lokasyon nöbetiyle aynı okuma) ---
     _ing_oran = {}
     if "df_gece_oran" in globals():
@@ -142,7 +120,7 @@ if ingilizce_agents:
         _hs = pd.to_datetime(ds).weekday() >= 5
         for _g, _vs in (("sabah_08", [v for v in _gv if str(saat[(ds, v)][0]).strip()[:5] in _ing_sabah08]),
                         ("aksam", [v for v in _gv if _ing_grup(ds, v) == "aksam"])):
-            _h = int(INGILIZCE_HEDEF[_g + "_hafta_sonu"] if (_hs and _g == "aksam") else INGILIZCE_HEDEF[_g])
+            _h = _ing_hedef(ds, _g + "_hafta_sonu" if (_hs and _g == "aksam") else _g)
             if _h > 0:
                 ing_hedef_eksik[(ds, _g)] = model.NewIntVar(0, _h, f"ing_eksik_{_g}_{ds}")
                 model.Add(sum(_x(_vs)) + ing_hedef_eksik[(ds, _g)] >= _h)
@@ -236,7 +214,6 @@ print("sabah/akşam hedef kısıtı:", len(ing_hedef_eksik), "| gece günü (bu 
 
 
 
-
 # %% [KONTROL] - İNGİLİZCE: SABAH 08 / AKŞAM / GECE [RAPOR/SOFT]
 # 2026-11-17 KİTLE + GOLD (aynı hücre). Bu hücre modele DOKUNMAZ.
 # INGILIZCE_GRUP (Excel): gün başına sabah 08 / akşam / gece ingilizceci sayısı, bu kuyruğun hedefi ve gece nöbetçi
@@ -255,6 +232,10 @@ if _ing_k:
     _ik_gc = {str(b).strip()[:5] for b in INGILIZCE_GECE_BAS}
     _ik_ak = (_ik_dk(INGILIZCE_AKSAM_ARALIK[0]), _ik_dk(INGILIZCE_AKSAM_ARALIK[1]))
     _ik_tablo = [(pd.to_datetime(b).date(), pd.to_datetime(e).date(), str(q).strip()) for b, e, q in INGILIZCE_GECE_TABLOSU]
+    def _ik_hedef(ds, _k):
+        _s = next((q for b, e, q in _ik_tablo if b <= pd.to_datetime(ds).date() <= e), None)
+        _hd = INGILIZCE_HEDEF if _s in (None, QUEUE) else INGILIZCE_HEDEF_GECESIZ
+        return int({**_hd, **INGILIZCE_HEDEF_HAFTA.get(day_week[ds], {})}[_k])
     # --- grup sayıları ---
     _rows = []
     for ds in _gun_k:
@@ -272,9 +253,9 @@ if _ing_k:
         _sahip = next((q for b, e, q in _ik_tablo if b <= pd.to_datetime(ds).date() <= e), None)
         _hg = (1 if _sahip == QUEUE else 0) if _sahip else None
         _rows.append({"tarih": ds, "gun": ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"][pd.to_datetime(ds).weekday()],
-                      "sabah_08": _n["sabah_08"], "sabah_08_hedef": int(INGILIZCE_HEDEF.get("sabah_08", 0)),
-                      "aksam": _n["aksam"], "aksam_hedef": int(INGILIZCE_HEDEF["aksam_hafta_sonu"]
-                                                                if pd.to_datetime(ds).weekday() >= 5 else INGILIZCE_HEDEF["aksam"]),
+                      "sabah_08": _n["sabah_08"], "sabah_08_hedef": _ik_hedef(ds, "sabah_08"),
+                      "aksam": _n["aksam"], "aksam_hedef": _ik_hedef(ds, "aksam_hafta_sonu"
+                                                               if pd.to_datetime(ds).weekday() >= 5 else "aksam"),
                       "gece": _n["gece"], "gece_hedef": _hg, "gece_nobetci_kuyruk": _sahip})
     ingilizce_grup_df = pd.DataFrame(_rows)
     _e = ingilizce_grup_df

@@ -1,3 +1,9 @@
+"INGILIZCE_HEDEF": {"sabah_08": 1, "aksam": 1, "aksam_hafta_sonu": 1},
+
+
+
+
+
 # %% [KISIT] - İNGİLİZCE: SABAH 08 / AKŞAM / GECE NÖBETİ (SOFT)
 # 2026-11-17 KİTLE + GOLD (aynı hücre; kuyruk farkı sadece CONFIG'de). english_flg = 1 agentlar ingilizceci.
 # İş birimi: her gün (hafta sonu dahil) ingilizceci TOPLAMI (kitle + gold):
@@ -14,6 +20,8 @@
 # 2026-11-17: pay gece haftasına göre - bu kuyruk gece nöbetçiyse INGILIZCE_HEDEF, değilse INGILIZCE_HEDEF_GECESIZ;
 # INGILIZCE_HEDEF_HAFTA[hafta] elle istisna (ikisini de ezer).
 # Gece ekipten bağımsız; hafta sonu herkes ekipten bağımsız. Üst sınır yok (sabah/akşam). Cezalar OBJECTIVE'de.
+# 2026-11-18: takım kilidi DIŞI vardiyalar (gold 18:00/19:00 - takim_disi_hafta_v) herkes için ekipten bağımsız ->
+# ingilizceci de orada grup kuralına / kayma cezasına / bağlantı kısıtına girmez (gece gibi). Kitlede yok, etkisiz.
 # 2026-11-17: sabah çalışan / hamile / süt izinli ingilizceci grup kuralından MUAF - akşam/geceye giremez, ekibi
 # akşamdaysa sabahta kalır (kitledeki takım muafiyetinin mantığı); ekibin base'inden kayma cezası yine geçerli.
 from datetime import timedelta as _ing_td
@@ -167,8 +175,8 @@ if ingilizce_agents:
                     ing_week_base[(a, wk, v)] = model.NewBoolVar(f"ing_wb_{a}_{wk}_{v}")
                 model.Add(x[(a, ds, v)] <= ing_week_base[(a, wk, v)])
                 _g = _grp_wk.get((wk, v), "diger")
-                if _g == "gece" or a in _ing_muaf:
-                    continue                                    # gece ekipten bağımsız / muaf ingilizceci
+                if _g == "gece" or a in _ing_muaf or (wk, v) in _tkd:
+                    continue                                    # gece / takım kilidi dışı vardiya / muaf ingilizceci
                 _ayni = [team_week_base[(_t, wk, b)] for b in week_vardiyalari.get(wk, [])
                          if (_t, wk, b) in team_week_base and (wk, b) not in _tkd
                          and (_grp_wk.get((wk, b)) == _g if _g != "diger" else b == v)]
@@ -177,7 +185,7 @@ if ingilizce_agents:
                 model.Add(x[(a, ds, v)] <= sum(_ayni) + ing_grup_disi[(a, wk)])
         for wk in WEEKS:
             _bs = [(v, b) for (a2, w2, v), b in ing_week_base.items()
-                   if a2 == a and w2 == wk and _grp_wk.get((wk, v)) != "gece"]
+                   if a2 == a and w2 == wk and _grp_wk.get((wk, v)) != "gece" and (wk, v) not in _tkd]
             if not _bs:
                 continue
             model.Add(sum(b for (a2, w2, v), b in ing_week_base.items() if a2 == a and w2 == wk) <= 1)
@@ -200,7 +208,7 @@ if ingilizce_agents:
             continue
         wk = day_week[ds]
         _sol = [x[(a, ds, v)] for a in _ing if a not in _ing_muaf for v in gun_vardiyalari.get(ds, [])
-                if (a, ds, v) in x and v not in _ozel_v and _grp_wk.get((wk, v)) == "aksam"]
+                if (a, ds, v) in x and v not in _ozel_v and _grp_wk.get((wk, v)) == "aksam" and (wk, v) not in _tkd]
         if not _sol:
             continue
         _sag = [_n * team_week_base[(t, wk, b)] for t, _n in _ing_takim_say.items() for b in week_vardiyalari.get(wk, [])
@@ -215,3 +223,8 @@ print("ENABLE_INGILIZCE:", ENABLE_INGILIZCE, "| kuyruk:", QUEUE, "| ingilizceci:
 print("grup kuralından muaf ingilizceci (sabah çalışan / hamile / süt):", sorted(globals().get("_ing_muaf", set())))
 print("sabah/akşam hedef kısıtı:", len(ing_hedef_eksik), "| gece günü (bu kuyruk nöbetçi):", len(ing_gece_eksik),
       "/", sum(1 for q in ing_gece_sahibi.values() if q), "| ardışık gece haftası izlenen:", len(ing_gece_ardisik))
+
+
+
+
+

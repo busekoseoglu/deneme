@@ -1,4 +1,50 @@
-# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
+# ===== 2026-11-12 EKLENEN - INGILIZCE 7/24 (GOLD) =====
+    # english_flg = 1 agentlar: her gun 00-24 her yarim saatte en az MIN_KISI ingilizceci (SOFT).
+    # Bos yarim saat 250.000 (saat 500.000): coverage buffer alti (300.000 / kisi-gun) ve off_t
+    # reddinin (60-140.000) ustunde -> sadece ingilizceci yoksa bos kalir. Ingilizceci takim
+    # kilidinden muaf, hafta ici hafta boyu tek vardiya; takimindan farkli vardiya TAKIM_DISI_W.
+    # 2026-11-17: MIN_KISI / YARIM_SAAT_BOS_W / SAAT_ARALIGI artik KULLANILMIYOR (grup kuralina gecildi, asagida).
+    "ENABLE_INGILIZCE": True,
+    "INGILIZCE_FLAG_KOL": "english_flg",
+    "INGILIZCE_MIN_KISI": 1,
+    "INGILIZCE_YARIM_SAAT_BOS_W": 250000,
+    "INGILIZCE_TAKIM_DISI_W": 30000,
+    "INGILIZCE_SAAT_ARALIGI": ("00:00", "24:00"),   # aranan bant; dar bant -> dışı aranmaz
+    # =======================================================
+    # ===== 2026-11-12 EKLENEN - TAKIM KILIDI DISI VARDIYALAR (GOLD) =====
+    # Baslangici bu listede olan hafta ici vardiyalarda takim butunlugu yok (kitledeki gece nobetinin
+    # 00:00 icin yaptigi). Takim bunlari base secemez; bu vardiyaya giren agent hafta boyu o vardiyada.
+    "TAKIM_KILIDI_DISI_BASLANGICLAR": ["18:00", "19:00", "00:00"],
+    # =======================================================
+    # ===== 2026-11-17 EKLENEN - INGILIZCE GRUP HEDEFLERI + GECE NOBETI (KITLE + GOLD) =====
+    # Is birimi: her gun ingilizceci TOPLAMI (kitle + gold) - 08:00'de baslayan en az 1, aksam (15:00-24:00 baslayan,
+    # 00:00 haric) en az 2, gece (00:00) TAM 1. Ust sinir yok. Iki model paralel; toplam CONFIG ile bolunur:
+    # INGILIZCE_HEDEF bu kuyrugun payi (kitle 1/2, gold 0/0 basladi; hafta sonu aksam 1 - 2026-11-17). Gece kuyrugu INGILIZCE_GECE_TABLOSU'ndan
+    # (lokasyon nobeti gibi, her ay elle; yarim haftalar ayri satir; IKI NOTEBOOK'TA AYNI olmali).
+    # Hafta ici ingilizceci ekibinin base'iyle ayni grupta (sabah 07-15 / aksam 15-24), grup icinde kayabilir.
+    "INGILIZCE_SABAH_ARALIK": ("07:00", "15:00"),
+    "INGILIZCE_AKSAM_ARALIK": ("15:00", "24:00"),
+    "INGILIZCE_SABAH_BAS": ["08:00"],
+    "INGILIZCE_GECE_BAS": ["00:00"],
+    "INGILIZCE_HEDEF": {"sabah_08": 0, "aksam": 0, "aksam_hafta_sonu": 0},
+    "INGILIZCE_GECE_TABLOSU": [
+        ("2026-11-01", "2026-11-01", "kitle"),   # W44 yarim (Paz)
+        ("2026-11-02", "2026-11-08", "kitle"),   # W45
+        ("2026-11-09", "2026-11-15", "gold"),    # W46  (ORNEK - is birimiyle belirlenecek)
+        ("2026-11-16", "2026-11-22", "kitle"),   # W47
+        ("2026-11-23", "2026-11-29", "kitle"),   # W48
+        ("2026-11-30", "2026-11-30", "kitle"),   # W49 yarim (Pzt) - Aralik planinda devam
+    ],
+    # Eksik kisi-gun 500.000 (coverage buffer alti 300.000 ustunde). Gece 2. kisi / nobetci olmayan kuyruk 1.000.000.
+    # Ekibin grubundan cikis 5.000.000 ("kesinlikle ekipten ayrilmasin"): haftalik hedef kazancindan (5 x 500.000) pahali.
+    # Gece sirasi GECE_KISI_W (3G orani) ile; arka arkaya iki gece haftasi 100.000.
+    "INGILIZCE_HEDEF_EKSIK_W": 500000,
+    "INGILIZCE_GECE_EKSIK_W": 500000,
+    "INGILIZCE_GECE_FAZLA_W": 1000000,
+    "INGILIZCE_GECE_ARDISIK_W": 100000,
+    "INGILIZCE_GRUP_DISI_W": 5000000,
+    # =======================================================
+    # ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
     # INGILIZCE_HEDEF bu kuyruk o hafta GECE NOBETCISIYKEN, INGILIZCE_HEDEF_GECESIZ gece diger kuyruktayken gecerli
     # (INGILIZCE_GECE_TABLOSU'ndan otomatik). INGILIZCE_HEDEF_HAFTA = {"2026-W47": {"aksam": 1}} elle istisna, ikisini ezer.
     # 2026-11-18 GOLD: kitlenin gece haftasinda aksama 1 (kitle 1 + gold 1 = 2); kendi gece haftasinda aksam 0.
@@ -8,8 +54,39 @@
 
 
 
+
+
+# ===== 2026-11-12 EKLENEN - INGILIZCE 7/24 (GOLD) =====
+ENABLE_INGILIZCE = CONFIG["ENABLE_INGILIZCE"]
+INGILIZCE_FLAG_KOL = CONFIG["INGILIZCE_FLAG_KOL"]
+INGILIZCE_MIN_KISI = CONFIG["INGILIZCE_MIN_KISI"]
+INGILIZCE_YARIM_SAAT_BOS_W = CONFIG["INGILIZCE_YARIM_SAAT_BOS_W"]
+INGILIZCE_TAKIM_DISI_W = CONFIG["INGILIZCE_TAKIM_DISI_W"]
+INGILIZCE_SAAT_ARALIGI = CONFIG["INGILIZCE_SAAT_ARALIGI"]
+# =======================================================
+
+# ===== 2026-11-12 EKLENEN - TAKIM KILIDI DISI VARDIYALAR (GOLD) =====
+TAKIM_KILIDI_DISI_BASLANGICLAR = CONFIG["TAKIM_KILIDI_DISI_BASLANGICLAR"]
+# =======================================================
+
+# ===== 2026-11-17 EKLENEN - INGILIZCE GRUP HEDEFLERI + GECE NOBETI (KITLE + GOLD) =====
+INGILIZCE_SABAH_ARALIK = CONFIG["INGILIZCE_SABAH_ARALIK"]
+INGILIZCE_AKSAM_ARALIK = CONFIG["INGILIZCE_AKSAM_ARALIK"]
+INGILIZCE_SABAH_BAS = CONFIG["INGILIZCE_SABAH_BAS"]
+INGILIZCE_GECE_BAS = CONFIG["INGILIZCE_GECE_BAS"]
+INGILIZCE_HEDEF = CONFIG["INGILIZCE_HEDEF"]
+INGILIZCE_GECE_TABLOSU = CONFIG["INGILIZCE_GECE_TABLOSU"]
+INGILIZCE_HEDEF_EKSIK_W = CONFIG["INGILIZCE_HEDEF_EKSIK_W"]
+INGILIZCE_GECE_EKSIK_W = CONFIG["INGILIZCE_GECE_EKSIK_W"]
+INGILIZCE_GECE_FAZLA_W = CONFIG["INGILIZCE_GECE_FAZLA_W"]
+INGILIZCE_GECE_ARDISIK_W = CONFIG["INGILIZCE_GECE_ARDISIK_W"]
+INGILIZCE_GRUP_DISI_W = CONFIG["INGILIZCE_GRUP_DISI_W"]
+# =======================================================
+
+# ===== 2026-11-17 EKLENEN - INGILIZCE PAY: GECE HAFTASINA GORE + HAFTALIK ISTISNA =====
 INGILIZCE_HEDEF_GECESIZ = CONFIG["INGILIZCE_HEDEF_GECESIZ"]
 INGILIZCE_HEDEF_HAFTA = CONFIG["INGILIZCE_HEDEF_HAFTA"]
+# =======================================================
 
 
 

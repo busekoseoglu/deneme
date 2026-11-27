@@ -1,44 +1,115 @@
-import pandas as pd
-XLS = "vardiya_plani_kitle_YYYYMMDD_HHMM.xlsx"          # <-- mip_ihtiyac run'ının Excel'i
+/* =====================================================================
+   TRANSACTION_POST_DATE DEĞİŞİKLİĞİNİN ETKİ ANALİZİ
+   ---------------------------------------------------------------------
+   Örnek dönem: snapshot 2026-09-30 (Ekim tahmini), geriye 24 ay
+     Mevcut  (A): filtre CARD_TRANSACTION_DATE  (işlem tarihi)
+     Öneri   (B): filtre TRANSACTION_POST_DATE  (gün sonu / finansal tarih)
+   Gruplama her ikisinde de CARD_TRANSACTION_DATE ayına göre.
 
-g = pd.read_excel(XLS, sheet_name="COVERAGE_GUNLUK")
-o = pd.read_excel(XLS, sheet_name="AGENT_OZET")
+   Beklenen fark: işlem ile post arasında gecikme olduğu için
+     - Pencerenin SONUNDA (ay sonu yapılıp sonraki ay post edilen işlemler) B bunları KAÇIRIR
+       -> en çok "son ay" (syh_snap_ay_flg) etkilenir
+     - Pencerenin BAŞINDA B, pencereden önce yapılıp içinde post edilen işlemleri ALIR
+       -> bunlar 24 ay öncesine düşer, hiçbir değişkene girmez (etkisiz)
+   ===================================================================== */
 
-N = len(o)                                   # modeldeki kadro
-ort_gun = o["toplam_calisma"].mean()         # kişi başı aylık çalışma günü (izin düşülmüş, mesai dahil)
-F = g["fazla_toplam"].sum()                  # ihtiyacın üstü kişi-gün
-E = g["eksik_toplam"].sum()                  # ihtiyacın altı kişi-gün
 
-# 1) ay toplamı yöntemi (alt sınır)
-fazla_1 = (F - E) / ort_gun
-gerekli_1 = N - fazla_1
+/* ---------------------------------------------------------------------
+   1) GECİKME DAĞILIMI: yurt dışı POS işlemleri kaç gün sonra post ediliyor?
+      (tek ay örneği yeterli)
+   --------------------------------------------------------------------- */
+SELECT TRUNC(a.transaction_post_date) - TRUNC(a.card_transaction_date) AS gecikme_gun,
+       COUNT(*)                                                        AS islem_sayisi,
+       ROUND(RATIO_TO_REPORT(COUNT(*)) OVER () * 100, 2)               AS yuzde
+FROM   edw.trx_card_transaction a
+WHERE  a.transaction_post_date >= DATE '2026-09-01'
+  AND  a.transaction_post_date <  DATE '2026-10-15'
+  AND  a.card_transaction_date >= DATE '2026-09-01'
+  AND  a.card_transaction_date <  DATE '2026-10-01'
+  AND  a.transaction_terminal_tp_id = 11
+  AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+  AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+GROUP BY TRUNC(a.transaction_post_date) - TRUNC(a.card_transaction_date)
+ORDER BY gecikme_gun;
 
-# 2) en sıkışık gün yöntemi - SADECE HAFTA İÇİ (hafta sonunda model ihtiyaç kadar çalıştırıp kalanı off yapıyor)
-g["oran"] = g["toplam_talep"] / g["toplam_atanan"]
-hi = g[g["hafta_sonu"] == 0]
-k = hi["oran"].max()
-gerekli_2 = N * k
 
-print(f"kadro N                          : {N}")
-print(f"kişi başı çalışma günü           : {ort_gun:.1f}")
-print(f"ihtiyaç toplamı (kişi-gün)       : {g['toplam_talep'].sum()}")
-print(f"atanan toplamı (kişi-gün)        : {g['toplam_atanan'].sum()}")
-print(f"fazla / eksik (kişi-gün)         : {F} / {E}")
-print(f"1) ay toplamı     -> gereken ≈ {gerekli_1:.0f}  (fazla ≈ {N - gerekli_1:.0f} kişi)")
-print(f"2) en sıkışık gün -> gereken ≈ {gerekli_2:.0f}  (fazla ≈ {N - gerekli_2:.0f} kişi)  [hafta içi oran {k:.3f}]")
-print(f"=> gereken kadro aralığı: {min(gerekli_1, gerekli_2):.0f} - {max(gerekli_1, gerekli_2):.0f}"
-      f"  |  fazla kadro: {N - max(gerekli_1, gerekli_2):.0f} - {N - min(gerekli_1, gerekli_2):.0f} kişi")
+/* ---------------------------------------------------------------------
+   2) AY BAZINDA KARŞILAŞTIRMA: mevcut (A) vs öneri (B)
+      Her seyahat ayı için müşteri sayısı ve toplam tutar
+   --------------------------------------------------------------------- */
+WITH POS_A AS (   -- mevcut: işlem tarihi filtresi
+    SELECT a.party_id,
+           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
+           SUM(CASE WHEN a.transaction_amount_tl > 0 THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
+    FROM   edw.trx_card_transaction a
+    WHERE  a.card_transaction_date >= DATE '2024-10-01'
+      AND  a.card_transaction_date <  DATE '2026-10-01'
+      AND  a.transaction_terminal_tp_id = 11
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
+),
+POS_B AS (   -- öneri: post tarihi filtresi (mailteki sorgu)
+    SELECT a.party_id,
+           LAST_DAY(TRUNC(a.card_transaction_date)) AS seyahat_ay,
+           SUM(CASE WHEN a.transaction_amount_tl > 0 THEN a.transaction_amount_tl ELSE 0 END) AS pos_tutar
+    FROM   edw.trx_card_transaction a
+    WHERE  a.transaction_post_date >= DATE '2024-10-01'
+      AND  a.transaction_post_date <  DATE '2026-10-01'
+      AND  a.transaction_terminal_tp_id = 11
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+    GROUP BY a.party_id, LAST_DAY(TRUNC(a.card_transaction_date))
+)
+SELECT NVL(x.seyahat_ay, y.seyahat_ay)                         AS seyahat_ay,
+       COUNT(x.party_id)                                       AS musteri_A,
+       COUNT(y.party_id)                                       AS musteri_B,
+       SUM(CASE WHEN x.party_id IS NOT NULL AND y.party_id IS NULL THEN 1 ELSE 0 END) AS sadece_A,
+       SUM(CASE WHEN x.party_id IS NULL AND y.party_id IS NOT NULL THEN 1 ELSE 0 END) AS sadece_B,
+       ROUND(SUM(NVL(x.pos_tutar, 0)))                         AS tutar_A,
+       ROUND(SUM(NVL(y.pos_tutar, 0)))                         AS tutar_B,
+       ROUND(SUM(NVL(y.pos_tutar, 0)) / NULLIF(SUM(NVL(x.pos_tutar, 0)), 0) - 1, 4) AS tutar_fark_orani
+FROM   pos_a x
+FULL OUTER JOIN pos_b y
+       ON  y.party_id   = x.party_id
+      AND  y.seyahat_ay = x.seyahat_ay
+GROUP BY NVL(x.seyahat_ay, y.seyahat_ay)
+ORDER BY 1;
 
-print("\nkadroyu belirleyen 5 gün (hafta içi):")
-print(hi.sort_values("oran", ascending=False)[["tarih", "gun", "hafta", "toplam_talep", "toplam_atanan",
-                                               "eksik_toplam", "fazla_toplam", "oran"]].head(5).to_string(index=False))
 
-# hafta bazında hafta içi günlük ortalama: izin = kadro - çalışan - off
-g["izin"] = N - g["toplam_atanan"] - g["toplam_off"]
-h = (g[g["hafta_sonu"] == 0]
-     .groupby("hafta")[["toplam_talep", "toplam_atanan", "eksik_toplam", "fazla_toplam",
-                        "model_off", "off_t_verilen", "off_t2", "izin", "oran"]]
-     .mean().round(2))
-h["gun"] = g[g["hafta_sonu"] == 0].groupby("hafta").size()
-print("\nHAFTA İÇİ GÜNLÜK ORTALAMA (hafta bazında)")
-print(h.to_string())
+/* ---------------------------------------------------------------------
+   3) DEĞİŞKEN ETKİSİ: "son ay yurt dışında" (syh_snap_ay_flg) kaç müşteride değişir?
+      POS'ta A'da olup B'de olmayan Eylül 2026 müşterilerinden,
+      ATM ile zaten 1 olanlar düşülür (ATM tarafı değişmiyor).
+   --------------------------------------------------------------------- */
+WITH POS_A AS (
+    SELECT DISTINCT a.party_id
+    FROM   edw.trx_card_transaction a
+    WHERE  a.card_transaction_date >= DATE '2026-09-01'
+      AND  a.card_transaction_date <  DATE '2026-10-01'
+      AND  a.transaction_terminal_tp_id = 11
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+),
+POS_B AS (
+    SELECT DISTINCT a.party_id
+    FROM   edw.trx_card_transaction a
+    WHERE  a.transaction_post_date >= DATE '2026-09-01'
+      AND  a.transaction_post_date <  DATE '2026-10-01'
+      AND  a.card_transaction_date >= DATE '2026-09-01'      -- Eylül'de yapılan işlemler
+      AND  a.transaction_terminal_tp_id = 11
+      AND  a.trx_card_acptor_cntry_nk NOT IN ('TR', 'TU', 'TUR')
+      AND  a.transaction_entry_tp_id IN (1, 4, 5, 7)
+),
+ATM AS (
+    SELECT DISTINCT c.party_id
+    FROM   dm.cnf_card_financial_trx_aggr c
+    WHERE  c.data_date = DATE '2026-09-30'
+      AND  c.nof_international_atm_trx > 0
+)
+SELECT (SELECT COUNT(*) FROM pos_a)                                  AS eylul_pos_A,
+       (SELECT COUNT(*) FROM pos_b)                                  AS eylul_pos_B,
+       (SELECT COUNT(*) FROM pos_a a
+         WHERE NOT EXISTS (SELECT 1 FROM pos_b b WHERE b.party_id = a.party_id)
+           AND NOT EXISTS (SELECT 1 FROM atm   t WHERE t.party_id = a.party_id)) AS snap_flg_1den_0a_dusen
+FROM   dual;

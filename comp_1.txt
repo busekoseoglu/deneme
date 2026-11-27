@@ -1,15 +1,23 @@
-    # ===== 2026-11-27 EKLENEN - TALEP KAYNAGI =====
-    # "talep" = Model-1 son plani (surplus dahil), "mip_ihtiyac" = surplus oncesi ihtiyac
-    "TALEP_KAYNAGI": "mip_ihtiyac",
-    # =======================================================
+# %% [HÜCRE 8] - MODEL GİRDİLERİNİ HAZIRLA
 
-
-
-TALEP_KAYNAGI = CONFIG["TALEP_KAYNAGI"]
-
-
-
-if "TALEP_KAYNAGI" not in globals() or TALEP_KAYNAGI not in df_talep.columns:
-    raise SystemExit("TALEP_KAYNAGI CONFIG'de yok ya da df_talep'te bu kolon yok.")
+AGENTS = [str(c).strip() for c in df_tam["agent_user_code"]]
+gun_vardiyalari = {}
+talep = {}
+saat = {}
+mip_ihtiyac = {}   # 2026-11-10: surplus öncesi MIP ihtiyacı ([HÜCRE 2]) - kitlede sadece Excel raporu
+if "TALEP_KAYNAGI" not in globals():   # 2026-11-27
+    raise SystemExit("CONFIG'de tanımlı olmalı: TALEP_KAYNAGI -> [CONFIG] hücresini çalıştır.")
+if TALEP_KAYNAGI not in df_talep.columns:
+    raise SystemExit(f"df_talep'te '{TALEP_KAYNAGI}' kolonu yok. Kolonlar: {list(df_talep.columns)}")
+print("talep kaynağı:", TALEP_KAYNAGI)
 for _, row in df_talep.iterrows():
     ds, v, kisi = row["tarih"], row["vardiya"], int(row[TALEP_KAYNAGI])   # 2026-11-27
+    gun_vardiyalari.setdefault(ds, []).append(v)
+    talep[(ds, v)] = kisi
+    saat[(ds, v)] = (row["baslangic"], row["bitis"])
+    if "mip_ihtiyac" in df_talep.columns:
+        mip_ihtiyac[(ds, v)] = int(row["mip_ihtiyac"])
+PLAN_GUNLER = sorted(gun_vardiyalari)
+print(f"agent (tam zamanlı, QUEUE): {len(AGENTS)}")
+print(f"planlanacak gün: {len(PLAN_GUNLER)}")
+print(f"(gün, vardiya) kova: {len(talep)} | toplam kişi-slot: {sum(talep.values())}")

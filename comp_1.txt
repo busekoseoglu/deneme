@@ -5,26 +5,40 @@ g = pd.read_excel(XLS, sheet_name="COVERAGE_GUNLUK")
 o = pd.read_excel(XLS, sheet_name="AGENT_OZET")
 
 N = len(o)                                   # modeldeki kadro
-ort_gun = o["toplam_calisma"].mean()         # kişi başı aylık çalışma günü
+ort_gun = o["toplam_calisma"].mean()         # kişi başı aylık çalışma günü (izin düşülmüş, mesai dahil)
 F = g["fazla_toplam"].sum()                  # ihtiyacın üstü kişi-gün
-E = g["eksik_toplam"].sum()                  # ihtiyacın altı kişi-gün (0'a yakın olmalı)
+E = g["eksik_toplam"].sum()                  # ihtiyacın altı kişi-gün
 
-# 1) ortalama yöntemi
+# 1) ay toplamı yöntemi (alt sınır)
 fazla_1 = (F - E) / ort_gun
-# 2) en yoğun gün yöntemi
+gerekli_1 = N - fazla_1
+
+# 2) en sıkışık gün yöntemi - SADECE HAFTA İÇİ (hafta sonunda model ihtiyaç kadar çalıştırıp kalanı off yapıyor)
 g["oran"] = g["toplam_talep"] / g["toplam_atanan"]
-k = g["oran"].max()
+hi = g[g["hafta_sonu"] == 0]
+k = hi["oran"].max()
 gerekli_2 = N * k
 
-print(f"kadro N                         : {N}")
-print(f"kişi başı çalışma günü          : {ort_gun:.1f}")
-print(f"ihtiyaç toplamı (kişi-gün)      : {g['toplam_talep'].sum()}")
-print(f"atanan toplamı (kişi-gün)       : {g['toplam_atanan'].sum()}")
-print(f"fazla / eksik (kişi-gün)        : {F} / {E}")
-print(f"1) ortalama  -> gereken ≈ {N - fazla_1:.0f}  (fazla ≈ {fazla_1:.0f} kişi)")
-print(f"2) en yoğun  -> gereken ≈ {gerekli_2:.0f}  (fazla ≈ {N - gerekli_2:.0f} kişi)")
-for _ad, _alt in (("hafta içi", g[g["hafta_sonu"] == 0]), ("hafta sonu", g[g["hafta_sonu"] == 1])):
-    print(f"   {_ad:10s} en yüksek oran {_alt['oran'].max():.3f} -> {N * _alt['oran'].max():.0f} kişi")
-print("\nkadroyu belirleyen 5 gün:")
-print(g.sort_values("oran", ascending=False)[["tarih", "gun", "toplam_talep", "toplam_atanan",
-                                              "eksik_toplam", "fazla_toplam", "oran"]].head(5).to_string(index=False))
+print(f"kadro N                          : {N}")
+print(f"kişi başı çalışma günü           : {ort_gun:.1f}")
+print(f"ihtiyaç toplamı (kişi-gün)       : {g['toplam_talep'].sum()}")
+print(f"atanan toplamı (kişi-gün)        : {g['toplam_atanan'].sum()}")
+print(f"fazla / eksik (kişi-gün)         : {F} / {E}")
+print(f"1) ay toplamı     -> gereken ≈ {gerekli_1:.0f}  (fazla ≈ {N - gerekli_1:.0f} kişi)")
+print(f"2) en sıkışık gün -> gereken ≈ {gerekli_2:.0f}  (fazla ≈ {N - gerekli_2:.0f} kişi)  [hafta içi oran {k:.3f}]")
+print(f"=> gereken kadro aralığı: {min(gerekli_1, gerekli_2):.0f} - {max(gerekli_1, gerekli_2):.0f}"
+      f"  |  fazla kadro: {N - max(gerekli_1, gerekli_2):.0f} - {N - min(gerekli_1, gerekli_2):.0f} kişi")
+
+print("\nkadroyu belirleyen 5 gün (hafta içi):")
+print(hi.sort_values("oran", ascending=False)[["tarih", "gun", "hafta", "toplam_talep", "toplam_atanan",
+                                               "eksik_toplam", "fazla_toplam", "oran"]].head(5).to_string(index=False))
+
+# hafta bazında hafta içi günlük ortalama: izin = kadro - çalışan - off
+g["izin"] = N - g["toplam_atanan"] - g["toplam_off"]
+h = (g[g["hafta_sonu"] == 0]
+     .groupby("hafta")[["toplam_talep", "toplam_atanan", "eksik_toplam", "fazla_toplam",
+                        "model_off", "off_t_verilen", "off_t2", "izin", "oran"]]
+     .mean().round(2))
+h["gun"] = g[g["hafta_sonu"] == 0].groupby("hafta").size()
+print("\nHAFTA İÇİ GÜNLÜK ORTALAMA (hafta bazında)")
+print(h.to_string())
